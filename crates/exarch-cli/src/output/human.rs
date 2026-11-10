@@ -29,6 +29,7 @@ use exarch_core::IssueSeverity;
 use exarch_core::LinkTarget;
 use exarch_core::ManifestEntryKind;
 use exarch_core::MarkOutcome;
+use exarch_core::MarkState;
 use exarch_core::Skips;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
@@ -220,21 +221,25 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
     }
 
     /// The one-line summary of mark propagation, nothing when it was not
-    /// requested, and a warning line when some objects could not be marked.
+    /// requested, and a warning line when the outcome is incomplete. A state
+    /// without wording here prints its core token.
     fn write_mark_outcome(&mut self, outcome: MarkOutcome) -> io::Result<()> {
         let summary = match outcome {
             MarkOutcome::Propagated { marked, failed } => {
                 format!("copied to {marked} items, {failed} failed")
             }
-            MarkOutcome::Unmarked => "archive is not marked, nothing copied".to_owned(),
-            MarkOutcome::Unreadable => "archive mark unreadable, nothing copied".to_owned(),
-            MarkOutcome::UnsupportedPlatform => {
-                "not supported on this platform, nothing copied".to_owned()
-            }
-            MarkOutcome::NotRequested | _ => return Ok(()),
+            other => match other.state() {
+                MarkState::NotRequested => return Ok(()),
+                MarkState::Unmarked => "archive is not marked, nothing copied".to_owned(),
+                MarkState::Unreadable => "archive mark unreadable, nothing copied".to_owned(),
+                MarkState::UnsupportedPlatform => {
+                    "not supported on this platform, nothing copied".to_owned()
+                }
+                state => state.as_str().to_owned(),
+            },
         };
         emit_line(&mut self.out, format_args!("  Download mark: {summary}"))?;
-        if outcome.has_failures() || outcome == MarkOutcome::Unreadable {
+        if outcome.is_incomplete() {
             emit_line(
                 &mut self.out,
                 format_args!("  warning: some extracted items did not receive the download mark"),

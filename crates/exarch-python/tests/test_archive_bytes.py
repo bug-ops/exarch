@@ -103,7 +103,7 @@ def test_bytearray_is_accepted():
 def test_verify_passes_a_clean_archive(data):
     report = exarch.verify_archive_bytes(data)
 
-    assert report.is_safe()
+    assert report.is_safe
     assert report.integrity_status == "SKIPPED"
 
 

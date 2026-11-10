@@ -8,7 +8,6 @@ use crate::commands::CommandResult;
 use crate::commands::Outcome;
 use crate::commands::security_config;
 use crate::error::ConflictAdvice;
-use crate::error::add_archive_context;
 use crate::error::convert_error;
 use crate::error::convert_error_with_advice;
 use crate::interrupt;
@@ -218,18 +217,63 @@ impl WriteMode {
         }
     }
 
-    /// The up-front destination check of an unstaged mode, with the advice
-    /// its refusal gives; staged modes write nothing into the destination
-    /// until the end and need none.
-    const fn destination_check(self) -> Option<(DestinationCheck, ConflictAdvice)> {
+    /// The up-front destination check of an unstaged mode; staged modes write
+    /// nothing into the destination until the end and need none.
+    const fn destination_check(self) -> Option<DestinationCheck> {
         match self {
-            Self::Safe => Some((DestinationCheck::Vacant, ConflictAdvice::UseForce)),
-            Self::Force => Some((
-                DestinationCheck::Replaceable,
-                ConflictAdvice::ForceCannotReplace,
-            )),
+            Self::Safe => Some(DestinationCheck::Vacant),
+            Self::Force => Some(DestinationCheck::Replaceable),
             Self::Atomic | Self::AtomicReplace => None,
         }
+    }
+
+    /// The advice for an occupant the write phase refused; where `--force` is
+    /// already on it names no subset, since the occupant's maker may be the
+    /// archive itself.
+    fn write_advice(self) -> ConflictAdvice {
+        match self {
+            Self::Safe | Self::Atomic => ConflictAdvice::UseForce,
+            Self::Force | Self::AtomicReplace => ConflictAdvice::ForceCannotReplace(Box::default()),
+        }
+    }
+
+    /// Fails with the refusal of this mode's destination check, advised for
+    /// what the user can do about it.
+    ///
+    /// A refused run without `--force` is advised to use it only when
+    /// `--force` would replace every occupant; otherwise the hint names the
+    /// occupants it does not replace. The error keeps the first refusal's
+    /// full conflict list either way.
+    fn check_destination(
+        self,
+        listed: &ListedArchive,
+        output_dir: &Path,
+        archive: &Path,
+    ) -> Result<()> {
+        let Some(check) = self.destination_check() else {
+            return Ok(());
+        };
+        let Err(refusal) = listed.check_destination(output_dir, check) else {
+            return Ok(());
+        };
+        let advice = match (self, &refusal) {
+            (Self::Safe, ArchiveError::DestinationOccupied { .. }) => {
+                match listed.check_destination(output_dir, DestinationCheck::Replaceable) {
+                    Ok(()) => ConflictAdvice::UseForce,
+                    Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
+                        ConflictAdvice::ForceCannotReplace(conflicts)
+                    }
+                    Err(_) => ConflictAdvice::ForceCannotReplace(Box::default()),
+                }
+            }
+            _ => ConflictAdvice::ForceCannotReplace(Box::default()),
+        };
+        Err(convert_error_with_advice(
+            Operation::Extract,
+            refusal,
+            archive,
+            &advice,
+        ))
     }
 }
 
@@ -260,6 +304,7 @@ impl ExtractPlan {
         output_dir: &Path,
         config: &SecurityConfig,
         progress: &mut dyn ProgressCallback,
+        advice: &ConflictAdvice,
     ) -> Result<ExtractionReport> {
         let result = match self {
             Self::Stream { options } => ExtractRequest::new(config)
@@ -268,7 +313,7 @@ impl ExtractPlan {
                 .extract(archive, output_dir),
             Self::Listed { listed, options } => (*listed).extract(output_dir, &options, progress),
         };
-        add_archive_context(Operation::Extract, result, archive)
+        result.map_err(|err| convert_error_with_advice(Operation::Extract, err, archive, advice))
     }
 }
 
@@ -304,11 +349,7 @@ fn plan_extraction(
     }
 
     let listed = list_for_extract(&args.archive, config, reuse, &mut guard.watcher())?;
-    if let Some((check, advice)) = mode.destination_check() {
-        listed.check_destination(output_dir, check).map_err(|err| {
-            convert_error_with_advice(Operation::Extract, err, &args.archive, advice)
-        })?;
-    }
+    mode.check_destination(&listed, output_dir, &args.archive)?;
     Ok(ExtractPlan::Listed {
         listed: Box::new(listed),
         options: ListedExtractOptions::default()
@@ -355,7 +396,13 @@ pub fn execute(
         BarLength::Known(listed_entry_count(manifest, &config))
     });
     let mut progress = progress_for(mode, length, Operation::Extract, &guard);
-    let result = plan.run(&args.archive, &output_dir, &config, progress.as_mut());
+    let result = plan.run(
+        &args.archive,
+        &output_dir,
+        &config,
+        progress.as_mut(),
+        &write_mode.write_advice(),
+    );
     drop(progress);
     drop(guard);
     let report = result?;

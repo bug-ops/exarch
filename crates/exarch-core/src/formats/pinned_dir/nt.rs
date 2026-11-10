@@ -95,10 +95,12 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
 use windows_sys::Win32::Storage::FileSystem::FileIdInfo;
 use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
 use windows_sys::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_POSIX_SEMANTICS;
 use windows_sys::Win32::System::WindowsProgramming::FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
@@ -196,14 +198,45 @@ enum Target<'a> {
 /// the handle of the file it belongs to; never joined to a path string.
 const ZONE_STREAM: &str = ":Zone.Identifier";
 
+/// Whether the volume `file` lives on supports named streams; FAT, exFAT and
+/// some network shares do not.
+fn volume_names_streams(file: &File) -> io::Result<bool> {
+    let mut flags = 0_u32;
+    // SAFETY: the handle is live for the call and every output pointer is
+    // either null (not requested, with a zero size) or valid for writes.
+    let queried = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            &raw mut flags,
+            null_mut(),
+            0,
+        )
+    };
+    if queried == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags & FILE_NAMED_STREAMS != 0)
+}
+
 /// Reads the `Zone.Identifier` stream of the file `file` is open on, at most
 /// `limit` bytes plus one so the caller can tell an oversized stream from one
-/// that fits; `None` when the file has no such stream.
+/// that fits; `None` when the file has no such stream, which includes a
+/// volume that supports no streams.
+///
+/// A volume query that itself fails is not taken for "no streams": the stream
+/// read then decides, and its error stays an error.
 ///
 /// # Errors
 ///
-/// The OS error of the open or the read, including a volume without streams.
+/// The OS error of the open or the read.
 pub(crate) fn read_zone_stream(file: &File, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    if matches!(volume_names_streams(file), Ok(false)) {
+        return Ok(None);
+    }
     let request = Request {
         kind: Kind::NonDirectory,
         ..Request::open(FILE_GENERIC_READ)
@@ -722,6 +755,18 @@ pub(in crate::formats) fn file_id(handle: BorrowedHandle<'_>) -> Option<(u64, u1
 /// every file: it names nothing, so it must not compare equal to itself.
 fn nonzero_file_id(identifier: [u8; 16]) -> Option<u128> {
     Some(u128::from_le_bytes(identifier)).filter(|&id| id != 0)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod stream_volume_tests {
+    use super::volume_names_streams;
+
+    #[test]
+    fn the_volume_of_a_temp_file_names_streams() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(volume_names_streams(&file).unwrap());
+    }
 }
 
 #[cfg(test)]

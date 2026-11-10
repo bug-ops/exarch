@@ -3074,6 +3074,28 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_propagation_covers_every_core_variant() {
+        for core in CoreMarkPropagation::ALL {
+            let policy = MarkPropagation::try_from(*core).unwrap();
+            assert_eq!(CoreMarkPropagation::from(policy), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_mark_propagation_union_matches_core() {
+        let values: Vec<_> = CoreMarkPropagation::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type MarkPropagation = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
     fn test_staging_covers_every_core_variant() {
         for core in CoreStaging::ALL {
             let staging = Staging::try_from(*core).unwrap();

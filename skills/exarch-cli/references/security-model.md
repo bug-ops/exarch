@@ -14,7 +14,7 @@ Context for explaining refusals. A rejection for any reason here is the pipeline
 
 ## Download mark
 
-Extended attributes, ACLs and alternate data streams stored in an archive are never restored. The only mark an extracted file can get is a copy of the archive file's own download-origin mark, and only with `--mark-propagation when-marked` (default `never`): read through the archive's open handle, written through the handle that created each file, never derived from entry names or content. See `extract.md`.
+Extended attributes, ACLs and alternate data streams stored in an archive are never restored. The only mark an extracted file can get is a copy of the archive file's own download-origin mark, and only with `--mark-propagation when-marked` (default `never`): read through the archive's open handle, written through the handle that created each file, never derived from entry names or content. A source volume that cannot hold named streams has no mark to copy (`unmarked`). See `extract.md`.
 
 ## Decoder memory (no CLI flag)
 

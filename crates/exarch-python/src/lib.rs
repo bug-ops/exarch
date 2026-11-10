@@ -376,10 +376,7 @@ fn list_archive(
 
     catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
-            let volume = destination.as_ref().map_or_else(
-                || Ok(VolumeIdentity::default()),
-                |destination| VolumeIdentity::of_destination(destination.as_ref()),
-            )?;
+            let volume = VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
             ListRequest::new(&config)
                 .with_options(options)
                 .list(&archive_path)
@@ -418,7 +415,7 @@ fn list_archive(
 /// from exarch import verify_archive
 ///
 /// report = verify_archive("archive.tar.gz")
-/// if report.is_safe():
+/// if report.is_safe:
 ///     print("Archive is safe to extract")
 /// else:
 ///     for issue in report.issues:

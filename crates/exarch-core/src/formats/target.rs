@@ -15,6 +15,7 @@ use super::zip_reuse::Retained;
 use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::Malformation;
+use crate::OccupiedBy;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -22,6 +23,7 @@ use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::refuse_hardlink_replace;
 use crate::mark::MarkRun;
 use crate::security::RawMode;
 use crate::security::admitted::EntrySize;
@@ -552,10 +554,30 @@ impl ExtractTarget for HostTarget<'_> {
                     OccupantAction::Skip => {
                         common::record_duplicate_skip(tally.report, link.as_path())
                     }
-                    OccupantAction::Replace(_) => {
-                        Err(ArchiveError::from(Malformation::DuplicateEntry {
-                            path: link.as_path().to_path_buf(),
-                        }))
+                    OccupantAction::Replace(permit) => {
+                        let found = link_dir.probe(link_leaf)?;
+                        let by = if found.is_some()
+                            && self.root.created().created_here(
+                                &link_dir,
+                                link_leaf,
+                                link.as_path(),
+                            ) {
+                            OccupiedBy::Archive
+                        } else {
+                            OccupiedBy::Existing
+                        };
+                        Err(refuse_hardlink_replace(
+                            permit,
+                            found,
+                            link.as_path(),
+                            by,
+                            || {
+                                common::destination_occupied(
+                                    self.root.dest().as_path(),
+                                    link.as_path(),
+                                )
+                            },
+                        ))
                     }
                 };
             }

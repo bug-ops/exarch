@@ -19,13 +19,14 @@ use crate::SecurityConfig;
 use crate::SkipKind;
 use crate::closed_enum::closed_enum;
 use crate::error::Violation;
-use crate::formats::common::destination_occupied;
 use crate::formats::common::is_extension_allowed;
+use crate::formats::common::occupied_without_destination;
 use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
 use crate::formats::occupant::is_run_duplicate;
+use crate::formats::occupant::refuse_unless_duplicate;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
@@ -40,6 +41,7 @@ use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::PlaceError;
+use crate::security::fs_view::Placement;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::normalized_display;
@@ -283,8 +285,8 @@ impl VolumeIdentity {
     ///
     /// # Errors
     ///
-    /// [`ArchiveError::Io`] when no ancestor of `destination` can be resolved
-    /// or probed.
+    /// [`ArchiveError::DestinationNotAccessible`] naming `destination` when no
+    /// ancestor of it can be resolved or probed.
     ///
     /// # Examples
     ///
@@ -299,8 +301,33 @@ impl VolumeIdentity {
     /// # }
     /// ```
     pub fn of_destination(destination: &Path) -> Result<Self> {
-        let existing = nearest_existing_ancestor(destination)?;
-        Ok(Self::from_identity(identity_of(&existing)?))
+        nearest_existing_ancestor(destination)
+            .and_then(|existing| identity_of(&existing))
+            .map(Self::from_identity)
+            .map_err(|error| ArchiveError::DestinationNotAccessible {
+                path: destination.to_path_buf(),
+                error,
+            })
+    }
+
+    /// The identity basis for an optional destination: the default
+    /// [`FileIds`](Self::FileIds) when there is none, otherwise
+    /// [`of_destination`](Self::of_destination).
+    ///
+    /// # Errors
+    ///
+    /// As [`of_destination`](Self::of_destination).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::VolumeIdentity;
+    ///
+    /// assert_eq!(VolumeIdentity::of_optional(None)?, VolumeIdentity::FileIds);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn of_optional(destination: Option<&Path>) -> Result<Self> {
+        destination.map_or_else(|| Ok(Self::default()), Self::of_destination)
     }
 
     const fn from_identity(identity: FileIdentity) -> Self {
@@ -318,7 +345,7 @@ impl VolumeIdentity {
 /// the lookup itself fails: Windows reports such a path as not found.
 fn nearest_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
     for (skipped, candidate) in path.ancestors().enumerate() {
-        let candidate = if candidate.as_os_str().is_empty() {
+        let candidate = if candidate.is_empty() {
             Path::new(".")
         } else {
             candidate
@@ -339,6 +366,7 @@ fn nearest_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
 struct JudgeRun {
     hardlinks: HardlinkTracker,
     keys: RunKeys,
+    claims: LandingClaims,
 }
 
 /// The paths the run created, in the spelling extraction records them under
@@ -370,15 +398,22 @@ impl RunKeys {
             Self::Spelling(spelled) => spelled.contains(rel),
         }
     }
+}
 
-    /// Skips a repeat of an entry the run made, refuses an occupant it did not.
-    fn duplicate_or_refuse(&self, rel: &Path) -> Result<Disposition> {
-        if self.made_here(rel) {
-            Ok(Disposition::Skip(SkipKind::Duplicate))
-        } else {
-            Err(destination_occupied(Path::new(""), rel))
-        }
-    }
+/// Skips a repeat of an entry the run made, refuses an occupant it did not.
+fn skip_duplicate_or_refuse(
+    shape: EntryShape,
+    held: Occupant,
+    rel: &Path,
+    keys: &RunKeys,
+) -> Result<Disposition> {
+    refuse_unless_duplicate(
+        shape,
+        Some(held),
+        || keys.made_here(rel),
+        || occupied_without_destination(rel),
+    )
+    .map(|_| Disposition::Skip(SkipKind::Duplicate))
 }
 
 impl ArchiveManifest {
@@ -524,36 +559,37 @@ impl ArchiveManifest {
         let mut state = JudgeRun {
             hardlinks: HardlinkTracker::new(),
             keys: RunKeys::new(volume),
+            claims: LandingClaims::default(),
         };
-        let claims = LandingClaims::default();
         let is_hardlink =
             |entry: &ArchiveEntry| matches!(entry.kind, ManifestEntryKind::Hardlink { .. });
-        let mut land_entry = |entry: &ArchiveEntry| {
-            judge(
-                entry,
-                self.selection(),
-                config,
-                &root,
-                &mut tree,
-                &mut state,
-                &claims,
-            )
-        };
-        let mut judged: Vec<Option<Result<Disposition>>> = Vec::with_capacity(self.entries().len());
-        // Extraction creates hardlinks after every other entry, so a target
-        // that appears later in the archive still exists.
+        let selection = self.selection();
+        // Extraction validates every path at the entry's own position but
+        // creates hardlinks after every other entry, so a target that appears
+        // later in the archive still exists and a leaf an earlier entry
+        // occupies is a duplicate, not a path to resolve.
+        let mut judged: Vec<Judged> = Vec::with_capacity(self.entries().len());
         for entry in self.entries() {
-            judged.push(if is_hardlink(entry) {
-                None
-            } else {
-                Some(land_entry(entry))
+            let screened = screen(entry, selection, config, &root, &tree);
+            judged.push(match screened {
+                Ok(Gated::Admit(safe)) if is_hardlink(entry) => Judged::Deferred(safe),
+                Ok(Gated::Admit(safe)) => Judged::Done(land(
+                    entry, &safe, selection, config, &root, &mut tree, &mut state,
+                )),
+                Ok(Gated::Skip(kind)) => Judged::Done(Ok(Disposition::Skip(kind))),
+                Err(error) => Judged::Done(Err(error)),
             });
         }
         self.entries()
             .iter()
             .zip(judged)
-            .map(|(entry, first)| {
-                let judgement = first.unwrap_or_else(|| land_entry(entry));
+            .map(|(entry, judged)| {
+                let judgement = match judged {
+                    Judged::Done(judgement) => judgement,
+                    Judged::Deferred(safe) => land(
+                        entry, &safe, selection, config, &root, &mut tree, &mut state,
+                    ),
+                };
                 (entry, judgement)
             })
             .collect::<Vec<_>>()
@@ -643,28 +679,44 @@ fn unusable_target(kind: LinkKind, target: &LinkTarget) -> ArchiveError {
     }
 }
 
-/// What extraction does with an entry it can act on, or the error it raises
-/// when validation refuses the entry or it cannot be placed.
-fn judge(
+/// A listing judgement: settled, or a hardlink whose path is validated and
+/// whose placement waits for every other entry.
+enum Judged {
+    Done(Result<Disposition>),
+    Deferred(SafePath),
+}
+
+/// The validation extraction does at an entry's own position: the path against
+/// the tree of the entries before it, then the selection.
+fn screen(
     entry: &ArchiveEntry,
     selection: &EntrySelection,
     config: &SecurityConfig,
     root: &VirtualRoot,
-    tree: &mut VirtualTree,
-    state: &mut JudgeRun,
-    claims: &LandingClaims,
-) -> Result<Disposition> {
+    tree: &VirtualTree,
+) -> Result<Gated<SafePath>> {
     let original = SafePath::validate_in(&entry.path, root, config, tree)?;
     let ctx = ValidationContext::<VirtualTree>::new(config.allowed.symlinks.is_allowed());
     let run = SelectionRun {
         selection,
         hits: None,
     };
+    route_validated(run, original, entry.kind.shape(), root, config, &ctx, tree)
+}
+
+/// What extraction does with an entry it can act on, or the error it raises
+/// when it cannot be placed.
+fn land(
+    entry: &ArchiveEntry,
+    safe: &SafePath,
+    selection: &EntrySelection,
+    config: &SecurityConfig,
+    root: &VirtualRoot,
+    tree: &mut VirtualTree,
+    state: &mut JudgeRun,
+) -> Result<Disposition> {
+    let claims = &state.claims;
     let shape = entry.kind.shape();
-    let safe = match route_validated(run, original, shape, root, config, &ctx, tree)? {
-        Gated::Admit(safe) => safe,
-        Gated::Skip(kind) => return Ok(Disposition::Skip(kind)),
-    };
     let is_file = matches!(entry.kind, ManifestEntryKind::File { .. });
     if is_file && !is_extension_allowed(safe.as_path(), config) {
         return Ok(Disposition::Skip(SkipKind::ExtensionNotAllowed));
@@ -684,7 +736,7 @@ fn judge(
             claims.require_unambiguous(&entry.path, &mapped)?;
             state
                 .hardlinks
-                .check_hardlink_target(&safe, &mapped, root, config, tree)?;
+                .check_hardlink_target(safe, &mapped, root, config, tree)?;
             Node::File
         }
         ManifestEntryKind::Directory => Node::Dir,
@@ -693,7 +745,7 @@ fn judge(
             require_symlink_creation()?;
             match target {
                 LinkTarget::Recorded(t) => {
-                    SafeSymlink::validate_in(&safe, t, root, config, tree)?;
+                    SafeSymlink::validate_in(safe, t, root, config, tree)?;
                     Node::Symlink(t.clone())
                 }
                 LinkTarget::Unread => Node::OpaqueSymlink,
@@ -703,15 +755,17 @@ fn judge(
             }
         }
     };
-    match tree.project_landing_found(&safe, node.clone(), LandingLimits::Enforced) {
-        Ok((_, true)) if shape != EntryShape::Directory => {
-            state.keys.duplicate_or_refuse(safe.as_path())
+    match tree.project_landing_found(safe, node.clone(), LandingLimits::Enforced) {
+        Ok(Placement::Held { occupant, .. }) if shape != EntryShape::Directory => {
+            skip_duplicate_or_refuse(shape, occupant, safe.as_path(), &state.keys)
         }
-        Ok((landed, held)) => {
-            if !held {
+        Ok(placement) => {
+            if matches!(placement, Placement::New(_)) {
                 state.keys.note(safe.as_path());
             }
-            Ok(Disposition::Extract(LandingPath(landed.into_path_buf())))
+            Ok(Disposition::Extract(LandingPath(
+                placement.into_landing().into_path_buf(),
+            )))
         }
         Err(PlaceError::Conflict(conflict)) => {
             conflicting_placement(shape, &node, safe.as_path(), conflict, &state.keys)
@@ -735,10 +789,10 @@ fn conflicting_placement(
     let occupant = conflict.occupant.filter(|_| conflict.blocked.is_none());
     match occupant {
         Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
-            keys.duplicate_or_refuse(rel)
+            skip_duplicate_or_refuse(shape, held, rel, keys)
         }
         Some(Occupant::Directory) if shape != EntryShape::Directory => {
-            Err(destination_occupied(Path::new(""), rel).occupied_by(OccupiedBy::Archive))
+            Err(occupied_without_destination(rel).occupied_by(OccupiedBy::Archive))
         }
         Some(Occupant::Symlink) if shape == EntryShape::Directory => {
             Err(Violation::ReplacesSymlink {
@@ -1495,7 +1549,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, b"").unwrap();
-        assert!(VolumeIdentity::of_destination(&file.join("sub")).is_err());
+        let probed = file.join("sub");
+        assert_matches!(
+            VolumeIdentity::of_destination(&probed),
+            Err(ArchiveError::DestinationNotAccessible { path, .. }) if path == probed
+        );
     }
 
     /// The identity-keyed preview and extraction skip the last entry as a

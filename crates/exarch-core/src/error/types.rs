@@ -129,26 +129,29 @@ impl std::fmt::Display for RequestedLevel {
     }
 }
 
-/// Who made the entry that occupies a path a run was about to write.
-///
-/// It decides what can help: an existing entry may be overwritten or removed,
-/// while a conflict with an entry the run itself made is inherent to the
-/// archive and no option of the caller changes it.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::OccupiedBy;
-///
-/// assert_ne!(OccupiedBy::Existing, OccupiedBy::Archive);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OccupiedBy {
-    /// An entry that was there before the run, or whose maker is unknown.
-    Existing,
-    /// An entry the run itself created earlier from the archive.
-    Archive,
+closed_enum! {
+    /// Who made the entry that occupies a path a run was about to write.
+    ///
+    /// It decides what can help: an existing entry may be overwritten or removed,
+    /// while a conflict with an entry the run itself made is inherent to the
+    /// archive and no option of the caller changes it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::OccupiedBy;
+    ///
+    /// assert_ne!(OccupiedBy::Existing, OccupiedBy::Archive);
+    /// assert_eq!(OccupiedBy::NAMES, &["existing", "archive"]);
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum OccupiedBy {
+        /// An entry that was there before the run, or whose maker is unknown
+        Existing => "existing",
+        /// An entry the run itself created earlier from the archive
+        Archive => "archive",
+    }
 }
 
 /// Compression ratio of a checked size pair.
@@ -652,6 +655,19 @@ pub enum ArchiveError {
         error: std::io::Error,
     },
 
+    /// A `list` destination exists in a form that cannot be resolved.
+    ///
+    /// Raised before the archive is read, when the destination probe of a
+    /// listing fails (for example a path below a regular file). `error` keeps
+    /// the cause; `path` is a host path and is redacted like any other.
+    #[error("destination is not accessible: {path}: {error}")]
+    DestinationNotAccessible {
+        /// The destination path.
+        path: PathBuf,
+        /// The failure that made the destination unresolvable.
+        error: std::io::Error,
+    },
+
     /// Output file already exists.
     #[error("output file already exists: {path}")]
     OutputExists {
@@ -700,11 +716,14 @@ pub enum ArchiveError {
     /// Raised for [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) and
     /// by
     /// [`ListedArchive::check_destination`](crate::ListedArchive::check_destination).
-    /// `destination` is a host path and is redacted like any other.
-    #[error("destination {} already holds {} of the paths to extract", .destination.display(), .conflicts.len())]
+    /// `destination` is a host path and is redacted like any other; it is
+    /// `None` when there is no host destination (the in-memory sink and the
+    /// `list` model).
+    #[error("{}", OccupiedMessage(.destination.as_deref(), .conflicts.len()))]
     DestinationOccupied {
-        /// The extraction destination.
-        destination: PathBuf,
+        /// The extraction destination, or `None` when the run has no host
+        /// destination.
+        destination: Option<PathBuf>,
         /// The archive-relative paths that are occupied.
         conflicts: Box<[PathBuf]>,
         /// Who made the occupying entry.
@@ -955,6 +974,7 @@ impl ArchiveError {
             | Self::TarAmbiguity(_)
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1006,6 +1026,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1072,6 +1093,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1115,6 +1137,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1157,6 +1180,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1269,6 +1293,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1301,6 +1326,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1449,6 +1475,20 @@ impl ArchiveError {
             }
             other => other,
         }
+    }
+}
+
+/// Renders [`ArchiveError::DestinationOccupied`], naming the destination only
+/// when there is one.
+struct OccupiedMessage<'a>(Option<&'a std::path::Path>, usize);
+
+impl std::fmt::Display for OccupiedMessage<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("destination ")?;
+        if let Some(destination) = self.0 {
+            write!(f, "{} ", destination.display())?;
+        }
+        write!(f, "already holds {} of the paths to extract", self.1)
     }
 }
 
@@ -2256,6 +2296,13 @@ mod tests {
                 },
                 Classes::NONE,
             ),
+            (
+                ArchiveError::DestinationNotAccessible {
+                    path: path(),
+                    error: io_error(),
+                },
+                Classes::NONE,
+            ),
             (ArchiveError::OutputExists { path: path() }, Classes::NONE),
             (
                 ArchiveError::InvalidCompressionLevel {
@@ -2278,7 +2325,7 @@ mod tests {
             (ArchiveError::Cancelled, Classes::NONE.cancelled()),
             (
                 ArchiveError::DestinationOccupied {
-                    destination: path(),
+                    destination: Some(path()),
                     conflicts: Box::new([path()]),
                     by: OccupiedBy::Existing,
                 },

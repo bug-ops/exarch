@@ -122,6 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `raise_hint`, the forced-exit hint, signal mapping and the interrupt tests are typed and synchronised on events (#1135, #1141).
 - Python, Node: stale solid-ratio, decode-reuse and `modified` unit documentation is corrected and guarded by tests (#1136, #1141).
 - Core: `verify` says extraction fails over a directory occupant unless existing entries are skipped (#1132, #1141).
+- Core: `MarkState` is the token table of `MarkOutcome`, `MarkScope` always stamps the mark outcome, 7z writes reuse `finish_written` behind a `FileWrite` context, and the CLI, Python and Node take mark and occupied-by tokens from core (#1158, #1160, #1170).
+- Breaking: Python `CreationReport.compression_ratio`, `CreationReport.compression_percentage`, `VerificationReport.is_safe` and `VerificationReport.has_critical_issues` are properties (#1160, #1170).
+- Breaking: `ArchiveError::DestinationOccupied::destination` is `Option<PathBuf>`, `FfiDetail::Occupied` gains `by`, `ArchiveError::DestinationNotAccessible` names an unreachable destination, `OutputExistsError.by` and Node `by` report who made the occupant, and Node `path` on `OUTPUT_EXISTS` is optional (#1158, #1159, #1161, #1170).
+- Breaking: under `--force` a file or link over a symlink fails up front as `EXISTING_SYMLINK` instead of `IoError`, and an archive's own duplicate hardlink fails as `OutputExists` with `by: archive` instead of `DUPLICATE_ENTRY` (#1154, #1157, #1170).
 
 ### Fixed
 
@@ -169,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: the release build and validate jobs run with `contents: read` and without persisted checkout credentials (#1138, #1146).
 - Docs: the leftover `0311` backup on OpenBSD and DragonFly and the unverified NetBSD and illumos fallback are documented (#1137, #1146).
 - CI: the release workflow grants `contents: write` to `github-release` only, keeps `id-token: write` on the publishing jobs, drops persisted checkout credentials and passes expressions to `run:` scripts through `env:` (#1142, #1143, #1151).
+- Core: staging on a FAT32 or exFAT volume on macOS no longer fails the inherited access control entry check; a volume that answers `EINVAL` or `ENOTSUP` for the ACL read has no ACL (#1152, #1170).
+- Core: `list` and `verify` model a hardlink after a self-pointing symlink of the same name the way extraction does, and the in-memory sink agrees (#1153, #1170).
+- Core: a TAR hardlink over an existing entry under `--force` is a typed occupant refusal instead of `DUPLICATE_ENTRY`, and `--force` refuses a directory at a file landing, a hardlink over an existing entry and a link over a symlink before it writes (#1154, #1157, #1170).
+- CLI: the `--force` hints name what `--force` cannot replace and no longer promise `--atomic --force`; `list` without a selection flag ignores `--destination` and its error names the destination once (#1157, #1161, #1170).
+- Core: the Windows mark read treats a volume without named streams as unmarked, and a failed volume query stays unreadable (#1150, #1170).
+- CI: `test-release` builds with LTO off, 256 codegen units and opt-level 1 under a 30 minute timeout, and the release workflow no longer restores build caches (#1156, #1147, #1170).
 
 ## [0.9.0] - 2026-11-05
 

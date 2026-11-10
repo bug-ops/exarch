@@ -82,7 +82,7 @@ def test_extract_and_verify_accept_a_file():
     data = _tar("w:gz")
     result = exarch.extract_archive_to_memory(io.BytesIO(data))
     assert [(e.path, e.data) for e in result.entries] == [("a.txt", b"alpha")]
-    assert exarch.verify_archive_bytes(io.BytesIO(data)).is_safe()
+    assert exarch.verify_archive_bytes(io.BytesIO(data)).is_safe
 
 
 def test_progress_variants_accept_a_file():
@@ -93,7 +93,7 @@ def test_progress_variants_accept_a_file():
     assert seen == ["a.txt"]
     result = exarch.extract_archive_to_memory_with_progress(io.BytesIO(_tar()))
     assert len(result.entries) == 1
-    assert exarch.verify_archive_bytes_with_progress(io.BytesIO(_tar())).is_safe()
+    assert exarch.verify_archive_bytes_with_progress(io.BytesIO(_tar())).is_safe
 
 
 def test_archive_starts_at_the_current_position():

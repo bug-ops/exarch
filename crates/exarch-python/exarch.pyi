@@ -49,6 +49,7 @@ _MarkPropagation = Literal["never", "when_marked"]
 _MarkState = Literal[
     "not_requested", "unsupported_platform", "unmarked", "unreadable", "propagated"
 ]
+_OccupiedBy = Literal["existing", "archive"]
 _Restore = Literal["not_needed", "restored", "failed"]
 _ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
@@ -1217,7 +1218,7 @@ class ExtractionReport:
         ...
 
     @property
-    def mark_propagation(self) -> _MarkState:
+    def mark_propagation(self) -> _MarkState | str:
         """What download-origin mark propagation did."""
         ...
 
@@ -1309,12 +1310,14 @@ class CreationReport:
         """Whether any warnings were generated."""
         ...
 
+    @property
     def compression_ratio(self) -> float:
-        """Returns the compression ratio (uncompressed / compressed)."""
+        """The compression ratio (uncompressed / compressed)."""
         ...
 
+    @property
     def compression_percentage(self) -> float:
-        """Returns the compression percentage (space saved)."""
+        """The compression percentage (space saved)."""
         ...
 
 class LinkTarget:
@@ -1729,12 +1732,14 @@ class VerificationReport:
         """Security check result."""
         ...
 
+    @property
     def is_safe(self) -> bool:
-        """Returns true if the archive is safe (no Medium-or-higher severity issues)."""
+        """Whether the archive is safe (no Medium-or-higher severity issues)."""
         ...
 
+    @property
     def has_critical_issues(self) -> bool:
-        """Returns true if there are any critical severity issues."""
+        """Whether there are any critical severity issues."""
         ...
 
 ProgressCallbackFn = Callable[[str, int | None, int, int], None]
@@ -2469,9 +2474,18 @@ class OutputExistsError(ArchiveError, FileExistsError):
         conflicts: The archive-relative paths an extraction with
             ``existing_files == "refuse"`` found occupied; ``None`` for a
             creation output that exists.
+        by: Who made the occupant of the first refused path: ``"existing"``
+            (it was there before the run, or its maker is unknown: removing
+            it or choosing another destination helps, and
+            ``existing_files == "overwrite"`` replaces only a file or symlink
+            occupant of a file or symlink entry) or ``"archive"`` (an earlier
+            entry of the same archive, which no option resolves); a future
+            core value reads as a plain ``str``; ``None`` for a creation
+            output that exists.
     """
 
     conflicts: list[str] | None
+    by: _OccupiedBy | str | None
 
 class SourceNotFoundError(ArchiveError, FileNotFoundError):
     """

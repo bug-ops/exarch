@@ -106,7 +106,7 @@ impl DualClass {
 static OUTPUT_EXISTS: DualClass = DualClass::new(
     "OutputExistsError",
     PyFileExistsError::type_object,
-    &["conflicts"],
+    &["conflicts", "by"],
 );
 static SOURCE_NOT_FOUND: DualClass =
     DualClass::new("SourceNotFoundError", PyFileNotFoundError::type_object, &[]);
@@ -292,7 +292,10 @@ impl PyNameCollision {
 fn attach_detail(err: &PyErr, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
-        FfiDetail::Occupied { conflicts } => set_attr(err, "conflicts", Some(conflicts.into_vec())),
+        FfiDetail::Occupied { conflicts, by } => {
+            set_attr(err, "conflicts", Some(conflicts.into_vec()));
+            set_optional_str(err, "by", Some(by.as_str()));
+        }
         FfiDetail::Replace(restore) => {
             set_optional_str(err, "restore", Some(restore.kind().as_str()));
             if let FfiRestore::Failed { backup_path } = restore {
@@ -1396,7 +1399,7 @@ mod tests {
     fn test_destination_occupied_names_its_conflicts() {
         pyo3::Python::initialize();
         let err = CoreError::DestinationOccupied {
-            destination: PathBuf::from("/srv/out"),
+            destination: Some(PathBuf::from("/srv/out")),
             conflicts: vec![PathBuf::from("a/b.txt")].into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         };
@@ -1413,6 +1416,23 @@ mod tests {
             assert_eq!(conflicts, vec!["a/b.txt"]);
         });
         assert_eq!(attr_str(&py_err, "code").as_deref(), Some("OUTPUT_EXISTS"));
+        assert_eq!(attr_str(&py_err, "by").as_deref(), Some("existing"));
+    }
+
+    #[test]
+    fn test_destination_occupied_reports_who_made_the_occupant() {
+        use exarch_core::OccupiedBy;
+
+        pyo3::Python::initialize();
+        for &by in OccupiedBy::ALL {
+            let py_err = convert_error(CoreError::DestinationOccupied {
+                destination: None,
+                conflicts: vec![PathBuf::from("a")].into_boxed_slice(),
+                by,
+            });
+            assert_eq!(attr_str(&py_err, "by").as_deref(), Some(by.as_str()));
+            assert_eq!(attr_str(&py_err, "filename"), None);
+        }
     }
 
     #[test]

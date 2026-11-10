@@ -54,7 +54,7 @@ def test_symlink_without_a_target_is_link_target(temp_dir):
     assert "symlink missing target" in str(error)
 
 
-def test_duplicate_hardlink_is_duplicate_entry(temp_dir):
+def test_duplicate_hardlink_within_the_archive_is_an_archive_conflict(temp_dir):
     target = tarfile.TarInfo("t")
     target.size = 1
     data = _tar_of(
@@ -64,12 +64,34 @@ def test_duplicate_hardlink_is_duplicate_entry(temp_dir):
             (_link("h", tarfile.LNKTYPE, "t"), None),
         ]
     )
+    archive = temp_dir / "dup.tar"
+    archive.write_bytes(data)
     config = exarch.SecurityConfig().with_allow_hardlinks()
     options = exarch.ExtractionOptions().with_existing_files("overwrite")
 
-    error = _extract(temp_dir, "dup.tar", data, config, options)
+    with pytest.raises(exarch.OutputExistsError) as caught:
+        exarch.extract_archive(archive, temp_dir / "out", config, options)
 
-    assert error.sub_code == "DUPLICATE_ENTRY"
+    assert caught.value.conflicts == ["h"]
+    assert caught.value.by == "archive"
+
+
+def test_hardlink_over_a_file_already_in_the_destination_is_an_existing_conflict(temp_dir):
+    target = tarfile.TarInfo("t")
+    target.size = 1
+    archive = temp_dir / "over.tar"
+    archive.write_bytes(_tar_of([(target, b"x"), (_link("h", tarfile.LNKTYPE, "t"), None)]))
+    out = temp_dir / "out"
+    out.mkdir()
+    (out / "h").write_bytes(b"old")
+    config = exarch.SecurityConfig().with_allow_hardlinks()
+    options = exarch.ExtractionOptions().with_existing_files("overwrite")
+
+    with pytest.raises(exarch.OutputExistsError) as caught:
+        exarch.extract_archive(archive, out, config, options)
+
+    assert caught.value.conflicts == ["h"]
+    assert caught.value.by == "existing"
 
 
 def test_forged_zip_compressed_size_is_declared_size(temp_dir):

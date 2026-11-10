@@ -166,6 +166,30 @@ fn corpus() -> Vec<Case> {
             &[Item::File("x"), Item::Hard("h", "x"), Item::File("x")],
         ),
         case(
+            "hardlink, then a symlink pointing at itself",
+            &[
+                Item::File(TARGET),
+                Item::Hard("h", TARGET),
+                Item::Sym("h", "h"),
+            ],
+        ),
+        case(
+            "nested hardlink, then a symlink pointing at itself",
+            &[
+                Item::File("d/t"),
+                Item::Hard("d/h", "d/t"),
+                Item::Sym("d/h", "h"),
+            ],
+        ),
+        case(
+            "a symlink pointing at itself, then a hardlink",
+            &[
+                Item::File(TARGET),
+                Item::Sym("h", "h"),
+                Item::Hard("h", TARGET),
+            ],
+        ),
+        case(
             "two symlinks with different targets",
             &[
                 Item::File(TARGET),
@@ -189,6 +213,10 @@ fn corpus() -> Vec<Case> {
         case(
             "file over an implicit parent",
             &[Item::File(TARGET), Item::File("x/a"), Item::File("x")],
+        ),
+        case(
+            "hardlink over a directory",
+            &[Item::File("y"), Item::Dir("x"), Item::Hard("x", "y")],
         ),
         case(
             "regular file named twice",

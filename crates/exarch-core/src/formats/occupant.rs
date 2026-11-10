@@ -13,10 +13,13 @@
 //!
 //! [`ArchiveManifest::dispositions`]: crate::ArchiveManifest::dispositions
 
+use std::path::Path;
+
 use crate::ArchiveError;
 use crate::ExistingFiles;
 use crate::OccupiedBy;
 use crate::Result;
+use crate::formats::common;
 use crate::security::fs_view::Occupant;
 use crate::selection::EntryShape;
 
@@ -85,22 +88,65 @@ impl ExistingFiles {
     ) -> Result<OccupantAction> {
         match self {
             Self::Skip => Ok(OccupantAction::Skip),
-            Self::Refuse => {
-                let found = occupant()?;
-                let made_here = found.is_some() && created_here();
-                match found {
-                    Some(found) if made_here && is_run_duplicate(arriving, found) => {
-                        Ok(OccupantAction::Skip)
-                    }
-                    _ => Err(refusal().occupied_by(if made_here {
-                        OccupiedBy::Archive
-                    } else {
-                        OccupiedBy::Existing
-                    })),
-                }
-            }
+            Self::Refuse => refuse_unless_duplicate(arriving, occupant()?, created_here, refusal)
+                .map(|RunDuplicate(())| OccupantAction::Skip),
             Self::Overwrite => Ok(OccupantAction::Replace(ReplacePermit(()))),
         }
+    }
+}
+
+/// Proof that an occupant is a repeat of an entry the run made, which a run
+/// under [`ExistingFiles::Refuse`] skips.
+#[derive(Debug)]
+pub(crate) struct RunDuplicate(());
+
+/// The `Refuse` rule for one occupied path: a [`RunDuplicate`] when
+/// `occupant` is one that [`is_run_duplicate`] of `arriving` and `created_here`
+/// confirms the run made it, otherwise the error `refusal` builds, saying who
+/// made the occupant ([`OccupiedBy`]).
+///
+/// `created_here` runs only for an occupant that exists.
+///
+/// # Errors
+///
+/// The error built by `refusal`.
+pub(crate) fn refuse_unless_duplicate(
+    arriving: EntryShape,
+    occupant: Option<Occupant>,
+    created_here: impl FnOnce() -> bool,
+    refusal: impl FnOnce() -> ArchiveError,
+) -> Result<RunDuplicate> {
+    let made_here = occupant.is_some() && created_here();
+    match occupant {
+        Some(found) if made_here && is_run_duplicate(arriving, found) => Ok(RunDuplicate(())),
+        _ => Err(refusal().occupied_by(if made_here {
+            OccupiedBy::Archive
+        } else {
+            OccupiedBy::Existing
+        })),
+    }
+}
+
+/// The refusal of a hardlink entry whose path is occupied under
+/// [`ExistingFiles::Overwrite`].
+///
+/// A hardlink never replaces an occupant. A file gives the typed
+/// [`ArchiveError::DestinationOccupied`] built by `refusal`, naming `by` as its
+/// maker; a directory or symlink gives the same error a file or symlink entry
+/// gets there. An occupant that vanished since the create failed counts as an
+/// existing file. The permit proves the policy was `Overwrite`.
+pub(crate) fn refuse_hardlink_replace(
+    _permit: ReplacePermit,
+    occupant: Option<Occupant>,
+    rel: &Path,
+    by: OccupiedBy,
+    refusal: impl FnOnce() -> ArchiveError,
+) -> ArchiveError {
+    match occupant {
+        Some(held @ (Occupant::Directory | Occupant::Symlink)) => {
+            ArchiveError::Io(common::occupant_at_dest_error(rel, held))
+        }
+        Some(Occupant::File) | None => refusal().occupied_by(by),
     }
 }
 

@@ -204,7 +204,7 @@ impl PyExtractionReport {
 
     /// What download-origin mark propagation did: `"not_requested"`,
     /// `"unsupported_platform"`, `"unmarked"`, `"unreadable"` or
-    /// `"propagated"`.
+    /// `"propagated"`; a state added to core later reads under its own token.
     #[getter]
     fn mark_propagation(&self) -> &'static str {
         self.inner.mark.as_str()
@@ -357,10 +357,12 @@ impl PyCreationReport {
         self.inner.has_warnings()
     }
 
+    #[getter]
     fn compression_ratio(&self) -> f64 {
         self.inner.compression_ratio()
     }
 
+    #[getter]
     fn compression_percentage(&self) -> f64 {
         self.inner.compression_percentage()
     }
@@ -1110,10 +1112,12 @@ impl PyVerificationReport {
         self.inner.security_status().as_str()
     }
 
+    #[getter]
     fn is_safe(&self) -> bool {
         self.inner.is_safe()
     }
 
+    #[getter]
     fn has_critical_issues(&self) -> bool {
         self.inner.has_critical_issues()
     }
@@ -1800,6 +1804,16 @@ mod tests {
                 "_MarkPropagation",
                 exarch_core::MarkPropagation::ALL,
                 exarch_core::MarkPropagation::as_str,
+            ),
+            literal_line(
+                "_MarkState",
+                exarch_core::MarkState::ALL,
+                exarch_core::MarkState::as_str,
+            ),
+            literal_line(
+                "_OccupiedBy",
+                exarch_core::OccupiedBy::ALL,
+                exarch_core::OccupiedBy::as_str,
             ),
             literal_line(
                 "_Restore",

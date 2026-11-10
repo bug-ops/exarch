@@ -11,6 +11,7 @@ use crate::output::Dispositions;
 use crate::output::ManifestView;
 use crate::output::OutputFormatter;
 use crate::output::SizeUnits;
+use exarch_core::EntrySelection;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
 use exarch_core::SecurityConfig;
@@ -27,16 +28,19 @@ const fn manifest_view(args: &ListArgs) -> ManifestView {
     }
 }
 
-/// The volume the destination names, or the default when none is given; a
-/// failure names the destination, not the archive.
-fn destination_volume(destination: Option<&Path>) -> Result<VolumeIdentity, CommandError> {
-    destination.map_or_else(
-        || Ok(VolumeIdentity::default()),
-        |path| {
-            VolumeIdentity::of_destination(path)
-                .map_err(|error| CommandError::Other(convert_error(Operation::List, error, path)))
-        },
-    )
+/// The volume the destination names. The probe runs only for a selection, the
+/// one case the destination matters for; a failure names the destination, not
+/// the archive.
+fn destination_volume(
+    destination: Option<&Path>,
+    selection: &EntrySelection,
+    archive: &Path,
+) -> Result<VolumeIdentity, CommandError> {
+    let Some(path) = destination.filter(|_| !selection.is_default()) else {
+        return Ok(VolumeIdentity::default());
+    };
+    VolumeIdentity::of_destination(path)
+        .map_err(|error| CommandError::Other(convert_error(Operation::List, error, archive)))
 }
 
 /// Runs `list`: lists the archive under the selection and prints the manifest.
@@ -49,7 +53,11 @@ fn destination_volume(destination: Option<&Path>) -> Result<VolumeIdentity, Comm
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
 
-    let volume = destination_volume(args.destination.as_deref())?;
+    let volume = destination_volume(
+        args.destination.as_deref(),
+        &config.selection,
+        &args.archive,
+    )?;
 
     let stored_targets = if args.read_link_targets || args.links.allow_symlinks {
         StoredTargets::Read

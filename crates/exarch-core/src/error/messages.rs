@@ -14,6 +14,7 @@ use super::redaction::sanitize_path_for_error;
 use super::replace::Restore;
 use super::replace::RestoreKind;
 use super::types::ArchiveError;
+use super::types::OccupiedBy;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
 use super::types::QuotaKind;
@@ -602,6 +603,8 @@ pub enum FfiDetail {
     Occupied {
         /// The occupied paths.
         conflicts: Box<[String]>,
+        /// Who made the occupying entry.
+        by: OccupiedBy,
     },
     /// What a failed whole-destination replace did to the original.
     Replace(FfiRestore),
@@ -829,7 +832,8 @@ impl ArchiveError {
             Self::Io(io_err) => FfiKind::Io(io_err.kind()),
             Self::InvalidPermissions { .. } => FfiKind::InvalidPermissions,
             Self::Cancelled => FfiKind::Cancelled,
-            Self::OutputReservationLeft { error, .. } => FfiKind::Io(error.kind()),
+            Self::OutputReservationLeft { error, .. }
+            | Self::DestinationNotAccessible { error, .. } => FfiKind::Io(error.kind()),
             Self::ReplaceFailed(failure) => FfiKind::Io(failure.error.kind()),
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
@@ -855,6 +859,7 @@ impl ArchiveError {
             Self::SourceNotFound { .. }
             | Self::OutputExists { .. }
             | Self::DestinationOccupied { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputReservationLeft { .. } => self.redacted_path(),
             Self::Io(_)
             | Self::InvalidArchive(_)
@@ -902,6 +907,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -917,11 +923,12 @@ impl ArchiveError {
     /// The [`FfiErrorMessage::detail`] of a non-partial error.
     fn ffi_detail(&self) -> FfiDetail {
         match self {
-            Self::DestinationOccupied { conflicts, .. } => FfiDetail::Occupied {
+            Self::DestinationOccupied { conflicts, by, .. } => FfiDetail::Occupied {
                 conflicts: conflicts
                     .iter()
                     .map(|path| format_entry_path_for_error(path))
                     .collect(),
+                by: *by,
             },
             Self::ReplaceFailed(failure) => FfiDetail::Replace(match &failure.restore {
                 Restore::NotNeeded => FfiRestore::NotNeeded,
@@ -998,6 +1005,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1040,9 +1048,21 @@ impl ArchiveError {
                 sanitize_io_error_for_error(error)
             ),
             Self::ReplaceFailed(failure) => failure.redacted_description(),
-            Self::DestinationOccupied { conflicts, .. } => format!(
-                "destination {path} already holds {} of the paths to extract",
-                conflicts.len()
+            Self::DestinationOccupied {
+                destination,
+                conflicts,
+                ..
+            } => {
+                let named = destination.as_ref().map(|_| format!("{path} "));
+                format!(
+                    "destination {}already holds {} of the paths to extract",
+                    named.as_deref().unwrap_or_default(),
+                    conflicts.len()
+                )
+            }
+            Self::DestinationNotAccessible { error, .. } => format!(
+                "destination is not accessible: {path}: {}",
+                sanitize_io_error_for_error(error)
             ),
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
             Self::SourceNotAccessible { error, .. } => {
@@ -1217,6 +1237,46 @@ mod tests {
         assert!(!msg.description.contains("/srv/secret"));
     }
 
+    #[test]
+    fn test_occupied_without_destination_names_no_path() {
+        let error = ArchiveError::DestinationOccupied {
+            destination: None,
+            conflicts: Box::new([PathBuf::from("a")]),
+            by: crate::OccupiedBy::Archive,
+        };
+        assert_eq!(
+            error.to_string(),
+            "destination already holds 1 of the paths to extract"
+        );
+        let msg = error.into_ffi_message();
+        assert_eq!(msg.path, None);
+        assert_eq!(
+            msg.description,
+            "destination already holds 1 of the paths to extract"
+        );
+        assert_eq!(
+            msg.detail,
+            FfiDetail::Occupied {
+                conflicts: Box::new(["a".to_string()]),
+                by: crate::OccupiedBy::Archive,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_destination_not_accessible_names_only_the_file_name_in_release() {
+        let error = ArchiveError::DestinationNotAccessible {
+            path: PathBuf::from("/srv/secret/app/sub"),
+            error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
+        };
+        let msg = error.into_ffi_message();
+        assert_eq!(msg.kind, FfiKind::Io(std::io::ErrorKind::NotADirectory));
+        assert_eq!(msg.path.as_deref(), Some("sub"));
+        assert!(msg.description.contains("sub"));
+        assert!(!msg.description.contains("/srv/secret"));
+    }
+
     /// Regression test for #453: `Io` messages must not leak a host path
     /// embedded in the free-form message text in release builds.
     #[test]
@@ -1297,6 +1357,10 @@ mod tests {
                 path: PathBuf::from("test"),
                 error: std::io::Error::other("test"),
             },
+            ArchiveError::DestinationNotAccessible {
+                path: PathBuf::from("test"),
+                error: std::io::Error::other("test"),
+            },
             ArchiveError::OutputExists {
                 path: PathBuf::from("test"),
             },
@@ -1312,7 +1376,7 @@ mod tests {
             },
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
-                destination: PathBuf::from("dest"),
+                destination: Some(PathBuf::from("dest")),
                 conflicts: Box::new([PathBuf::from("a")]),
                 by: crate::OccupiedBy::Existing,
             },
@@ -1473,7 +1537,7 @@ mod tests {
         assert!(path(ArchiveError::OutputExists { path: "a/b".into() }).is_some());
         assert!(
             path(ArchiveError::DestinationOccupied {
-                destination: "out".into(),
+                destination: Some("out".into()),
                 conflicts: Box::new([]),
                 by: crate::OccupiedBy::Existing,
             })
@@ -1521,7 +1585,7 @@ mod tests {
     #[test]
     fn details_are_built_once_and_unwrapped_through_a_partial() {
         let occupied = ArchiveError::DestinationOccupied {
-            destination: PathBuf::from("dest"),
+            destination: Some(PathBuf::from("dest")),
             conflicts: Box::new([PathBuf::from("b"), PathBuf::from("a")]),
             by: crate::OccupiedBy::Existing,
         }
@@ -1529,7 +1593,8 @@ mod tests {
         assert_eq!(
             occupied.into_ffi_message().detail,
             FfiDetail::Occupied {
-                conflicts: Box::new(["b".to_string(), "a".to_string()])
+                conflicts: Box::new(["b".to_string(), "a".to_string()]),
+                by: crate::OccupiedBy::Existing,
             }
         );
 

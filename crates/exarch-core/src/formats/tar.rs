@@ -2085,7 +2085,7 @@ mod tests {
 
     /// Companion to [`test_hardlink_dangling_symlink_at_destination_skipped`]
     /// with `ExistingFiles::Overwrite`: the pre-planted symlink must still be
-    /// rejected as a duplicate-entry error rather than followed.
+    /// refused, naming the symlink, rather than followed.
     #[test]
     #[cfg(unix)]
     fn test_hardlink_dangling_symlink_at_destination_errors_when_skip_disabled() {
@@ -2113,18 +2113,13 @@ mod tests {
         // The regular `target.txt` entry extracts successfully before the
         // hardlink entry fails, so the error arrives wrapped in
         // PartialExtraction; unwrap one level to check the source.
-        match result {
-            Err(ArchiveError::PartialExtraction(partial)) => match partial.cause() {
-                ArchiveError::InvalidArchive(msg) => {
-                    assert!(msg.to_string().contains("duplicate entry"));
-                }
-                other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
-            },
-            Err(ArchiveError::InvalidArchive(msg)) => {
-                assert!(msg.to_string().contains("duplicate entry"));
-            }
-            other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
-        }
+        let cause = match &result {
+            Err(ArchiveError::PartialExtraction(partial)) => partial.cause(),
+            Err(other) => other,
+            Ok(_) => panic!("expected the symlink occupant to be refused"),
+        };
+        assert_matches!(cause, ArchiveError::Io(error)
+            if error.to_string().contains("refusing to replace the existing symlink"));
 
         let link_metadata = std::fs::symlink_metadata(&link_dest).unwrap();
         assert!(link_metadata.file_type().is_symlink());

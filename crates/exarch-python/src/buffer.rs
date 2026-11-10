@@ -1005,7 +1005,7 @@ pub fn list_archive_bytes(
 ///
 /// with open("archive.zip", "rb") as f:
 ///     report = verify_archive_bytes(f.read())
-/// print(report.is_safe())
+/// print(report.is_safe)
 /// ```
 #[pyfunction]
 #[pyo3(signature = (data, config=None, options=None, format=None))]

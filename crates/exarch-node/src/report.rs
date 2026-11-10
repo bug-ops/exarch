@@ -948,7 +948,7 @@ pub struct ExtractionReport {
     pub skipped: SkippedSummary,
     /// What download-origin mark propagation did.
     #[napi(
-        ts_type = "'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated'"
+        ts_type = "'not_requested' | 'unsupported_platform' | 'unmarked' | 'unreadable' | 'propagated' | (string & {})"
     )]
     pub mark_propagation: String,
     /// Files (and, on macOS, directories) that now carry the mark.
@@ -2668,6 +2668,25 @@ mod tests {
         assert!(
             include_str!("../index.d.ts").lines().any(|l| l == line),
             "index.d.ts out of sync with CreatableFormat::NAMES, expected:\n{line}"
+        );
+    }
+
+    #[test]
+    fn test_mark_propagation_field_is_the_core_states_widened() {
+        let mut union: Vec<String> = exarch_core::MarkState::NAMES
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect();
+        union.push("(string & {})".to_owned());
+        let line = format!("  markPropagation: {}", union.join(" | "));
+        assert!(
+            include_str!("../index.d.ts").lines().any(|l| l == line),
+            "index.d.ts out of sync with MarkState::NAMES, expected:\n{line}"
+        );
+        let source = include_str!("report.rs");
+        assert!(
+            source.contains(&format!("ts_type = \"{}\"", union.join(" | "))),
+            "the markPropagation ts_type is out of sync with MarkState::NAMES"
         );
     }
 

@@ -11,6 +11,7 @@ use crate::copy::copy_cancellable;
 use crate::formats::common;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::PendingMode;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
@@ -24,6 +25,18 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
+
+/// What a 7z file write consumes besides the entry's bytes and location: the
+/// scratch buffer, the quota permit, the mark and the progress callback.
+///
+/// The permit is held by value and the struct is not `Clone`, so one value
+/// authorizes exactly one write.
+pub(super) struct FileWrite<'a> {
+    pub(super) copy_buffer: &'a mut CopyBuffer,
+    pub(super) permit: QuotaPermit,
+    pub(super) marking: Option<&'a MarkRun>,
+    pub(super) progress: &'a mut dyn ProgressCallback,
+}
 
 /// Writes `reader`'s bytes directly to `leaf` in `parent` (no temp file, no
 /// rename), consuming the [`QuotaPermit`] that authorized the write.
@@ -66,20 +79,19 @@ use std::path::Path;
 /// Returns an error if file creation, the copy, or the underlying I/O fails,
 /// or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the permit, the mark and the progress callback are threaded through from the caller; a parameter struct adds indirection"
-)]
 pub(super) fn write_file_direct(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    copy_buffer: &mut CopyBuffer,
-    permit: QuotaPermit,
-    marking: Option<&MarkRun>,
-    progress: &mut dyn ProgressCallback,
+    write: FileWrite<'_>,
 ) -> Result<u64> {
+    let FileWrite {
+        copy_buffer,
+        permit,
+        marking,
+        progress,
+    } = write;
     let file = parent.create_new(leaf, None)?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
@@ -104,7 +116,7 @@ pub(super) fn write_file_direct(
     )
     .map_err(|error| faults.classify(error))?;
     writer.flush()?;
-    mark_written(writer, marking)?;
+    common::finish_written(writer, PendingMode::applied(), marking)?;
     guard.persist();
     Ok(bytes_written)
 }
@@ -151,33 +163,15 @@ pub(super) fn write_file_direct(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the permits and the progress callback are threaded through from the caller; a parameter struct adds indirection"
-)]
 pub(super) fn write_file_with_permit(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    copy_buffer: &mut CopyBuffer,
-    permit: QuotaPermit,
     replace: ReplacePermit,
-    marking: Option<&MarkRun>,
-    progress: &mut dyn ProgressCallback,
+    write: FileWrite<'_>,
 ) -> Result<u64> {
-    write_file_with_permit_using(
-        reader,
-        faults,
-        parent,
-        leaf,
-        copy_buffer,
-        permit,
-        replace,
-        marking,
-        progress,
-        TempLeaf::next,
-    )
+    write_file_with_permit_using(reader, faults, parent, leaf, replace, write, TempLeaf::next)
 }
 
 /// Implementation behind [`write_file_with_permit`], parameterized over the
@@ -203,22 +197,21 @@ pub(super) fn write_file_with_permit(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the permits and the temp-name generator are threaded through from the caller; a parameter struct adds indirection"
-)]
 pub(super) fn write_file_with_permit_using(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
     parent: &VettedDir,
     leaf: Leaf<'_>,
-    copy_buffer: &mut CopyBuffer,
-    permit: QuotaPermit,
     replace: ReplacePermit,
-    marking: Option<&MarkRun>,
-    progress: &mut dyn ProgressCallback,
+    write: FileWrite<'_>,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
+    let FileWrite {
+        copy_buffer,
+        permit,
+        marking,
+        progress,
+    } = write;
     let (temp, temp_file) =
         common::create_temp_sibling(parent, leaf, None, &replace, next_candidate)?;
 
@@ -243,28 +236,11 @@ pub(super) fn write_file_with_permit_using(
     writer.flush()?;
     // Closed before the rename: renaming a still-open file is fine on Unix but
     // the handle should not outlive its purpose regardless.
-    mark_written(writer, marking)?;
+    common::finish_written(writer, PendingMode::applied(), marking)?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 
     Ok(bytes_written)
-}
-
-/// Marks the file `writer` wrote and closes it.
-///
-/// 7z applies no mode, so the mark is the last write, made through the handle
-/// that wrote the content and before the name is published or replaced.
-fn mark_written(
-    writer: std::io::BufWriter<std::fs::File>,
-    marking: Option<&MarkRun>,
-) -> std::io::Result<()> {
-    let file = writer
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
-    if let Some(run) = marking {
-        run.mark_file(&file);
-    }
-    Ok(())
 }
 
 /// lstat's `dest_path`, returning `Ok(None)` if nothing occupies it.

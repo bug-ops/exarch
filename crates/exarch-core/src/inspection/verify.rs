@@ -143,8 +143,8 @@ fn verify_with_tree(
             &mut quota_tracker,
             &mut hardlink_tracker,
         );
-        if outcome.hardlink_pending {
-            deferred.push((index, entry));
+        if let Some(link_path) = outcome.pending_hardlink {
+            deferred.push((index, entry, link_path));
         }
         let mut issues = outcome.issues;
         if !outcome.left_out {
@@ -159,9 +159,10 @@ fn verify_with_tree(
         hits: None,
     };
     let mut stray_issues = Vec::new();
-    for (index, entry) in deferred {
+    for (index, entry, link_path) in deferred {
         let materialized = verify_deferred_hardlink(
             entry,
+            &link_path,
             config,
             &deferred_routing,
             &root,
@@ -314,8 +315,8 @@ pub(crate) fn verify_archive_with_progress<P: AsRef<Path>>(
 
 struct EntryOutcome {
     issues: Vec<VerificationIssue>,
-    /// A hardlink that passed phase-one validation and awaits phase two.
-    hardlink_pending: bool,
+    /// The validated link path of a hardlink that awaits phase two.
+    pending_hardlink: Option<SafePath>,
     /// The selection leaves the entry out, so nothing of it lands.
     left_out: bool,
 }
@@ -385,7 +386,7 @@ fn verify_entry(
     hardlink_tracker: &mut HardlinkTracker,
 ) -> EntryOutcome {
     let mut issues = Vec::new();
-    let mut hardlink_pending = false;
+    let mut pending_hardlink = None;
 
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
@@ -461,7 +462,7 @@ fn verify_entry(
                 issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
             }
             Some(Ok(())) if matches!(entry.kind, ManifestEntryKind::Hardlink { .. }) => {
-                hardlink_pending = true;
+                pending_hardlink = Some(safe_path.clone());
             }
             _ => {
                 let recorded = record_entry(tree, safe_path, &entry.kind, config);
@@ -490,7 +491,7 @@ fn verify_entry(
 
     EntryOutcome {
         issues,
-        hardlink_pending,
+        pending_hardlink,
         left_out,
     }
 }
@@ -599,10 +600,16 @@ fn record_entry(
     tree.check_landing(path, node, limits)
 }
 
-/// Phase two for a hardlink: re-validates its link path and target against the
-/// final tree, requires the target to exist, then materializes the link.
+/// Phase two for a hardlink: validates its target against the final tree,
+/// requires the target to exist, then materializes the link at `link_path`,
+/// which phase one validated at the entry's own position.
+///
+/// The link's own leaf is never resolved against the final tree: extraction
+/// creates it exclusively, so an occupant there is a duplicate or a refusal
+/// (see `Placement`), not a path to follow.
 fn verify_deferred_hardlink(
     entry: &ArchiveEntry,
+    link_path: &SafePath,
     config: &SecurityConfig,
     routing: &Routing<'_>,
     dest: &VirtualRoot,
@@ -616,21 +623,18 @@ fn verify_deferred_hardlink(
         return Ok(());
     };
     let issue = |e: ArchiveError| VerificationIssue::from_error(&e, Some(entry.path.clone()));
-    let Gated::Admit(link_path) = routing.route(entry, config, dest, tree).map_err(issue)? else {
-        return Ok(());
-    };
     let target = routing.link_target(entry, target, config).map_err(issue)?;
     routing
         .claims
         .require_unambiguous(&entry.path, &target)
         .map_err(issue)?;
     hardlink_tracker
-        .check_hardlink_target(&link_path, &target, dest, config, tree)
+        .check_hardlink_target(link_path, &target, dest, config, tree)
         .map_err(issue)?;
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
-    let landed = tree.check_landing(&link_path, Node::File, LandingLimits::Enforced);
+    let landed = tree.check_landing(link_path, Node::File, LandingLimits::Enforced);
     let error = match (landed, occupant) {
         (Err(error), _) => error,
         (Ok(()), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),

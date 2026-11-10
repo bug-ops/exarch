@@ -81,7 +81,7 @@ SO THAT scripts can assert protection was preserved
 | FR-007 | Under `WhenMarked` a file SHALL be created in deferred mode: created `0600`, content written, mark written, then the final mode applied through `PendingMode`; the final mode SHALL be applied even when the mark write fails, so a read-only entry (`0444`) is marked and ends `0444` | must |
 | FR-008 | Windows: the mark is the `Zone.Identifier` stream carrying `ZoneId` only (rendered `[ZoneTransfer]\r\nZoneId=N\r\n`); `ReferrerUrl` and `HostUrl` are not copied; the source `ZoneId` is parsed from the first 4096 bytes (BOM and LF endings accepted; values 0 to 4 valid) | must |
 | FR-009 | macOS: the mark is `com.apple.quarantine` rendered `flags;timestamp;exarch;UUID`; flags are the source value masked to `0x0007` (zero becomes `0001`), the timestamp is the source's (else now), the agent name is `exarch`, and the UUID is a fresh version 4 value per object, never a byte copy | must |
-| FR-010 | A source mark that is present but unparsable, non-ASCII, or oversized (macOS value over 256 bytes, or Windows stream without a valid `ZoneId` in the first 4096 bytes) SHALL propagate the conservative mark (macOS flags `0001`, Windows `ZoneId=3`); `MarkOutcome::Unreadable` is reserved for a real I/O error while reading the mark, marks nothing, and the human output prints a warning | must |
+| FR-010 | A source mark that is present but unparsable, non-ASCII, or oversized (macOS value over 256 bytes, or Windows stream without a valid `ZoneId` in the first 4096 bytes) SHALL propagate the conservative mark (macOS flags `0001`, Windows `ZoneId=3`); `MarkOutcome::Unreadable` is reserved for a real I/O error while reading the mark, marks nothing, and the human output prints a warning; on Windows a source volume that does not support named streams (`GetVolumeInformationByHandleW` reports no `FILE_NAMED_STREAMS`) has no stream to read and reads as `Unmarked`, like a macOS volume that answers `ENOTSUP`, while a failure of that volume query is not taken for "no streams": the stream read decides and its error stays `Unreadable`, never `Unmarked` (#1150) | must |
 | FR-011 | On Linux and any platform without a defined mark the outcome SHALL be `UnsupportedPlatform` with no read and no write | must |
 | FR-012 | An in-memory or reader-backed source has no archive file and therefore nothing to propagate; no mark policy applies to the `*_bytes`, reader and sink entry points | must |
 | FR-013 | A mark SHALL never be derived from archive content (entry names, PAX or xattr records, stream-like names): a TAR `com.apple.quarantine` PAX record is ignored | must |
@@ -89,9 +89,9 @@ SO THAT scripts can assert protection was preserved
 | FR-015 | macOS SHALL also mark directories this run created, only those: never a pre-existing directory, the destination root or the `--atomic` staging root; Windows does not mark directories (deviation from the draft, which excluded directories everywhere; user-approved) | must |
 | FR-016 | `--atomic` extraction SHALL publish files that already carry the mark; the marks survive the final rename and no promoted file lacks one | must |
 | FR-017 | A failed mark write SHALL be counted in `failed`, SHALL NOT abort extraction and SHALL NOT be reported as marked; there is no strict mode (user decision) | must |
-| FR-018 | `ExtractionReport::mark` SHALL be a typed `MarkOutcome` (`#[non_exhaustive]`): `NotRequested` (default), `UnsupportedPlatform`, `Unmarked`, `Unreadable`, `Propagated { marked: usize, failed: usize }`; `as_str`, `marked`, `failed` and `has_failures` are provided; a `PartialExtraction` report carries the outcome too (`Partial` boxes its report) | must |
-| FR-019 | The CLI SHALL provide `extract --mark-propagation <never\|when-marked>` (default `never`; an invalid value exits `2`); `--json` SHALL always carry `mark_propagation: {state, marked, failed}` (`marked` and `failed` only for `propagated`), also inside `partial_report`; text output SHALL print `Download mark: copied to N items, M failed` (or the reason nothing was copied) under `when-marked`, plus a warning line when objects failed or the mark was unreadable | must |
-| FR-020 | Python and Node.js SHALL expose the same policy (`with_mark_propagation` / `withMarkPropagation`, `mark_propagation` / `markPropagation`, `ConfigSetting` `mark_propagation`) and report fields (`mark_propagation` state, `marks_written`, `marks_failed` / `markPropagation`, `marksWritten`, `marksFailed`), with type mapping only | must |
+| FR-018 | `ExtractionReport::mark` SHALL be a typed `MarkOutcome` (`#[non_exhaustive]`): `NotRequested` (default), `UnsupportedPlatform`, `Unmarked`, `Unreadable`, `Propagated { marked: usize, failed: usize }`; `as_str`, `state`, `marked`, `failed`, `has_failures` and `is_incomplete` (an object missing its mark, or an `Unreadable` source mark) are provided; `MarkOutcome::state()` returns the closed enum `MarkState` (`not_requested`, `unsupported_platform`, `unmarked`, `unreadable`, `propagated`; `ClosedEnum` with `ALL` and `NAMES`, exported from the crate root), and `as_str` delegates to it, so the token set has one source (#1158); a `PartialExtraction` report carries the outcome too (`Partial` boxes its report) | must |
+| FR-019 | The CLI SHALL provide `extract --mark-propagation <never\|when-marked>` (default `never`; an invalid value exits `2`); `--json` SHALL always carry `mark_propagation: {state, marked, failed}` where `state` is the `MarkState` token of the core outcome, without remapping (an unknown future state is passed through as its own token), and `marked` and `failed` appear only for `propagated`, also inside `partial_report`; text output SHALL print `Download mark: copied to N items, M failed` (or the reason nothing was copied) under `when-marked`, plus a warning line when the outcome `is_incomplete()` (objects failed or the mark was unreadable); the text output prints the token of a state it does not know | must |
+| FR-020 | Python and Node.js SHALL expose the same policy (`with_mark_propagation` / `withMarkPropagation`, `mark_propagation` / `markPropagation`, `ConfigSetting` `mark_propagation`) and report fields (`mark_propagation` state, `marks_written`, `marks_failed` / `markPropagation`, `marksWritten`, `marksFailed`), with type mapping only; the Python `mark_propagation` state is typed `_MarkState | str` and the Node `markPropagation` state `(string & {})`-widened, so a state added to core later is not a type error in the stubs, and tests tie the stub literals to `MarkState::NAMES` | must |
 | FR-021 | `SafePath` SHALL refuse `:` in an entry name on Windows only (alternate data streams); other hosts treat `:` as an ordinary file-name character, so such an entry extracts as a plain file and, under `when_marked`, is marked like any other file | must |
 
 ## 4. Non-Functional Requirements
@@ -112,8 +112,10 @@ SO THAT scripts can assert protection was preserved
 | Entity | Description |
 |--------|-------------|
 | `MarkPropagation` | Policy: `Never` (default), `WhenMarked` |
-| `MarkOutcome` | Report state: `NotRequested`, `UnsupportedPlatform`, `Unmarked`, `Unreadable`, `Propagated { marked, failed }` |
-| `MarkRun` (crate-private) | Source mark read once plus the `marked` and `failed` counters; exists only under `WhenMarked`; stamps the report, a partial one included |
+| `MarkOutcome` | Report state: `NotRequested`, `UnsupportedPlatform`, `Unmarked`, `Unreadable`, `Propagated { marked, failed }`; `state()` gives the token enum `MarkState` |
+| `MarkState` | Closed token enum of the outcome kinds (`not_requested`, `unsupported_platform`, `unmarked`, `unreadable`, `propagated`) used by the CLI JSON, Python and Node |
+| `MarkScope` (crate-private) | Opens a `MarkRun` under `WhenMarked` and, through `around`, always stamps its outcome into the report the extraction returns, a partial one included; the stamp is private, so an entry point cannot lend the mark and forget to report it |
+| `MarkRun` (crate-private) | Source mark read once plus the `marked` and `failed` counters; exists only under `WhenMarked`, inside a `MarkScope` |
 | `Zone` / `Quarantine` (crate-private) | Parsed source value; render yields the per-object mark |
 | `ExtractionReport::mark` | Carries the `MarkOutcome` |
 
@@ -124,6 +126,7 @@ SO THAT scripts can assert protection was preserved
 | Unmarked archive | `Unmarked`, no writes (FR-004) |
 | Linux host | `UnsupportedPlatform`, nothing read or written (FR-011) |
 | Reader, bytes or sink source | Nothing to propagate (FR-012) |
+| Windows source volume without named streams | `Unmarked`; a failing volume query falls through to the stream read, whose error is `Unreadable` (FR-010) |
 | Destination filesystem without xattr or streams | Per-object failure counted, extraction exits `0`, text output warns (FR-017) |
 | Present but malformed or oversized source mark | Conservative mark propagated (FR-010) |
 | I/O error reading the source mark | `Unreadable`, nothing marked, warning (FR-010) |
@@ -163,7 +166,7 @@ SO THAT scripts can assert protection was preserved
 ## 9. Open Items
 
 > [!question] Open
-> - The Windows implementation (`src/mark/windows.rs`, `zone.rs`, the `pinned_dir` stream helpers) is compiled and clippy-checked but has never run; live verification on NTFS, ReFS and SMB is tracked in #1150.
+> - The Windows implementation (`src/mark/windows.rs`, `zone.rs`, the `pinned_dir` stream helpers) runs only on the CI Windows runner (NTFS: stream volume check, `ZoneId=3` fallback for a malformed or oversized source stream, read-only entry keeps its mark); the branch for a volume without named streams, and ReFS, SMB and FAT/exFAT hosts, are not executed anywhere and stay tracked in #1150.
 > - Office-only selection (7-Zip mode 2) and a strict mode are not planned.
 
 ## 10. See Also

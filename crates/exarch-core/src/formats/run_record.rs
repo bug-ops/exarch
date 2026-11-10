@@ -20,8 +20,9 @@
 //! is the landing path as the archive spelled it, so a duplicate that differs
 //! only in case is refused: the record fails closed. A failed identity lookup
 //! records nothing. [`ArchiveManifest::dispositions_on`] can model the path
-//! basis when its caller passes [`VolumeIdentity::LandingPaths`]; no front end
-//! does yet, and `list` assumes file identities.
+//! basis when its caller passes [`VolumeIdentity::LandingPaths`]; the CLI and
+//! both bindings probe the destination volume for it, and a `list` without a
+//! destination assumes file identities.
 //!
 //! [`ArchiveManifest::dispositions_on`]: crate::ArchiveManifest::dispositions_on
 //! [`VolumeIdentity::LandingPaths`]: crate::VolumeIdentity::LandingPaths

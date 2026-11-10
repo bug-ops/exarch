@@ -29,6 +29,7 @@ use crate::DecodeReuse;
 use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::Malformation;
+use crate::OccupiedBy;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
@@ -38,6 +39,7 @@ use crate::copy::copy_cancellable;
 use crate::formats::common;
 use crate::formats::io_marker::IoMarker;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::refuse_hardlink_replace;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -970,9 +972,8 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         self.core
             .require_unambiguous_target(link.as_path(), target.as_path())?;
         let config = self.config;
-        let link = SafePath::validate_in(link.as_path(), &self.root, config, &self.tree)?;
         let target = &HardlinkTracker::new().validate_hardlink_in(
-            &link,
+            link,
             target.as_path(),
             &self.root,
             config,
@@ -993,11 +994,13 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             let arriving = EntryShape::Link(LinkKind::Hardlink);
             return match occupied_action(policy, arriving, occupant, link.as_path())? {
                 OccupantAction::Skip => common::record_duplicate_skip(tally.report, link.as_path()),
-                OccupantAction::Replace(_) => {
-                    Err(ArchiveError::from(Malformation::DuplicateEntry {
-                        path: link.as_path().to_path_buf(),
-                    }))
-                }
+                OccupantAction::Replace(permit) => Err(refuse_hardlink_replace(
+                    permit,
+                    Some(occupant),
+                    link.as_path(),
+                    OccupiedBy::Archive,
+                    || common::occupied_without_destination(link.as_path()),
+                )),
             };
         }
 
@@ -1011,7 +1014,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
 
         let target_landing =
             SafePath::from_normalized(resolved_target).map_err(ArchiveError::Io)?;
-        let resolved = self.place(&link, Node::File)?;
+        let resolved = self.place(link, Node::File)?;
         self.sink
             .create_hardlink(&resolved, &target_landing)
             .map_err(sink_error)?;

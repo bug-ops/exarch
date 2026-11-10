@@ -256,8 +256,12 @@ closed_enum! {
         /// must be a directory (a refuse-existing run).
         Vacant => "vacant",
 
-        /// Only landings that must be directories are checked (an overwrite
-        /// run).
+        /// Only the occupants an in-place overwrite run refuses are reported:
+        /// a file at a directory landing, a directory at any other landing, a
+        /// file at a hardlink landing, and, as the symlink refusal, a symlink
+        /// at a file or hardlink landing or at a symlink landing with a
+        /// different recorded target. A file at a file or symlink landing is
+        /// replaced, and a symlink with the same recorded target is skipped.
         Replaceable => "replaceable",
     }
 }

@@ -21,6 +21,7 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::Landing;
 use crate::inspection::LandingKind;
+use crate::inspection::LinkTarget;
 use crate::inspection::ManifestEntryKind;
 use crate::path_text;
 use crate::security::fs_view::Occupant;
@@ -44,12 +45,25 @@ fn open_destination(dest: &Path) -> Result<Option<PinnedRoot>> {
     }
 }
 
-/// Whether the landing must end up a directory: an implied parent, or an entry
-/// that is one.
-fn needs_directory(landing: &Landing<'_>) -> bool {
-    match landing.kind() {
-        LandingKind::ImplicitParent => true,
-        LandingKind::Entry(entry) => matches!(entry.kind, ManifestEntryKind::Directory),
+/// What a landing puts at its path.
+enum Arrival<'a> {
+    Directory,
+    File,
+    Symlink(&'a LinkTarget),
+    Hardlink,
+}
+
+impl<'a> Arrival<'a> {
+    fn of(kind: LandingKind<'a>) -> Self {
+        match kind {
+            LandingKind::ImplicitParent => Self::Directory,
+            LandingKind::Entry(entry) => match &entry.kind {
+                ManifestEntryKind::Directory => Self::Directory,
+                ManifestEntryKind::File { .. } => Self::File,
+                ManifestEntryKind::Symlink { target } => Self::Symlink(target),
+                ManifestEntryKind::Hardlink { .. } => Self::Hardlink,
+            },
+        }
     }
 }
 
@@ -75,15 +89,10 @@ pub(super) fn check(
     let mut conflicts: Vec<PathBuf> = Vec::new();
     for landing in manifest.landings(config) {
         let rel = landing.path().as_path();
-        let directory = needs_directory(&landing);
-        let checked = match check {
-            DestinationCheck::Vacant => true,
-            DestinationCheck::Replaceable => directory,
-        };
-        if rel.is_empty() || !checked {
+        if rel.is_empty() {
             continue;
         }
-        match inspect(walker, &root, &landing, directory) {
+        match inspect(walker, &root, &landing, check) {
             Ok(Occupancy::Free) => {}
             Ok(Occupancy::Conflict) => conflicts.push(rel.to_path_buf()),
             Err(ArchiveError::Io(error)) if is_below_a_conflict(&error, &conflicts) => {}
@@ -116,21 +125,33 @@ fn inspect(
     walker: DirWalker,
     root: &PinnedRoot,
     landing: &Landing<'_>,
-    directory: bool,
+    check: DestinationCheck,
 ) -> Result<Occupancy> {
     let rel = landing.path().as_path();
+    let arrival = Arrival::of(landing.kind());
     let (parent, leaf) = walker.open_parent(root, rel)?;
     let Some(occupant) = parent.probe(leaf)? else {
         return Ok(Occupancy::Free);
     };
-    match (occupant, directory) {
-        (Occupant::Directory, true) => Ok(Occupancy::Free),
-        (Occupant::Symlink, true) => vet_symlinked_directory(walker, root, landing),
-        (Occupant::Symlink, false) => Err(Violation::ReplacesSymlink {
+    let replaces_symlink = || {
+        Err(Violation::ReplacesSymlink {
             rel: path_text(rel).into(),
         }
-        .into()),
-        (Occupant::Directory | Occupant::File, _) => Ok(Occupancy::Conflict),
+        .into())
+    };
+    let replaceable = check == DestinationCheck::Replaceable;
+    match (&arrival, occupant) {
+        (Arrival::Directory, Occupant::Directory) => Ok(Occupancy::Free),
+        (Arrival::Directory, Occupant::Symlink) => vet_symlinked_directory(walker, root, landing),
+        (Arrival::File | Arrival::Symlink(_), Occupant::File) if replaceable => Ok(Occupancy::Free),
+        (_, Occupant::Directory | Occupant::File) => Ok(Occupancy::Conflict),
+        (Arrival::Symlink(target), Occupant::Symlink) if replaceable => match target {
+            LinkTarget::Recorded(recorded) if parent.read_link(leaf)? != *recorded => {
+                replaces_symlink()
+            }
+            _ => Ok(Occupancy::Free),
+        },
+        (_, Occupant::Symlink) => replaces_symlink(),
     }
 }
 

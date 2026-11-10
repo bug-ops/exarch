@@ -1039,6 +1039,40 @@ pub(crate) enum Node {
     OpaqueSymlink,
 }
 
+impl Node {
+    /// What this node is to an entry that lands on its path.
+    const fn occupant(&self) -> Occupant {
+        match self {
+            Self::Dir => Occupant::Directory,
+            Self::File => Occupant::File,
+            Self::Symlink(_) | Self::OpaqueSymlink => Occupant::Symlink,
+        }
+    }
+}
+
+/// Where an insert put an entry.
+#[derive(Debug)]
+pub(crate) enum Placement {
+    /// No node held the name; the entry created one.
+    New(SafePath),
+    /// A node already held the name and the insert left it as it was.
+    Held {
+        /// The path the entry landed at.
+        landing: SafePath,
+        /// The node that held the name.
+        occupant: Occupant,
+    },
+}
+
+impl Placement {
+    /// The path the entry landed at, whether or not it was new.
+    pub(crate) fn into_landing(self) -> SafePath {
+        match self {
+            Self::New(landing) | Self::Held { landing, .. } => landing,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct TreeNode {
     kind: Node,
@@ -1310,7 +1344,7 @@ impl VirtualTree {
         limits: LandingLimits,
     ) -> Result<SafePath, PlaceError> {
         self.project_landing_found(rel, node, limits)
-            .map(|(landing, _)| landing)
+            .map(Placement::into_landing)
     }
 
     /// [`project_landing`](Self::project_landing) that also says whether a node
@@ -1324,17 +1358,24 @@ impl VirtualTree {
         rel: &SafePath<P>,
         node: Node,
         limits: LandingLimits,
-    ) -> Result<(SafePath, bool), PlaceError> {
+    ) -> Result<Placement, PlaceError> {
         self.guard_landing(rel.as_path(), limits)?;
         let landed = self.insert_node(rel.as_path(), node)?;
-        let held = landed.as_ref().is_some_and(|l| l.existing.is_some());
+        let occupant = landed
+            .as_ref()
+            .and_then(|l| l.existing)
+            .map(|id| self.nodes.node(id).kind.occupant());
         let landing = self.landing_path(rel.as_path(), landed);
         if limits == LandingLimits::Enforced {
             self.model
                 .check_name_lengths(&landing)
                 .map_err(|_| PlaceError::LandingTooLong)?;
         }
-        Ok((SafePath::from_normalized(landing)?, held))
+        let landing = SafePath::from_normalized(landing)?;
+        Ok(match occupant {
+            None => Placement::New(landing),
+            Some(occupant) => Placement::Held { landing, occupant },
+        })
     }
 
     /// [`project_landing`](Self::project_landing) for a caller that only needs
@@ -1515,11 +1556,7 @@ impl VirtualTree {
             _ => return None,
         };
         let found = self.lookup(parent, name)?;
-        Some(match self.nodes.node(found.id).kind {
-            Node::Dir => Occupant::Directory,
-            Node::File => Occupant::File,
-            Node::Symlink(_) | Node::OpaqueSymlink => Occupant::Symlink,
-        })
+        Some(self.nodes.node(found.id).kind.occupant())
     }
 
     /// Returns `true` if `path` resolves, through symlinks, to a directory.

@@ -397,3 +397,130 @@ fn a_foreign_hardlink_to_a_created_file_is_skipped_not_overwritten() {
     assert_eq!(report.files_skipped(), 1);
     assert_eq!(std::fs::read(&g).unwrap(), b"first");
 }
+
+fn cause(error: &ArchiveError) -> &ArchiveError {
+    match error {
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
+        other => other,
+    }
+}
+
+fn overwriting() -> ExtractionOptions {
+    ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
+}
+
+fn overwrite_in_memory(entries: &[Vec<u8>]) -> ArchiveError {
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+    let request = MemoryExtractRequest::default()
+        .with_config(config)
+        .with_options(SinkOptions::default().with_existing_files(ExistingFiles::Overwrite));
+    extract_reader_to_memory(
+        ArchiveReader::from_bytes(tar_archive(entries), None).unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap_err()
+}
+
+fn assert_names_the_directory(error: &ArchiveError) {
+    assert_eq!(cause(error).error_code(), ErrorCode::IoError, "{error}");
+    assert!(
+        cause(error)
+            .to_string()
+            .contains("refusing to replace the existing directory at x"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_hardlink_over_an_existing_file_under_overwrite_is_a_typed_refusal() {
+    use exarch_core::OccupiedBy;
+    use sink_support::tar_hardlink;
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(
+        &archive,
+        tar_archive(&[tar_file("target", b"payload"), tar_hardlink("f", "target")]),
+    )
+    .unwrap();
+    let dest = destination_with("f");
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+
+    let error = ExtractRequest::new(&config)
+        .with_options(overwriting())
+        .extract(&archive, dest.path())
+        .unwrap_err();
+
+    assert_occupied(cause(&error));
+    assert_matches!(
+        cause(&error),
+        ArchiveError::DestinationOccupied {
+            by: OccupiedBy::Existing,
+            destination: Some(_),
+            ..
+        }
+    );
+    assert_kept(dest.path(), "f");
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_hardlink_over_a_directory_under_overwrite_names_the_directory() {
+    use sink_support::tar_dir;
+    use sink_support::tar_hardlink;
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar");
+    std::fs::write(
+        &archive,
+        tar_archive(&[
+            tar_file("y", b"payload"),
+            tar_dir("x/"),
+            tar_hardlink("x", "y"),
+        ]),
+    )
+    .unwrap();
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_hardlinks(true);
+
+    let error = ExtractRequest::new(&config)
+        .with_options(overwriting())
+        .extract(&archive, dest.path())
+        .unwrap_err();
+
+    assert_names_the_directory(&error);
+}
+
+#[test]
+fn a_sink_refuses_a_hardlink_over_a_file_of_the_run_under_overwrite() {
+    use exarch_core::OccupiedBy;
+
+    let error = overwrite_in_memory(&[
+        tar_file("a", b"first"),
+        tar_file("b", b"other"),
+        sink_support::tar_hardlink("a", "b"),
+    ]);
+
+    assert_matches!(
+        cause(&error),
+        ArchiveError::DestinationOccupied {
+            by: OccupiedBy::Archive,
+            destination: None,
+            conflicts,
+            ..
+        } if conflicts.as_ref() == [Path::new("a")]
+    );
+}
+
+#[test]
+fn a_sink_refuses_a_hardlink_over_a_directory_of_the_run_under_overwrite() {
+    let error = overwrite_in_memory(&[
+        tar_file("y", b"payload"),
+        sink_support::tar_dir("x/"),
+        sink_support::tar_hardlink("x", "y"),
+    ]);
+
+    assert_names_the_directory(&error);
+}

@@ -405,6 +405,7 @@ fn cause(error: &ArchiveError) -> &ArchiveError {
     }
 }
 
+#[cfg(unix)]
 fn overwriting() -> ExtractionOptions {
     ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
 }

@@ -1295,13 +1295,22 @@ mod macos {
     }
 
     fn every_entry_has(file: &File, flag: u32) -> bool {
-        match darwin_acl::fetch(file) {
+        entries_have(darwin_acl::fetch(file), flag)
+    }
+
+    /// Whether every entry of a fetched ACL carries `flag`, reading the
+    /// attribute as [`plan_of`] does: a volume that answers `ENOTSUP` or
+    /// `EINVAL` (FAT, exFAT) has no ACL, so it holds no foreign entry. Any
+    /// other failure and a truncated or malformed value are unproven.
+    fn entries_have(fetched: io::Result<Fetched>, flag: u32) -> bool {
+        match fetched {
             Ok(Fetched::Complete(attribute)) => match parse(&attribute) {
                 Ok(None) => true,
                 Ok(Some(acl)) => acl.aces().iter().all(|ace| ace.flags & flag != 0),
                 Err(_) => false,
             },
-            Ok(Fetched::Truncated) | Err(_) => false,
+            Err(e) => is_unsupported(&e) || is_attribute_unavailable(&e),
+            Ok(Fetched::Truncated) => false,
         }
     }
 
@@ -1675,6 +1684,30 @@ mod macos {
             let einval = || io::Error::from_raw_os_error(Errno::INVAL.raw_os_error());
             assert_matches!(plan_of(Err(einval())), Ok(AclPlan::None));
             assert!(!is_unsupported(&einval()));
+        }
+
+        #[test]
+        fn a_volume_without_acls_holds_no_foreign_entry_and_other_failures_prove_nothing() {
+            let errno = |errno: Errno| io::Error::from_raw_os_error(errno.raw_os_error());
+            for flag in [INHERITED, ONLY_INHERIT] {
+                assert!(entries_have(Err(errno(Errno::NOTSUP)), flag));
+                assert!(entries_have(Err(errno(Errno::INVAL)), flag));
+                assert!(!entries_have(Err(errno(Errno::BADF)), flag));
+                assert!(!entries_have(Err(errno(Errno::ACCESS)), flag));
+                assert!(!entries_have(Ok(Fetched::Truncated), flag));
+                assert!(!entries_have(
+                    Ok(Fetched::Complete(Box::from([0u8; 3]))),
+                    flag
+                ));
+            }
+        }
+
+        #[test]
+        fn a_directory_without_an_acl_holds_only_inherited_and_only_inherit_entries() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = File::open(temp.path()).unwrap();
+            assert!(only_inherited_entries(&dir));
+            assert!(only_inherit_entries(&dir));
         }
 
         /// A destination `parent/dest` with `mode`, read as a replace reads it.

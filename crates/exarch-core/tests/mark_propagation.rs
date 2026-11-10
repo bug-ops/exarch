@@ -60,6 +60,16 @@ mod platform {
         }
     }
 
+    pub const OVERSIZED: usize = 1024;
+
+    pub fn set_raw_mark(path: &Path, value: &[u8]) {
+        rustix::fs::setxattr(path, NAME, value, XattrFlags::empty()).unwrap();
+    }
+
+    pub fn assert_conservative_mark(value: &str) {
+        assert!(value.starts_with("0001;"), "{value}");
+    }
+
     pub fn assert_mark_derives_from_source(value: &str) {
         let fields: Vec<_> = value.split(';').collect();
         assert_eq!(&fields[..2], ["0003", "5f3c8d11"], "{value}");
@@ -84,6 +94,16 @@ mod platform {
 
     pub fn mark_of(path: &Path) -> Option<String> {
         std::fs::read_to_string(stream(path)).ok()
+    }
+
+    pub const OVERSIZED: usize = 8192;
+
+    pub fn set_raw_mark(path: &Path, value: &[u8]) {
+        std::fs::write(stream(path), value).unwrap();
+    }
+
+    pub fn assert_conservative_mark(value: &str) {
+        assert!(value.contains("ZoneId=3"), "{value}");
     }
 
     pub fn assert_mark_derives_from_source(value: &str) {
@@ -350,33 +370,24 @@ fn an_entry_named_like_a_mark_stream_is_still_refused() {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn set_raw_mark(path: &Path, value: &[u8]) {
-    rustix::fs::setxattr(
-        path,
-        "com.apple.quarantine",
-        value,
-        rustix::fs::XattrFlags::empty(),
-    )
-    .unwrap();
-}
-
 /// A mark that is present but cannot be read is still a mark: files get the
 /// most conservative one instead of none.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_malformed_or_oversized_source_mark_propagates_the_conservative_mark() {
-    for value in [&b"garbage"[..], &[b'x'; 1024], b"\xff\xfe;;"] {
+    for value in [
+        &b"garbage"[..],
+        &vec![b'x'; platform::OVERSIZED],
+        b"\xff\xfe;;",
+    ] {
         let work = TempDir::new().unwrap();
         let archive = tar_fixture(work.path());
-        set_raw_mark(&archive, value);
+        platform::set_raw_mark(&archive, value);
         let out = TempDir::new().unwrap();
 
         let report = extract(&archive, out.path(), when_marked());
 
         assert_eq!(report.mark, expected_marked(FILES.len(), DIRECTORIES.len()));
-        let mark = mark_of(&out.path().join("ro.txt")).unwrap();
-        assert!(mark.starts_with("0001;"), "{mark}");
+        platform::assert_conservative_mark(&mark_of(&out.path().join("ro.txt")).unwrap());
     }
 }
 

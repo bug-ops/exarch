@@ -397,11 +397,7 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     )
     .map_err(|error| faults.classify(error))?;
     buffered_writer.flush()?;
-    let output_file = buffered_writer
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
-    seal_output(&output_file, pending, marking)?;
-    drop(output_file);
+    drop(finish_written(buffered_writer, pending, marking)?);
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     if replaced {
@@ -584,6 +580,28 @@ pub(crate) fn seal_output(
         run.mark_file(file);
     }
     pending.apply(file)
+}
+
+/// Flushes out `writer`'s file handle and seals it: the mark, then the mode.
+///
+/// The one place a finished write is closed out, shared by every format that
+/// writes file content. The caller drops the returned handle before the name
+/// is published or replaced.
+///
+/// # Errors
+///
+/// The I/O error of recovering the file from the buffer, or of applying the
+/// mode.
+pub(crate) fn finish_written(
+    writer: BufWriter<File>,
+    pending: PendingMode,
+    marking: Option<&MarkRun>,
+) -> std::io::Result<File> {
+    let file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
+    seal_output(&file, pending, marking)?;
+    Ok(file)
 }
 
 /// An open, empty output file and where its content must end up.

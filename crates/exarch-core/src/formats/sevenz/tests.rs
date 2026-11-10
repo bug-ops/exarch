@@ -21,6 +21,8 @@ use super::lzma2::DecodeKnobs;
 use super::verify::entries_uncovered_by_block_crc;
 use super::verify::payload_by_block;
 #[cfg(unix)]
+use super::write::FileWrite;
+#[cfg(unix)]
 use super::write::write_file_direct;
 #[cfg(unix)]
 use super::write::write_file_with_permit;
@@ -475,11 +477,13 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
         ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
-        &mut copy_buffer,
-        test_permit(13),
         ReplacePermit::for_test(),
-        None,
-        &mut NoopProgress,
+        FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit: test_permit(13),
+            marking: None,
+            progress: &mut NoopProgress,
+        },
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -537,11 +541,13 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
         ReadFaults::new(ReadFamily::Tar, None),
         &parent,
         leaf("real-output.txt"),
-        &mut copy_buffer,
-        test_permit(13),
         ReplacePermit::for_test(),
-        None,
-        &mut NoopProgress,
+        FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit: test_permit(13),
+            marking: None,
+            progress: &mut NoopProgress,
+        },
         || {
             let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
@@ -580,10 +586,12 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
         ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("bomb.bin"),
-        &mut copy_buffer,
-        test_permit(50),
-        None,
-        &mut NoopProgress,
+        FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit: test_permit(50),
+            marking: None,
+            progress: &mut NoopProgress,
+        },
     );
 
     assert!(
@@ -628,11 +636,13 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
         ReadFaults::new(ReadFamily::Tar, None),
         &pinned_at(temp.path()),
         leaf("existing.bin"),
-        &mut copy_buffer,
-        test_permit(50),
         ReplacePermit::for_test(),
-        None,
-        &mut NoopProgress,
+        FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit: test_permit(50),
+            marking: None,
+            progress: &mut NoopProgress,
+        },
     );
 
     assert!(

@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `VolumeIdentity` and `ArchiveManifest::dispositions_on` model a volume without file IDs, where a differently spelled repeat of a landing is refused (#1140, #1146).
 - Core: `MarkPropagation::{Never, WhenMarked}` copies the archive's Mark-of-the-Web or quarantine mark onto extracted files and, on macOS, onto directories the run created; the CLI gains `--mark-propagation`, Python and Node expose the option and the report's `mark` (#1026, #1151).
 - CLI, Python, Node: `list --destination` and the `destination` argument of `list_archive` probe the destination volume so `list` agrees with extraction where files have no IDs (#1144, #1151).
-- CI: a `netbsd-illumos.yml` workflow runs the `0311` backup and search-only open tests in NetBSD and illumos VMs (#1145, #1151).
+- CI: a `netbsd-illumos.yml` workflow runs the `0311` backup and search-only open tests in NetBSD and illumos VMs, and the observed results replace the "unobserved" wording: NetBSD has no search-only directory open and leaves the `0311` backup behind with a warning (#1145, #1149, #1151).
 - Tests: an opt-in `zip_parallel_prototype` benchmark measures parallel ZIP compression against the sequential writer (#1027, #1151).
 - Docs: specification 026 (Mark-of-the-Web propagation) and the destination probe in specification 019 (#1026, #1144, #1151).
 

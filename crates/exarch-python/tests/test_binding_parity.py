@@ -225,4 +225,6 @@ def test_the_mark_states_match_between_the_bindings():
     node = re.search(r"^  markPropagation: ([^\n]+)$", DTS, re.MULTILINE)
     assert python, "exarch.pyi has no _MarkState"
     assert node, "index.d.ts ExtractionReport has no markPropagation"
-    assert set(re.findall(r'"(\w+)"', python.group(1))) == set(re.findall(r"'(\w+)'", node.group(1)))
+    assert set(re.findall(r'"(\w+)"', python.group(1))) == set(
+        re.findall(r"'(\w+)'", node.group(1))
+    )

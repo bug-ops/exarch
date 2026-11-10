@@ -313,14 +313,20 @@ impl VolumeIdentity {
 
 /// The canonical form of the closest ancestor of `path` (or `path` itself)
 /// that exists; a relative `path` is resolved against the working directory.
+///
+/// A missing component below an existing file is an error, as on Unix where
+/// the lookup itself fails: Windows reports such a path as not found.
 fn nearest_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
-    for candidate in path.ancestors() {
+    for (skipped, candidate) in path.ancestors().enumerate() {
         let candidate = if candidate.as_os_str().is_empty() {
             Path::new(".")
         } else {
             candidate
         };
         match std::fs::canonicalize(candidate) {
+            Ok(canonical) if skipped > 0 && !canonical.is_dir() => {
+                return Err(std::io::ErrorKind::NotADirectory.into());
+            }
             Ok(canonical) => return Ok(canonical),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),

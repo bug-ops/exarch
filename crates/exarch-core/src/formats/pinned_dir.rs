@@ -28,11 +28,15 @@
 //! `EACCES` where path-based code worked. None of them is a shipped target for
 //! the bindings or the CLI release builds. FreeBSD, NetBSD and illumos open
 //! with `O_SEARCH` only where a directory's attributes are read or changed
-//! ([`DirHandle`]); on NetBSD and illumos neither that open nor the `fchmod`
-//! through it is verified (no CI runs there), so any failure there falls back
-//! to the read handle. OpenBSD and `DragonFly` have no search-only open flag,
-//! so the `0311` backup of an atomic `--force` swap is expected to stay behind
-//! there (unobserved, see `open_dir_for_metadata`).
+//! ([`DirHandle`]). On illumos (`OmniOS` VM, CI run of 2026-11-10) an
+//! unprivileged user got that search-only handle for a `0311` directory and
+//! could chmod through it. On NetBSD (10.2 VM, same run) the open failed with
+//! `EACCES` and so did the read fallback, so a `0311` directory has no usable
+//! handle there and the `0311` backup of an atomic `--force` swap stays
+//! behind with a `backup_cleanup_failed` warning. FreeBSD, OpenBSD and
+//! `DragonFly` have not been run; OpenBSD and `DragonFly` have no search-only
+//! open flag, so the same leftover is expected there (see
+//! `open_dir_for_metadata`).
 //!
 //! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
 //! or symlink is opened as itself and refused. The root is opened the same
@@ -558,9 +562,10 @@ mod imp {
     #[cfg(any(target_os = "freebsd", target_os = "netbsd", target_os = "illumos"))]
     const MODE_ACCESS: OFlags = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
 
-    /// Whether the search-only open and the `fchmod` through it are unverified
-    /// on this target: any failure then falls back to the read handle, which
-    /// is what the platform did before.
+    /// Whether any failure of the search-only open or of the `fchmod` through
+    /// it falls back to the read handle, as the platform did before. NetBSD
+    /// needs it (the open is refused for a `0311` directory); illumos was
+    /// observed to work and keeps the fallback as a precaution.
     #[cfg(any(
         target_os = "linux",
         target_os = "android",
@@ -747,7 +752,10 @@ mod imp {
         /// Apple platforms, FreeBSD, NetBSD and illumos open it search-only
         /// (`O_SEARCH`) and, for a directory that is readable but not
         /// searchable, for reading; NetBSD and illumos also fall back to
-        /// reading on any other failure of the search-only open. Linux and
+        /// reading on any other failure of the search-only open. Observed in
+        /// CI on 2026-11-10: illumos opens a `0311` directory search-only,
+        /// while NetBSD 10.2 refuses that open with `EACCES` for an
+        /// unprivileged user, so the fallback fails too. Linux and
         /// Android use an `O_PATH` handle. Other Unix open it for reading, so a
         /// mode that denies that read still fails there.
         ///
@@ -782,11 +790,12 @@ mod imp {
         /// defines `O_SEARCH` for neither), so a directory whose mode denies
         /// reading, such as a `0311` backup, is expected to fail with `EACCES`.
         /// A by-name `fchmodat` would drop the binding to the directory's
-        /// identity, so it is not used. The consequence is inferred from the
-        /// code and the missing flag, not observed: no run on these targets
-        /// exists. `make_removable` ignores the failure, so the removal of the
-        /// backup is expected to fail while the swap succeeds with a
-        /// `backup_cleanup_failed` warning naming the leftover backup.
+        /// identity, so it is not used. `make_removable` ignores the failure,
+        /// so the removal of the backup fails while the swap succeeds with a
+        /// `backup_cleanup_failed` warning naming the leftover backup. NetBSD
+        /// 10.2 showed exactly this in CI on 2026-11-10; OpenBSD and
+        /// `DragonFly` have not been run, so there it is inferred from the
+        /// code and the missing flag.
         ///
         /// # Errors
         ///
@@ -1852,7 +1861,11 @@ mod tests {
         let handle = dir.open_dir_for_metadata(leaf("locked"));
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_matches!(handle, Ok(DirHandle::Search(_)));
+        if cfg!(target_os = "netbsd") && fs::metadata(temp.path()).unwrap().uid() != 0 {
+            assert_matches!(handle, Err(ref e) if e.kind() == io::ErrorKind::PermissionDenied);
+        } else {
+            assert_matches!(handle, Ok(DirHandle::Search(_)));
+        }
     }
 
     #[cfg(any(
@@ -1875,16 +1888,17 @@ mod tests {
 
             let result = dir.set_dir_mode(leaf("locked"), id, &fs::Permissions::from_mode(0o700));
 
-            if mode == 0o000
+            let no_handle = (mode == 0o000
                 && cfg!(any(
                     target_vendor = "apple",
                     target_os = "freebsd",
                     target_os = "netbsd",
                     target_os = "illumos"
-                ))
-                && fs::metadata(temp.path()).unwrap().uid() != 0
-            {
-                // Neither search nor read is allowed, so no handle exists.
+                )))
+                || (mode == 0o311 && cfg!(target_os = "netbsd"));
+            if no_handle && fs::metadata(temp.path()).unwrap().uid() != 0 {
+                // No handle exists: neither search nor read is allowed, or
+                // (NetBSD) the search-only open is refused.
                 assert!(result.is_err(), "{mode:o}");
                 fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
                 continue;

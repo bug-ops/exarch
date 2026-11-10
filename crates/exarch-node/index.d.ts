@@ -2661,6 +2661,16 @@ export interface ManifestSymlinkEntry {
   target: LinkTarget
 }
 
+/**
+ * Whether extraction copies the archive file's download-origin mark (Windows
+ * Mark-of-the-Web, macOS quarantine) onto the files it creates.
+ *
+ * `never` (the default) reads and copies nothing. `when_marked` copies the
+ * mark when the archive file bears one. Linux has no mark and nothing is
+ * copied there.
+ */
+export type MarkPropagation = 'never' | 'when_marked'
+
 /** A directory the archive names explicitly. */
 export interface MemoryDirectoryEntry {
   /** Entry path, relative, as delivered by extraction. */
@@ -2879,16 +2889,6 @@ export interface SkippedSummary {
   /** Total skipped entries over all reasons. */
   total: number
 }
-
-/**
- * Whether extraction copies the archive file's download-origin mark (Windows
- * Mark-of-the-Web, macOS quarantine) onto the files it creates.
- *
- * `never` (the default) reads and copies nothing. `when_marked` copies the
- * mark when the archive file bears one. Linux has no mark and nothing is
- * copied there.
- */
-export type MarkPropagation = 'never' | 'when_marked'
 
 /**
  * How extraction stages its output before it is visible at the destination.

@@ -769,15 +769,25 @@ fn a_destination_whatever_its_mode_is_replaced_and_its_backup_removed() {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
         let report = result.unwrap_or_else(|e| panic!("{mode:o}: {e}"));
 
-        assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|warning| matches!(warning, ExtractionWarning::BackupCleanupFailed { .. })),
-            "{mode:o}: {:?}",
-            report.warnings
-        );
+        let cleanup_failed = report
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, ExtractionWarning::BackupCleanupFailed { .. }));
         assert_eq!(read(&dest.join("a.txt")), "new a", "{mode:o}");
+        if cfg!(target_os = "netbsd") && mode == 0o311 {
+            assert!(cleanup_failed, "{mode:o}: {:?}", report.warnings);
+            let leftovers = fx.leftovers();
+            assert!(!leftovers.is_empty(), "{mode:o}");
+            for name in leftovers {
+                std::fs::set_permissions(
+                    fx.parent.join(name),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            continue;
+        }
+        assert!(!cleanup_failed, "{mode:o}: {:?}", report.warnings);
         assert!(fx.leftovers().is_empty(), "{mode:o}: {:?}", fx.leftovers());
     }
 }

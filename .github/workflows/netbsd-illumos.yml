@@ -2,8 +2,8 @@ name: NetBSD and illumos
 
 # Runs the directory-mode and atomic-swap backup tests in NetBSD and illumos
 # (OmniOS) VMs, the only places those code paths execute on these systems.
-# Until a run is green the documented behavior there stays "expected,
-# unobserved".
+# The tests assert the observed behavior per platform: illumos opens a 0311
+# directory search-only, NetBSD does not and leaves the 0311 backup behind.
 on:
   schedule:
     - cron: '30 3 * * 1'

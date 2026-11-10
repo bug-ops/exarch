@@ -45,6 +45,7 @@ mod platform {
     const SOURCE: &[u8] = b"0083;5f3c8d11;Safari;3F2D5A10-1111-4222-8333-444455556666";
 
     pub const DIRECTORIES_ARE_MARKED: bool = true;
+    pub const VALUES_ARE_PER_FILE: bool = true;
 
     pub fn mark_archive(path: &Path) {
         rustix::fs::setxattr(path, NAME, SOURCE, XattrFlags::empty()).unwrap();
@@ -71,6 +72,7 @@ mod platform {
     use std::path::Path;
 
     pub const DIRECTORIES_ARE_MARKED: bool = false;
+    pub const VALUES_ARE_PER_FILE: bool = false;
 
     fn stream(path: &Path) -> String {
         format!("{}:Zone.Identifier", path.display())
@@ -90,6 +92,7 @@ mod platform {
 }
 
 use platform::DIRECTORIES_ARE_MARKED;
+use platform::VALUES_ARE_PER_FILE;
 use platform::mark_archive;
 use platform::mark_of;
 
@@ -139,7 +142,8 @@ fn tar_files_and_run_created_directories_carry_a_fresh_mark() {
         platform::assert_mark_derives_from_source(&value);
         values.insert(value);
     }
-    assert_eq!(values.len(), FILES.len(), "every file gets its own value");
+    let distinct = if VALUES_ARE_PER_FILE { FILES.len() } else { 1 };
+    assert_eq!(values.len(), distinct, "distinct mark values across files");
     for name in DIRECTORIES {
         assert_eq!(
             mark_of(&out.path().join(name)).is_some(),

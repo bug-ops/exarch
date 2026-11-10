@@ -9,6 +9,10 @@ pub(super) enum Mark {}
 
 pub(super) const SUPPORTED: bool = false;
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the macOS and Windows read"
+)]
 pub(super) fn read(_file: &File) -> io::Result<Option<Mark>> {
     Ok(None)
 }

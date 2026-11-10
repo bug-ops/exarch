@@ -8,6 +8,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
@@ -300,10 +301,7 @@ fn a_listed_extraction_marks_zip_and_a_tar_spool() {
             .extract(out.path(), &options, &mut NoopProgress)
             .unwrap();
 
-        assert!(matches!(
-            report.mark,
-            MarkOutcome::Propagated { failed: 0, .. }
-        ));
+        assert_matches!(report.mark, MarkOutcome::Propagated { failed: 0, .. });
         assert!(
             mark_of(&out.path().join(name)).is_some(),
             "{}",
@@ -416,8 +414,9 @@ fn a_listed_extraction_marks_from_the_listed_handle_not_the_path() {
             .extract(out.path(), &options, &mut NoopProgress)
             .unwrap();
 
-        assert!(
-            matches!(report.mark, MarkOutcome::Propagated { failed: 0, .. }),
+        assert_matches!(
+            report.mark,
+            MarkOutcome::Propagated { failed: 0, .. },
             "{name}"
         );
         assert!(mark_of(&out.path().join("ro.txt")).is_some(), "{name}");

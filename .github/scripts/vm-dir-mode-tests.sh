@@ -11,7 +11,7 @@ EXPECTED=5
 built=$(cargo test -p exarch-core --lib --all-features --no-run 2>&1 | tee /dev/stderr)
 bin=$(printf '%s\n' "$built" | sed -n 's/.*Executable unittests src\/lib.rs (\(.*\))/\1/p')
 test -n "$bin"
-bin=$(realpath "$bin")
+bin=$(cd "$(dirname "$bin")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$bin")")
 
 path=$bin
 while [ "$path" != / ]; do

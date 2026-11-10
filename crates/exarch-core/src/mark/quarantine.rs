@@ -113,6 +113,8 @@ fn uuid_groups(uuid: u128) -> [u128; 5] {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn fixed(flags: u16, timestamp: u32) -> Quarantine {
@@ -174,7 +176,7 @@ mod tests {
         let uuid = fields[3];
         assert_eq!(uuid.len(), 36);
         assert_eq!(uuid.as_bytes()[14], b'4');
-        assert!(matches!(uuid.as_bytes()[19], b'8' | b'9' | b'A' | b'B'));
+        assert_matches!(uuid.as_bytes()[19], b'8' | b'9' | b'A' | b'B');
     }
 
     #[test]

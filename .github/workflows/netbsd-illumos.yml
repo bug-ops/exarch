@@ -39,7 +39,9 @@ jobs:
         with:
           release: '10.2'
           prepare: |
-            pkgin -y install curl mozilla-rootcerts-openssl
+            pkg_add curl mozilla-rootcerts-openssl
+            PATH=/usr/pkg/bin:$PATH
+            export PATH
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           run: sh .github/scripts/vm-dir-mode-tests.sh
 

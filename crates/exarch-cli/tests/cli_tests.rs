@@ -4958,7 +4958,7 @@ fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_dest
         return;
     }
     assert.failure().stderr(predicate::str::contains(format!(
-        "Destination is not accessible: {}",
+        "Destination is not accessible: {}: ",
         dest.display()
     )));
 }
@@ -6464,7 +6464,8 @@ fn test_extract_hardlink_escape_hint_says_no_flag_relaxes_it() {
 }
 
 /// Regression test for #765: `extract --force` over a directory an earlier
-/// entry created names the entry and the occupant.
+/// entry created names the entry, as the typed conflict the destination
+/// pre-check reports (#1176).
 #[test]
 fn test_extract_force_file_over_directory_names_the_entry() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -6486,7 +6487,7 @@ fn test_extract_force_file_over_directory_names_the_entry() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("refusing to replace the existing directory at d")
+            predicate::str::contains("1 destination file already exists:\n  d")
                 .and(predicate::str::contains("os error").not()),
         );
 }
@@ -6548,7 +6549,7 @@ fn test_extract_force_symlink_over_directory_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("refusing to replace the existing directory at d")
+                predicate::str::contains("1 destination file already exists:\n  d")
                     .and(predicate::str::contains("os error").not()),
             );
     }
@@ -8046,7 +8047,7 @@ fn test_list_destination_probes_without_creating() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains(format!(
-            "Destination is not accessible: {}",
+            "Destination is not accessible: {}: resolving the path: ",
             file.join("sub").display()
         )));
 }

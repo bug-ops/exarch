@@ -129,6 +129,51 @@ impl std::fmt::Display for RequestedLevel {
     }
 }
 
+/// The step of reaching a destination that failed.
+///
+/// [`ArchiveError::DestinationNotAccessible`] carries it so the message can say
+/// which step broke, since the destination path alone does not.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::DestinationStep;
+///
+/// assert_eq!(
+///     DestinationStep::Create.to_string(),
+///     "creating the directory"
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DestinationStep {
+    /// Resolving the path to its canonical form.
+    Resolve,
+    /// Creating the destination directory or its parents.
+    Create,
+    /// Opening the destination directory.
+    Open,
+    /// Listing the entries of the destination directory.
+    List,
+    /// Checking that the destination directory is writable.
+    WriteAccess,
+    /// Reserving a staging directory beside the destination.
+    Stage,
+}
+
+impl std::fmt::Display for DestinationStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Resolve => "resolving the path",
+            Self::Create => "creating the directory",
+            Self::Open => "opening the directory",
+            Self::List => "listing its entries",
+            Self::WriteAccess => "checking write access",
+            Self::Stage => "reserving a staging directory",
+        })
+    }
+}
+
 closed_enum! {
     /// Who made the entry that occupies a path a run was about to write.
     ///
@@ -662,10 +707,12 @@ pub enum ArchiveError {
     /// below a regular file, a missing directory, or one that is not
     /// writable). `error` keeps the cause; `path` is a host path and is
     /// redacted like any other.
-    #[error("destination is not accessible: {path}: {error}")]
+    #[error("destination is not accessible: {path}: {step}: {error}")]
     DestinationNotAccessible {
         /// The destination path.
         path: PathBuf,
+        /// The step that failed.
+        step: DestinationStep,
         /// The failure that made the destination unresolvable.
         error: std::io::Error,
     },
@@ -998,10 +1045,12 @@ impl ArchiveError {
     /// step uses.
     pub(crate) fn destination_not_accessible(
         path: &std::path::Path,
+        step: DestinationStep,
         error: std::io::Error,
     ) -> Self {
         Self::DestinationNotAccessible {
             path: path.to_path_buf(),
+            step,
             error,
         }
     }
@@ -1524,7 +1573,33 @@ impl std::fmt::Display for UnmatchedPatterns<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::assert_matches;
+
+    #[test]
+    fn destination_steps_read_as_a_phrase_after_the_path() {
+        let texts: Vec<_> = [
+            DestinationStep::Resolve,
+            DestinationStep::Create,
+            DestinationStep::Open,
+            DestinationStep::List,
+            DestinationStep::WriteAccess,
+            DestinationStep::Stage,
+        ]
+        .map(|step| step.to_string())
+        .into();
+        assert_eq!(
+            texts,
+            [
+                "resolving the path",
+                "creating the directory",
+                "opening the directory",
+                "listing its entries",
+                "checking write access",
+                "reserving a staging directory",
+            ]
+        );
+    }
 
     #[test]
     fn test_discarded_marks_only_partial_extractions() {
@@ -2314,6 +2389,7 @@ mod tests {
             (
                 ArchiveError::DestinationNotAccessible {
                     path: path(),
+                    step: DestinationStep::Resolve,
                     error: io_error(),
                 },
                 Classes::NONE,

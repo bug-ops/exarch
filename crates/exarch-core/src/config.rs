@@ -66,8 +66,12 @@ closed_enum! {
     /// What extraction does with a destination path that is already occupied.
     ///
     /// Governs every occupant, whether an earlier entry of the same archive or
-    /// a file that existed before the run. Kind conflicts (a file landing on a
-    /// directory or the reverse) are refused under every variant.
+    /// a file that existed before the run. [`Skip`](Self::Skip) skips every
+    /// occupied file, symlink or hardlink landing, a directory occupant
+    /// included; [`Overwrite`](Self::Overwrite) and [`Refuse`](Self::Refuse)
+    /// refuse a file over a directory. A directory entry over a file or symlink
+    /// is refused under every variant. The CLI refuses a file over a directory
+    /// the archive made whatever the policy (the listing model).
     ///
     /// # Examples
     ///

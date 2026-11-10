@@ -779,8 +779,11 @@ class ExtractionOptions:
         ``"skip"`` (default) keeps the existing file and counts the entry as a
         duplicate skip. ``"overwrite"`` replaces it where the entry kinds allow.
         ``"refuse"`` raises ``OutputExistsError`` (code ``OUTPUT_EXISTS``, with
-        ``conflicts``) for any occupant and never overwrites. A kind conflict is
-        refused under every value.
+        ``conflicts``) for an occupant that existed before the run and never
+        overwrites; a repeat inside the archive is skipped as under ``"skip"``.
+        A file over a directory is skipped under ``"skip"`` and raises
+        ``OutputExistsError`` under ``"overwrite"`` and ``"refuse"``; a directory
+        over a file is refused under every value.
 
         Raises:
             InvalidConfigurationError: any other string
@@ -1798,8 +1801,9 @@ def extract_archive(
         nothing to disk: their failures carry ``writes == "discarded"`` and none
         of the counter attributes. A symlink entry over an existing symlink
         with a different target, with overwrite enabled
-        (``existing_files == "overwrite"``), raises the builtin ``OSError`` (``ELOOP``), not
-        ``SymlinkEscapeError``. See
+        (``existing_files == "overwrite"``), raises ``SecurityViolationError``
+        (``sub_code == "EXISTING_SYMLINK"``), not ``SymlinkEscapeError``;
+        7z on Windows replaces a symlink that appeared after the pre-check. See
         ``extract_archive_with_progress`` below: a raising ``progress`` callback
         carries ``writes`` and the counters of what was written, distinguished by
         a ``progress_callback_error`` marker attribute this function's own
@@ -2161,7 +2165,9 @@ class SinkOptions:
     Args:
         existing_files: ``"skip"`` (default) skips an entry whose path an
             earlier entry already holds and counts a duplicate; ``"overwrite"``
-            delivers it again; ``"refuse"`` raises ``OutputExistsError``.
+            delivers it again; ``"refuse"`` also skips a repeated file or
+            symlink, but raises ``OutputExistsError`` (``by == "archive"``) for a
+            file over a directory entry, which ``"skip"`` skips.
         decode_reuse: Where a ZIP extraction keeps the output of its structural
             check so deflate entries are decoded once instead of twice:
             ``"off"`` (default), ``"memory"`` or ``"temp_file"``.
@@ -2413,6 +2419,14 @@ class _IOErrorAttributes(Protocol):
     ``leftover_path`` and ``filename`` are always set (``None`` when they do not
     apply), ``writes`` only after an extraction recorded progress.
 
+    An error that names a path is the exact builtin called as
+    ``cls(errno, strerror, filename)``: ``errno`` is the OS error number
+    (``None`` where the cause has none), ``strerror`` the description with the
+    cause, and ``str(err)`` reads ``[Errno 13] destination is not accessible:
+    <path>: creating the directory: Permission denied (os error 13): '<path>'``.
+    Release builds reduce the paths to their last component. The error pickles
+    with ``errno`` and ``filename``.
+
     Attributes:
         code: Always ``"IO_ERROR"``.
         io_kind: The stable kind of the failure, the same token as
@@ -2426,7 +2440,9 @@ class _IOErrorAttributes(Protocol):
         leftover_path: Where a staging directory or reservation file the
             failure left behind remains, redacted like an exception message.
         filename: On the error of a creation that failed after reserving its
-            output, the empty reservation file left at that path (redacted).
+            output, the empty reservation file left at that path (redacted);
+            on a destination that cannot be reached or created, that
+            destination.
         writes: As on ``ArchiveError``, when extraction failed after recording
             progress.
     """
@@ -2471,15 +2487,16 @@ class OutputExistsError(ArchiveError, FileExistsError):
     redacted like an exception message, as ``open()`` fills them.
 
     Attributes:
-        conflicts: The archive-relative paths an extraction with
-            ``existing_files == "refuse"`` found occupied; ``None`` for a
-            creation output that exists.
+        conflicts: The archive-relative paths an extraction found occupied: with
+            ``existing_files == "refuse"``, or with ``"overwrite"`` when the
+            occupant is a directory or a hardlink would replace a file;
+            ``None`` for a creation output that exists.
         by: Who made the occupant of the first refused path: ``"existing"``
             (it was there before the run, or its maker is unknown: removing
             it or choosing another destination helps, and
-            ``existing_files == "overwrite"`` replaces only a file or symlink
-            occupant of a file or symlink entry) or ``"archive"`` (an earlier
-            entry of the same archive, which no option resolves); a future
+            ``existing_files == "overwrite"`` replaces only a file occupant of a
+            file or symlink entry) or ``"archive"`` (an earlier entry of the
+            same archive, which no option resolves); a future
             core value reads as a plain ``str``; ``None`` for a creation
             output that exists.
     """

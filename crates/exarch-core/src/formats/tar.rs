@@ -2118,8 +2118,12 @@ mod tests {
             Err(other) => other,
             Ok(_) => panic!("expected the symlink occupant to be refused"),
         };
-        assert_matches!(cause, ArchiveError::Io(error)
-            if error.to_string().contains("refusing to replace the existing symlink"));
+        assert_matches!(
+            cause,
+            ArchiveError::SecurityViolation {
+                kind: crate::Violation::ReplacesSymlink { rel },
+            } if &**rel == "hardlink.txt"
+        );
 
         let link_metadata = std::fs::symlink_metadata(&link_dest).unwrap();
         assert!(link_metadata.file_type().is_symlink());

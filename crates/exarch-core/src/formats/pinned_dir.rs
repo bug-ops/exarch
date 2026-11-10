@@ -84,6 +84,7 @@ use super::output_root::OutputRoot;
 use super::output_root::Place;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
+use crate::DestinationStep;
 use crate::Result;
 use crate::mark::MarkRun;
 use crate::security::fs_view::Occupant;
@@ -425,10 +426,16 @@ impl PinnedRoot {
         let root = match output.place() {
             Place::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?)?,
             Place::Staged(staged) => {
-                // The stage path is internal; the user's destination is not
-                // named by it.
+                // The stage path is internal; the user's destination is named
+                // instead.
                 let dest = DestDir::new(staged.path().to_path_buf()).map_err(|e| match e {
-                    ArchiveError::DestinationNotAccessible { error, .. } => ArchiveError::Io(error),
+                    ArchiveError::DestinationNotAccessible { error, .. } => {
+                        ArchiveError::destination_not_accessible(
+                            staged.destination(),
+                            DestinationStep::Stage,
+                            error,
+                        )
+                    }
                     other => other,
                 })?;
                 #[cfg(unix)]

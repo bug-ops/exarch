@@ -8,6 +8,7 @@ use crate::commands::CommandResult;
 use crate::commands::Outcome;
 use crate::commands::security_config;
 use crate::error::ConflictAdvice;
+use crate::error::Unreplaced;
 use crate::error::convert_error;
 use crate::error::convert_error_with_advice;
 use crate::interrupt;
@@ -233,7 +234,9 @@ impl WriteMode {
     fn write_advice(self) -> ConflictAdvice {
         match self {
             Self::Safe | Self::Atomic => ConflictAdvice::UseForce,
-            Self::Force | Self::AtomicReplace => ConflictAdvice::ForceCannotReplace(Box::default()),
+            Self::Force | Self::AtomicReplace => {
+                ConflictAdvice::ForceCannotReplace(Unreplaced::All)
+            }
         }
     }
 
@@ -257,16 +260,10 @@ impl WriteMode {
             return Ok(());
         };
         let advice = match (self, &refusal) {
-            (Self::Safe, ArchiveError::DestinationOccupied { .. }) => {
-                match listed.check_destination(output_dir, DestinationCheck::Replaceable) {
-                    Ok(()) => ConflictAdvice::UseForce,
-                    Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
-                        ConflictAdvice::ForceCannotReplace(conflicts)
-                    }
-                    Err(_) => ConflictAdvice::ForceCannotReplace(Box::default()),
-                }
-            }
-            _ => ConflictAdvice::ForceCannotReplace(Box::default()),
+            (Self::Safe, ArchiveError::DestinationOccupied { .. }) => advice_after_recheck(
+                listed.check_destination(output_dir, DestinationCheck::Replaceable),
+            ),
+            _ => ConflictAdvice::ForceCannotReplace(Unreplaced::All),
         };
         Err(convert_error_with_advice(
             Operation::Extract,
@@ -274,6 +271,19 @@ impl WriteMode {
             archive,
             &advice,
         ))
+    }
+}
+
+/// The advice for a refused run without `--force`, from the re-check that asks
+/// whether `--force` would replace what the run met: an error other than an
+/// occupied destination leaves the unreplaced subset unknown.
+fn advice_after_recheck(recheck: std::result::Result<(), ArchiveError>) -> ConflictAdvice {
+    match recheck {
+        Ok(()) => ConflictAdvice::UseForce,
+        Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(conflicts))
+        }
+        Err(_) => ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown),
     }
 }
 
@@ -415,6 +425,27 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_recheck_leaves_the_unreplaced_subset_unknown() {
+        let io = || ArchiveError::Io(std::io::Error::other("probe"));
+        assert_eq!(
+            advice_after_recheck(Err(io())),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown)
+        );
+        assert_eq!(advice_after_recheck(Ok(())), ConflictAdvice::UseForce);
+        let occupied = ArchiveError::DestinationOccupied {
+            destination: None,
+            conflicts: Box::new([std::path::PathBuf::from("a")]),
+            by: exarch_core::OccupiedBy::Existing,
+        };
+        assert_eq!(
+            advice_after_recheck(Err(occupied)),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(Box::new([
+                std::path::PathBuf::from("a")
+            ])))
+        );
+    }
 
     /// The items clap would produce for the given raw flag values.
     fn tokens(raw: &[&str]) -> Vec<ListToken> {

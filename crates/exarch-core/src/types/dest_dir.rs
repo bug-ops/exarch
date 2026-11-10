@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::DestinationStep;
 use crate::Result;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
@@ -119,6 +120,7 @@ impl DestDir {
         if !path.exists() {
             return Err(ArchiveError::destination_not_accessible(
                 &path,
+                DestinationStep::Resolve,
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "destination directory does not exist",
@@ -135,9 +137,9 @@ impl DestDir {
         }
 
         // Canonicalize to absolute path
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| ArchiveError::destination_not_accessible(&path, e))?;
+        let canonical = path.canonicalize().map_err(|e| {
+            ArchiveError::destination_not_accessible(&path, DestinationStep::Resolve, e)
+        })?;
 
         // M-CODE-6: Check write permissions using libc::access() (Unix only)
         #[cfg(unix)]
@@ -161,11 +163,9 @@ impl DestDir {
 
             if result != 0 {
                 return Err(ArchiveError::destination_not_accessible(
-                    &canonical,
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "directory is not writable",
-                    ),
+                    &path,
+                    DestinationStep::WriteAccess,
+                    std::io::Error::last_os_error(),
                 ));
             }
         }
@@ -196,8 +196,9 @@ impl DestDir {
     )]
     pub fn new_or_create(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        std::fs::create_dir_all(&path)
-            .map_err(|e| ArchiveError::destination_not_accessible(&path, e))?;
+        std::fs::create_dir_all(&path).map_err(|e| {
+            ArchiveError::destination_not_accessible(&path, DestinationStep::Create, e)
+        })?;
         Self::new(path)
     }
 
@@ -324,7 +325,7 @@ mod tests {
         let result = DestDir::new(path);
         assert_matches!(
             result,
-            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+            Err(ArchiveError::DestinationNotAccessible { ref path, step: DestinationStep::Resolve, ref error })
                 if path.ends_with("does/not/exist")
                     && error.kind() == std::io::ErrorKind::NotFound
         );
@@ -404,9 +405,10 @@ mod tests {
 
         assert_matches!(
             result,
-            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+            Err(ArchiveError::DestinationNotAccessible { ref path, step: DestinationStep::WriteAccess, ref error })
                 if path.ends_with("readonly")
                     && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && error.raw_os_error() == Some(libc::EACCES)
         );
     }
 
@@ -618,7 +620,7 @@ mod tests {
 
         assert_matches!(
             result,
-            Err(ArchiveError::DestinationNotAccessible { ref path, ref error })
+            Err(ArchiveError::DestinationNotAccessible { ref path, step: DestinationStep::Create, ref error })
                 if path.ends_with("readonly_parent/child")
                     && error.kind() == std::io::ErrorKind::PermissionDenied
         );

@@ -13,6 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::DestinationStep;
 use crate::EntrySelection;
 use crate::OccupiedBy;
 use crate::Result;
@@ -28,6 +29,7 @@ use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
 use crate::formats::occupant::is_run_duplicate;
 use crate::formats::occupant::refuse_unless_duplicate;
+use crate::formats::occupant::replaces_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
@@ -45,7 +47,6 @@ use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::Placement;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
-use crate::security::fs_view::normalized_display;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::hardlink::require_target_present;
@@ -306,9 +307,12 @@ impl VolumeIdentity {
         nearest_existing_ancestor(destination)
             .and_then(|existing| identity_of(&existing))
             .map(Self::from_identity)
-            .map_err(|error| ArchiveError::DestinationNotAccessible {
-                path: destination.to_path_buf(),
-                error,
+            .map_err(|error| {
+                ArchiveError::destination_not_accessible(
+                    destination,
+                    DestinationStep::Resolve,
+                    error,
+                )
             })
     }
 
@@ -834,12 +838,7 @@ fn conflicting_placement(
         Some(Occupant::Directory) if shape != EntryShape::Directory => {
             Err(occupied_without_destination(rel).occupied_by(OccupiedBy::Archive))
         }
-        Some(Occupant::Symlink) if shape == EntryShape::Directory => {
-            Err(Violation::ReplacesSymlink {
-                rel: normalized_display(rel).into(),
-            }
-            .into())
-        }
+        Some(Occupant::Symlink) if shape == EntryShape::Directory => Err(replaces_symlink(rel)),
         _ => Err(place_error(PlaceError::Conflict(conflict))),
     }
 }

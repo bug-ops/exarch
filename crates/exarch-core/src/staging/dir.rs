@@ -25,6 +25,7 @@ use super::adopt::Adoption;
 #[cfg(unix)]
 use super::io_context;
 use crate::ArchiveError;
+use crate::DestinationStep;
 #[cfg(unix)]
 use crate::NarrowingReason;
 use crate::Result;
@@ -295,6 +296,7 @@ pub(super) struct StagingDir<'p> {
     pub(super) parent: &'p VettedDir,
     pub(super) name: LeafBuf,
     path: PathBuf,
+    destination: PathBuf,
     pub(super) id: FileIdentity,
     armed: bool,
     fresh: Option<Adoption>,
@@ -309,29 +311,50 @@ pub(super) struct StagingDir<'p> {
     pub(super) own: Option<OwnContents>,
 }
 
+/// The two paths a staging directory is made for, which must not be swapped:
+/// the logical path of the pinned parent it is created in, and the destination
+/// the caller asked to extract to.
+#[derive(Clone, Copy)]
+pub(super) struct StagingSite<'a> {
+    pub(super) parent: &'a Path,
+    pub(super) destination: &'a Path,
+}
+
+impl StagingSite<'_> {
+    /// A site whose destination is its parent, for tests that stage in place.
+    #[cfg(test)]
+    pub(super) const fn at(path: &Path) -> StagingSite<'_> {
+        StagingSite {
+            parent: path,
+            destination: path,
+        }
+    }
+}
+
 impl<'p> StagingDir<'p> {
     /// Creates a fresh `0700` staging directory in `parent`, whose logical
-    /// path is `parent_path`, and prepares it as `seed` says. A failure names
-    /// `destination`, the path the caller asked to extract to.
+    /// path is `site.parent`, and prepares it as `seed` says. A failure names
+    /// `site.destination`, the path the caller asked to extract to.
     ///
     /// # Errors
     ///
     /// [`ArchiveError::DestinationNotAccessible`] when no unused name could be
     /// created; another error when a step `seed` makes mandatory failed. The
     /// directory is removed then.
-    pub(super) fn create(
-        parent: &'p VettedDir,
-        parent_path: &Path,
-        destination: &Path,
-        seed: Seed,
-    ) -> Result<Self> {
-        let failure =
-            |error: io::Error| ArchiveError::destination_not_accessible(destination, error);
+    pub(super) fn create(parent: &'p VettedDir, site: StagingSite<'_>, seed: Seed) -> Result<Self> {
+        let parent_path = site.parent;
+        let failure = |error: io::Error| {
+            ArchiveError::destination_not_accessible(
+                site.destination,
+                DestinationStep::Stage,
+                error,
+            )
+        };
         for _ in 0..CREATE_ATTEMPTS {
             let name = LeafBuf::random(STAGING_PREFIX);
             match parent.make_private_dir(name.as_leaf()) {
                 Ok(()) => {
-                    return Self::claim(parent, parent_path, name)
+                    return Self::claim(parent, site, name)
                         .map_err(|refused| {
                             failure(refused.error).rolled_back_with(refused.leftover)
                         })?
@@ -370,9 +393,10 @@ impl<'p> StagingDir<'p> {
     #[cfg(unix)]
     fn claim(
         parent: &'p VettedDir,
-        parent_path: &Path,
+        site: StagingSite<'_>,
         name: LeafBuf,
     ) -> std::result::Result<Self, ClaimRefused> {
+        let parent_path = site.parent;
         let dir = match parent.open_dir_for_attributes(name.as_leaf()) {
             Ok(dir) => dir,
             Err(e) => {
@@ -388,6 +412,7 @@ impl<'p> StagingDir<'p> {
         Ok(Self {
             parent,
             path: parent_path.join(&name),
+            destination: site.destination.to_path_buf(),
             name,
             id: FileIdentity::of_file(pin.as_file()),
             armed: true,
@@ -423,9 +448,10 @@ impl<'p> StagingDir<'p> {
     #[cfg(not(unix))]
     fn claim(
         parent: &'p VettedDir,
-        parent_path: &Path,
+        site: StagingSite<'_>,
         name: LeafBuf,
     ) -> std::result::Result<Self, ClaimRefused> {
+        let parent_path = site.parent;
         let id = parent
             .status(name.as_leaf())?
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
@@ -433,6 +459,7 @@ impl<'p> StagingDir<'p> {
         Ok(Self {
             parent,
             path: parent_path.join(&name),
+            destination: site.destination.to_path_buf(),
             name,
             id,
             armed: true,
@@ -457,6 +484,7 @@ impl<'p> StagingDir<'p> {
     pub(super) fn output(&self) -> io::Result<StagedOutput> {
         Ok(StagedOutput::new(
             self.path.clone(),
+            self.destination.clone(),
             self.pin.try_clone()?,
             Rc::clone(&self.ledger),
         ))
@@ -475,6 +503,7 @@ impl<'p> StagingDir<'p> {
     pub(super) fn output(&self) -> io::Result<StagedOutput> {
         Ok(StagedOutput::new(
             self.path.clone(),
+            self.destination.clone(),
             Rc::clone(&self.ledger),
         ))
     }
@@ -838,7 +867,7 @@ mod tests {
     fn claimed<'p>(pin: &'p VettedDir, parent: &Path) -> StagingDir<'p> {
         let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
-        StagingDir::claim(pin, parent, name).unwrap()
+        StagingDir::claim(pin, StagingSite::at(parent), name).unwrap()
     }
 
     fn seeds() -> [Seed; 3] {
@@ -986,7 +1015,7 @@ mod tests {
         let (name, moved) = replaced_at_name(&pin, &parent, 0o755);
         let at = parent.join(&name);
 
-        assert!(StagingDir::claim(&pin, &parent, name).is_err());
+        assert!(StagingDir::claim(&pin, StagingSite::at(&parent), name).is_err());
 
         assert!(
             !at.exists(),
@@ -1007,7 +1036,7 @@ mod tests {
         let (name, _moved) = replaced_at_name(&pin, &parent, 0o700);
         add_ace(&parent.join(&name), "everyone allow list");
 
-        assert!(StagingDir::claim(&pin, &parent, name).is_err());
+        assert!(StagingDir::claim(&pin, StagingSite::at(&parent), name).is_err());
     }
 
     #[test]
@@ -1038,7 +1067,9 @@ mod tests {
         let at = parent.join(&name);
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let refused = StagingDir::claim(&pin, &parent, name).err().unwrap();
+        let refused = StagingDir::claim(&pin, StagingSite::at(&parent), name)
+            .err()
+            .unwrap();
 
         assert!(refused.leftover.is_none());
         assert!(!at.exists());

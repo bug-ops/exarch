@@ -191,17 +191,17 @@ pub fn convert_error(err: CoreError) -> PyErr {
         path,
         leftover_path,
         detail,
+        raw_os_error,
         ..
     } = err.into_ffi_message();
     let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
-        let err = io_error(io_kind, description);
+        let err = io_error(io_kind, &description, path.as_deref(), raw_os_error);
         // A builtin `OSError` has no class defaults, so these read `None`
         // only when set.
         for name in ["restore", "backup_path", "leftover_path"] {
             set_none(&err, name);
         }
-        set_attr(&err, "filename", path);
         err
     } else {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
@@ -237,14 +237,51 @@ pub fn convert_error(err: CoreError) -> PyErr {
 ///
 /// `ErrorKind::OutOfMemory` becomes a plain `OSError` instead of the
 /// `MemoryError` `PyO3` would pick, so every I/O failure is an `OSError`.
-fn io_error(kind: std::io::ErrorKind, description: String) -> PyErr {
+///
+/// With a `path` the exception is rebuilt as `cls(errno, description, path)`,
+/// which `OSError.__str__` formats as `[Errno N] description: 'path'` and
+/// which pickles with `filename`; `errno` is `None` where the cause has no OS
+/// code, and the description still carries it.
+fn io_error(
+    kind: std::io::ErrorKind,
+    description: &str,
+    path: Option<&str>,
+    raw_os_error: Option<i32>,
+) -> PyErr {
     let err = if kind == std::io::ErrorKind::OutOfMemory {
-        PyOSError::new_err(description)
+        PyOSError::new_err(description.to_owned())
     } else {
         PyErr::from(std::io::Error::new(kind, description))
     };
+    let err = match path {
+        Some(path) => with_os_error_args(&err, raw_os_error, description, path),
+        None => err,
+    };
     set_optional_str(&err, "io_kind", Some(IoKind::from(kind).as_str()));
     err
+}
+
+/// Rebuilds `err` as an instance of its own class called with
+/// `(errno, strerror, filename)`; keeps `err` with `filename` set when the call
+/// fails.
+fn with_os_error_args(
+    err: &PyErr,
+    raw_os_error: Option<i32>,
+    description: &str,
+    filename: &str,
+) -> PyErr {
+    Python::attach(|py| {
+        err.get_type(py)
+            .call1((raw_os_error, description, filename))
+            .map_or_else(
+                |_| {
+                    let kept = err.clone_ref(py);
+                    set_attr(&kept, "filename", Some(filename));
+                    kept
+                },
+                PyErr::from_value,
+            )
+    })
 }
 
 /// The `errno` name of a refusal that is also a builtin `OSError`
@@ -599,6 +636,7 @@ mod tests {
         pyo3::Python::initialize();
         let py_err = convert_error(CoreError::DestinationNotAccessible {
             path: std::path::PathBuf::from("file.txt/sub"),
+            step: exarch_core::DestinationStep::Resolve,
             error: std::io::Error::from(std::io::ErrorKind::NotADirectory),
         });
         Python::attach(|py| {

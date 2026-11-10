@@ -14,6 +14,7 @@ use crate::ArchiveError;
 use crate::BackupIdentity;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
+use crate::DestinationStep;
 use crate::EntryPosition;
 use crate::ExistingFiles;
 use crate::ExtractRequest;
@@ -728,9 +729,15 @@ fn an_unlistable_destination_is_refused_by_name_and_left_untouched() {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let error = result.unwrap_err();
-        let ArchiveError::DestinationNotAccessible { path, error: io } = &error else {
+        let ArchiveError::DestinationNotAccessible {
+            path,
+            step,
+            error: io,
+        } = &error
+        else {
             panic!("{mode:o}: expected DestinationNotAccessible, got {error:?}");
         };
+        assert_eq!(*step, DestinationStep::List, "{mode:o}");
         assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied, "{mode:o}");
         assert_eq!(path, &dest, "{mode:o}");
         assert!(
@@ -739,6 +746,83 @@ fn an_unlistable_destination_is_refused_by_name_and_left_untouched() {
         );
         assert!(fx.leftovers().is_empty(), "{mode:o}: {:?}", fx.leftovers());
     }
+}
+
+/// Makes `dir` unusable for the caller and restores it on drop; `None` when
+/// directory permissions are not enforced (running as root).
+struct Locked(PathBuf);
+
+impl Locked {
+    fn new(dir: &Path, mode: u32) -> Option<Self> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        let guard = Self(dir.to_path_buf());
+        if std::fs::File::create(dir.join("probe")).is_ok() || std::fs::read_dir(dir).is_ok() {
+            eprintln!("skipping: directory permissions are not enforced (running as root?)");
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+fn not_accessible(error: &ArchiveError) -> (&Path, DestinationStep) {
+    let ArchiveError::DestinationNotAccessible { path, step, .. } = error else {
+        panic!("expected DestinationNotAccessible, got {error:?}");
+    };
+    (path, *step)
+}
+
+#[test]
+fn a_parent_that_cannot_be_opened_is_named_at_the_open_step() {
+    use super::AtomicDestination;
+
+    let temp = TempDir::new().unwrap();
+    let parent = temp.path().canonicalize().unwrap().join("locked");
+    std::fs::create_dir(&parent).unwrap();
+    let Some(_locked) = Locked::new(&parent, 0o000) else {
+        return;
+    };
+    let dest = parent.join("dest");
+
+    let error = AtomicDestination::resolve(&dest).err().unwrap();
+
+    assert_eq!(
+        not_accessible(&error),
+        (dest.as_path(), DestinationStep::Open)
+    );
+}
+
+#[test]
+fn a_staging_directory_that_cannot_be_reserved_names_the_caller_destination() {
+    use super::dir::Seed;
+    use super::dir::StagingDir;
+    use super::dir::StagingSite;
+    use crate::formats::pinned_dir::VettedDir;
+
+    let temp = TempDir::new().unwrap();
+    let parent = temp.path().canonicalize().unwrap().join("readonly");
+    std::fs::create_dir(&parent).unwrap();
+    let pin = VettedDir::open_path(&parent).unwrap();
+    let Some(_locked) = Locked::new(&parent, 0o555) else {
+        return;
+    };
+    let destination = temp.path().join("elsewhere/dest");
+    let site = StagingSite {
+        parent: &parent,
+        destination: &destination,
+    };
+
+    let error = StagingDir::create(&pin, site, Seed::Absent).err().unwrap();
+
+    assert_eq!(
+        not_accessible(&error),
+        (destination.as_path(), DestinationStep::Stage)
+    );
 }
 
 #[cfg(any(
@@ -935,6 +1019,7 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
                     | ArchiveError::ReplaceFailed(_)
                     | ArchiveError::InvalidConfiguration { .. }
                     | ArchiveError::OutputExists { .. }
+                    | ArchiveError::DestinationNotAccessible { .. }
                     | ArchiveError::Io(_),
                 "{error}"
             );
@@ -991,6 +1076,7 @@ mod denied_destination {
         let ArchiveError::DestinationNotAccessible {
             path,
             error: io_error,
+            ..
         } = &error
         else {
             panic!("expected DestinationNotAccessible: {error:?}");
@@ -1191,6 +1277,7 @@ mod adoption {
     use super::super::adopt::Claim;
     use super::super::dir::Seed;
     use super::super::dir::StagingDir;
+    use super::super::dir::StagingSite;
     use super::*;
     use crate::formats::pinned_dir::Gid;
     use crate::formats::pinned_dir::Uid;
@@ -1205,7 +1292,7 @@ mod adoption {
     fn an_adopted_mode_is_applied_through_the_descriptor() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -1225,7 +1312,7 @@ mod adoption {
     fn a_group_the_directory_cannot_join_loses_its_group_access() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign = Gid::of(&std::fs::metadata("/").unwrap());
         if foreign == Gid::of(&own) || own.uid() == 0 {
@@ -1250,7 +1337,7 @@ mod adoption {
     fn a_cautious_adoption_never_takes_a_foreign_uid_nor_its_write_bits() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign_uid = Uid::from_raw(own.uid().wrapping_add(1));
 
@@ -1273,7 +1360,7 @@ mod adoption {
     fn a_cautious_adoption_of_an_own_destination_keeps_its_mode() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -1293,7 +1380,7 @@ mod adoption {
     fn a_read_only_adopted_directory_can_still_be_discarded() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
@@ -1316,7 +1403,7 @@ mod adoption {
     fn dropping_a_staging_directory_removes_it() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
         let path = staging.path().to_path_buf();
         assert_eq!(mode_of(&path), 0o700);
 
@@ -1335,6 +1422,7 @@ mod narrowing {
     use super::super::adopt::Claim;
     use super::super::dir::Seed;
     use super::super::dir::StagingDir;
+    use super::super::dir::StagingSite;
     use super::super::publish_adopted;
     use super::super::replace::swap_adopted_for_test;
     #[cfg(acl_copy)]
@@ -1406,8 +1494,7 @@ mod narrowing {
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
             &destination.pin,
-            &destination.parent,
-            &destination.parent,
+            StagingSite::at(&destination.parent),
             Seed::Absent,
         )
         .unwrap();
@@ -1500,7 +1587,7 @@ mod narrowing {
         let temp = TempDir::new().unwrap();
         let parent = temp.path().canonicalize().unwrap();
         let pin = crate::formats::pinned_dir::VettedDir::open_path(&parent).unwrap();
-        let mut staging = StagingDir::create(&pin, &parent, &parent, Seed::Absent).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
 
         let root = staging
             .adopt(Adoption::for_test_with_acl(
@@ -1536,8 +1623,7 @@ mod narrowing {
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
             &destination.pin,
-            &destination.parent,
-            &destination.parent,
+            StagingSite::at(&destination.parent),
             Seed::Absent,
         )
         .unwrap();
@@ -1615,8 +1701,7 @@ mod narrowing {
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
             &destination.pin,
-            &destination.parent,
-            &destination.parent,
+            StagingSite::at(&destination.parent),
             Seed::Absent,
         )
         .unwrap();
@@ -1653,6 +1738,7 @@ mod seeding {
     use super::super::adopt::Claim;
     use super::super::dir::Seed;
     use super::super::dir::StagingDir;
+    use super::super::dir::StagingSite;
     use super::super::publish_adopted;
     use super::super::replace::swap_adopted_for_test;
     use super::*;
@@ -1685,7 +1771,7 @@ mod seeding {
         let withheld = || Seed::FillEmpty(FileIdentity::Unknown, Inheritance::Withheld(reason));
 
         let (_temp, parent, pin, seed) = stage(|_| withheld());
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
         let narrowed = staging.adopt(adoption()).unwrap();
         assert_eq!(narrowed.reasons(), [reason]);
         assert_eq!(mode_of(staging.path()), 0o700);
@@ -1696,8 +1782,7 @@ mod seeding {
         let mut report = ExtractionReport::new();
         let mut staging = StagingDir::create(
             &destination.pin,
-            &destination.parent,
-            &destination.parent,
+            StagingSite::at(&destination.parent),
             withheld(),
         )
         .unwrap();
@@ -1733,7 +1818,7 @@ mod seeding {
         }
         let reason = NarrowingReason::AclUnreadable;
         let (_temp, parent, pin, seed) = withheld_stage(reason);
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(Adoption::for_test(0o775, uid, foreign, Claim::Full))
@@ -1752,7 +1837,7 @@ mod seeding {
         }
         let reason = NarrowingReason::AclUnreadable;
         let (_temp, parent, pin, seed) = withheld_stage(reason);
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(Adoption::for_test(
@@ -1773,7 +1858,7 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
         let adopted_from = identity(&temp, "adopted-from");
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(
@@ -1795,7 +1880,7 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
         let adopted_from = identity(&temp, "adopted-from");
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(adoption().of_destination_identity(adopted_from))
@@ -1810,7 +1895,7 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "dest"), Inheritance::None));
         let same = identity_of(&temp.path().join("dest")).unwrap();
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(adoption().of_destination_identity(same))
@@ -1843,8 +1928,10 @@ mod seeding {
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
             &destination.pin,
-            &destination.parent,
-            &output,
+            StagingSite {
+                parent: &destination.parent,
+                destination: &output,
+            },
             Seed::FillEmpty(identity(&temp, "gone"), Inheritance::None),
         )
         .unwrap();
@@ -1862,7 +1949,7 @@ mod seeding {
     fn an_absent_destination_probes_the_umask_and_removes_the_probe() {
         let (_temp, parent, pin, seed) = stage(|_| Seed::Absent);
 
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         assert!(staging.take_fresh().is_some());
         assert!(
@@ -1876,7 +1963,7 @@ mod seeding {
         let (_temp, parent, pin, seed) =
             stage(|temp| Seed::Replace(identity(temp, "dest"), Inheritance::None));
 
-        let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
         assert!(staging.take_fresh().is_none());
     }
@@ -1910,7 +1997,7 @@ mod seeding {
         #[test]
         fn a_seeded_stage_whose_destination_vanished_is_private_without_the_seed() {
             let (_temp, parent, pin, seed) = stage(seeded_from);
-            let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+            let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
             let fresh = staging.take_fresh().unwrap();
 
             let narrowed = staging.adopt(fresh).unwrap();
@@ -1934,13 +2021,9 @@ mod seeding {
                 identity(&temp, "gone"),
                 Inheritance::Stage(InheritedAcl::valid_for_test()),
             );
-            let mut staging = StagingDir::create(
-                &destination.pin,
-                &destination.parent,
-                &destination.parent,
-                seed,
-            )
-            .unwrap();
+            let mut staging =
+                StagingDir::create(&destination.pin, StagingSite::at(&destination.parent), seed)
+                    .unwrap();
             let mut report = ExtractionReport::new();
 
             publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap();
@@ -1967,7 +2050,7 @@ mod seeding {
                 )
             });
 
-            let mut staging = StagingDir::create(&pin, &parent, &parent, seed).unwrap();
+            let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
 
             let plan =
                 acl::read_destination(&pin, staging.name.as_leaf(), &parent, staging.id).unwrap();
@@ -2069,6 +2152,7 @@ fn a_ledger_holds_every_entry_a_run_creates_whatever_existing_files_says() {
     let ledger = Rc::new(RunRecord::new(Recording::Ledger));
     let output = StagedOutput::new(
         stage.clone(),
+        fx.parent.clone(),
         std::fs::File::open(&stage).unwrap(),
         Rc::clone(&ledger),
     );

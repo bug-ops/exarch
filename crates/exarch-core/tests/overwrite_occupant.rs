@@ -1,5 +1,7 @@
-//! `--force` extraction over a path an earlier entry occupies fails with an
-//! error that names the entry and the occupant, not a bare errno (#765).
+//! `--force` extraction over a path an earlier entry occupies fails with a
+//! typed refusal that names the entry, not a bare errno (#765, #1176): a
+//! directory occupant is `OUTPUT_EXISTS` with the entry in `conflicts`, a
+//! symlink occupant is `EXISTING_SYMLINK`.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
@@ -8,11 +10,15 @@ use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
+use exarch_core::FfiDetail;
+use exarch_core::FfiKind;
 use exarch_core::SecurityConfig;
+use exarch_core::SecurityViolationSubCode;
 use tempfile::TempDir;
 
 fn tar_entry(name: &str, kind: tar::EntryType, data: &[u8], link: Option<&str>) -> Vec<u8> {
@@ -43,13 +49,40 @@ fn force_options() -> ExtractionOptions {
     ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite)
 }
 
-fn extract_forced(archive: &Path, out: &TempDir, config: &SecurityConfig) -> String {
-    let error = ExtractRequest::new(config)
+fn extract_forced(archive: &Path, out: &TempDir, config: &SecurityConfig) -> ArchiveError {
+    ExtractRequest::new(config)
         .with_options(force_options())
         .extract(archive, out.path())
-        .unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::IoError, "{error}");
-    error.to_string()
+        .unwrap_err()
+}
+
+/// A directory occupant is refused as `OUTPUT_EXISTS` naming `entry`, and the
+/// release message a binding gets carries the entry in `conflicts`.
+fn assert_directory_refused(error: ArchiveError, entry: &str) {
+    assert_eq!(error.error_code(), ErrorCode::OutputExists, "{error}");
+    let message = error.into_ffi_message();
+    let FfiDetail::Occupied { conflicts, .. } = message.detail else {
+        panic!("expected the occupied paths: {message:?}");
+    };
+    assert_eq!(&*conflicts, [entry.to_owned()]);
+}
+
+/// A symlink occupant is refused as `EXISTING_SYMLINK` naming `entry`.
+fn assert_symlink_refused(error: ArchiveError, entry: &str) {
+    assert!(matches!(
+        error.ffi_kind(),
+        FfiKind::SecurityViolation {
+            sub_code: SecurityViolationSubCode::ExistingSymlink,
+            ..
+        }
+    ));
+    let message = error.into_ffi_message().description;
+    assert!(
+        message.contains(&format!(
+            "refusing to replace the existing symlink at {entry}"
+        )),
+        "{message}"
+    );
 }
 
 #[test]
@@ -64,12 +97,9 @@ fn tar_file_over_directory_names_the_entry() {
     );
     let out = TempDir::new().unwrap();
 
-    let message = extract_forced(&archive, &out, &SecurityConfig::default());
+    let error = extract_forced(&archive, &out, &SecurityConfig::default());
 
-    assert!(
-        message.contains("refusing to replace the existing directory at d"),
-        "{message}"
-    );
+    assert_directory_refused(error, "d");
     assert!(out.path().join("d").is_dir());
 }
 
@@ -88,12 +118,9 @@ fn tar_file_over_symlink_names_the_entry() {
     let out = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let message = extract_forced(&archive, &out, &config);
+    let error = extract_forced(&archive, &out, &config);
 
-    assert!(
-        message.contains("refusing to replace the existing symlink at l"),
-        "{message}"
-    );
+    assert_symlink_refused(error, "l");
     assert!(out.path().join("l").is_symlink());
 }
 
@@ -158,12 +185,9 @@ fn sevenz_file_over_directory_names_the_entry() {
     let out = TempDir::new().unwrap();
     std::fs::create_dir(out.path().join("target")).unwrap();
 
-    let message = extract_forced(&archive, &out, &SecurityConfig::default());
+    let error = extract_forced(&archive, &out, &SecurityConfig::default());
 
-    assert!(
-        message.contains("refusing to replace the existing directory at target"),
-        "{message}"
-    );
+    assert_directory_refused(error, "target");
     assert!(out.path().join("target").is_dir());
 }
 
@@ -182,13 +206,9 @@ fn tar_symlink_over_directory_names_the_entry() {
     let out = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let message = extract_forced(&archive, &out, &config);
+    let error = extract_forced(&archive, &out, &config);
 
-    assert!(
-        message.contains("refusing to replace the existing directory at d"),
-        "{message}"
-    );
-    assert!(!message.contains("os error"), "{message}");
+    assert_directory_refused(error, "d");
     assert!(out.path().join("d").is_dir());
 }
 
@@ -207,12 +227,9 @@ fn tar_symlink_over_nested_directory_names_the_normalized_path() {
     let out = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let message = extract_forced(&archive, &out, &config);
+    let error = extract_forced(&archive, &out, &config);
 
-    assert!(
-        message.contains("refusing to replace the existing directory at a/b"),
-        "{message}"
-    );
+    assert_directory_refused(error, "a/b");
     assert!(out.path().join("a/b").is_dir());
 }
 
@@ -232,13 +249,9 @@ fn zip_symlink_over_directory_names_the_entry() {
     let out = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let message = extract_forced(&archive, &out, &config);
+    let error = extract_forced(&archive, &out, &config);
 
-    assert!(
-        message.contains("refusing to replace the existing directory at d"),
-        "{message}"
-    );
-    assert!(!message.contains("os error"), "{message}");
+    assert_directory_refused(error, "d");
     assert!(out.path().join("d").is_dir());
 }
 
@@ -269,13 +282,9 @@ fn sevenz_symlink_over_directory_names_the_entry() {
     let out = TempDir::new().unwrap();
     let config = SecurityConfig::default().with_allow_symlinks(true);
 
-    let message = extract_forced(&archive, &out, &config);
+    let error = extract_forced(&archive, &out, &config);
 
-    assert!(
-        message.contains("refusing to replace the existing directory at d"),
-        "{message}"
-    );
-    assert!(!message.contains("os error"), "{message}");
+    assert_directory_refused(error, "d");
     assert!(out.path().join("d").is_dir());
 }
 
@@ -305,12 +314,9 @@ fn zip_file_over_directory_names_the_entry() {
     let archive = write_archive(&dir, "occupied.zip", &bytes);
     let out = TempDir::new().unwrap();
 
-    let message = extract_forced(&archive, &out, &SecurityConfig::default());
+    let error = extract_forced(&archive, &out, &SecurityConfig::default());
 
-    assert!(
-        message.contains("refusing to replace the existing directory at d"),
-        "{message}"
-    );
+    assert_directory_refused(error, "d");
     assert!(out.path().join("d").is_dir());
 }
 
@@ -328,12 +334,9 @@ fn zip_file_over_existing_symlink_names_the_entry() {
     let out = TempDir::new().unwrap();
     std::os::unix::fs::symlink("t", out.path().join("l")).unwrap();
 
-    let message = extract_forced(&archive, &out, &SecurityConfig::default());
+    let error = extract_forced(&archive, &out, &SecurityConfig::default());
 
-    assert!(
-        message.contains("refusing to replace the existing symlink at l"),
-        "{message}"
-    );
+    assert_symlink_refused(error, "l");
     assert!(out.path().join("l").is_symlink());
 }
 
@@ -356,11 +359,8 @@ fn sevenz_file_over_existing_symlink_names_the_entry() {
     let out = TempDir::new().unwrap();
     std::os::unix::fs::symlink("t", out.path().join("l")).unwrap();
 
-    let message = extract_forced(&archive, &out, &SecurityConfig::default());
+    let error = extract_forced(&archive, &out, &SecurityConfig::default());
 
-    assert!(
-        message.contains("refusing to replace the existing symlink at l"),
-        "{message}"
-    );
+    assert_symlink_refused(error, "l");
     assert!(out.path().join("l").is_symlink());
 }

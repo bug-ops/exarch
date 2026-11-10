@@ -29,7 +29,6 @@ use crate::DecodeReuse;
 use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::Malformation;
-use crate::OccupiedBy;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
@@ -38,8 +37,11 @@ use crate::copy::CopyBuffer;
 use crate::copy::copy_cancellable;
 use crate::formats::common;
 use crate::formats::io_marker::IoMarker;
+use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::refuse_hardlink_replace;
+use crate::formats::occupant::replaces_symlink;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -638,8 +640,8 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
                     return Ok(None);
                 }
                 OccupantAction::Replace(_) => {
-                    if matches!(occupant, Occupant::Directory | Occupant::Symlink) {
-                        return Err(common::occupant_at_dest_error(rel, occupant).into());
+                    if let Some(kept) = KeptOccupant::of(occupant) {
+                        return Err(kept_refusal(kept, rel));
                     }
                 }
             }
@@ -712,6 +714,17 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             }),
         }
     }
+}
+
+/// The refusal of a kept occupant in the sink tree, which holds only what the
+/// run delivered.
+fn kept_refusal(kept: KeptOccupant, rel: &Path) -> ArchiveError {
+    kept_occupant_refusal(
+        kept,
+        rel,
+        || true,
+        || common::occupied_without_destination(rel),
+    )
 }
 
 /// What to do with a path the sink tree already holds.
@@ -857,7 +870,18 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
         let rel = path.as_path();
         let occupied = self.tree.occupant(rel).is_some();
-        let resolved = self.place(path, Node::Dir)?;
+        let resolved = self
+            .tree
+            .project_landing(path, Node::Dir, LandingLimits::Enforced)
+            .map_err(|error| match error {
+                PlaceError::Conflict(conflict)
+                    if conflict.blocked.is_none()
+                        && conflict.occupant == Some(Occupant::Symlink) =>
+                {
+                    replaces_symlink(rel)
+                }
+                other => place_error(other),
+            })?;
         if !occupied && !rel.is_empty() {
             self.sink.create_directory(&resolved).map_err(sink_error)?;
         }
@@ -919,7 +943,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             }
             match occupant {
                 Occupant::Directory => {
-                    return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
+                    return Err(kept_refusal(KeptOccupant::Directory, rel));
                 }
                 Occupant::Symlink => {
                     // An unchanged link re-points nothing; any other target is
@@ -932,7 +956,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     return match unchanged {
                         Ok(_) => common::record_duplicate_skip(tally.report, rel),
                         Err(PlaceError::Conflict(_)) => {
-                            Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
+                            Err(kept_refusal(KeptOccupant::Symlink, rel))
                         }
                         Err(error) => Err(place_error(error)),
                     };
@@ -998,7 +1022,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     permit,
                     Some(occupant),
                     link.as_path(),
-                    OccupiedBy::Archive,
+                    || true,
                     || common::occupied_without_destination(link.as_path()),
                 )),
             };

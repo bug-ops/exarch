@@ -322,7 +322,7 @@ pub(super) struct StagingSite<'a> {
 
 impl StagingSite<'_> {
     /// A site whose destination is its parent, for tests that stage in place.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) const fn at(path: &Path) -> StagingSite<'_> {
         StagingSite {
             parent: path,

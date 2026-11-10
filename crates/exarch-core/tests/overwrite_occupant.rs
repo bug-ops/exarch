@@ -6,6 +6,8 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(unix)]
+use std::assert_matches;
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,8 +18,10 @@ use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::FfiDetail;
+#[cfg(unix)]
 use exarch_core::FfiKind;
 use exarch_core::SecurityConfig;
+#[cfg(unix)]
 use exarch_core::SecurityViolationSubCode;
 use tempfile::TempDir;
 
@@ -68,14 +72,15 @@ fn assert_directory_refused(error: ArchiveError, entry: &str) {
 }
 
 /// A symlink occupant is refused as `EXISTING_SYMLINK` naming `entry`.
+#[cfg(unix)]
 fn assert_symlink_refused(error: ArchiveError, entry: &str) {
-    assert!(matches!(
+    assert_matches!(
         error.ffi_kind(),
         FfiKind::SecurityViolation {
             sub_code: SecurityViolationSubCode::ExistingSymlink,
             ..
         }
-    ));
+    );
     let message = error.into_ffi_message().description;
     assert!(
         message.contains(&format!(

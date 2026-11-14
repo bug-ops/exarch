@@ -2565,10 +2565,10 @@ mod tests {
                 by,
             });
             assert_eq!(d.props.path, None);
-            assert!(matches!(
+            assert_matches!(
                 d.props.detail,
                 FfiDetail::Occupied { by: got, .. } if got == by
-            ));
+            );
         }
     }
 

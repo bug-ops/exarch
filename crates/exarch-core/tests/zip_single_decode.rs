@@ -55,7 +55,7 @@ fn every_mode_extracts_the_same_files_and_report() {
         let out = TempDir::new().unwrap();
         let options = ExtractionOptions::default().with_decode_reuse(mode);
         let report = ExtractRequest::new(&config)
-            .with_options(options.clone())
+            .with_options(options)
             .extract(&archive, out.path())
             .unwrap();
         assert_eq!(report.files_extracted, ENTRIES, "{mode:?}");
@@ -78,7 +78,7 @@ fn mixed_methods_and_empty_entries_extract_the_same_in_every_mode() {
         let direct = TempDir::new().unwrap();
         let options = ExtractionOptions::default().with_decode_reuse(mode);
         ExtractRequest::new(&config)
-            .with_options(options.clone())
+            .with_options(options)
             .extract(&archive, direct.path())
             .unwrap();
 

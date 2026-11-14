@@ -5,6 +5,10 @@ use std::io;
 
 /// No value exists, so no mark can be held.
 #[derive(Clone, Copy)]
+#[allow(
+    clippy::empty_enums,
+    reason = "uninhabited on purpose, stable has no `!`"
+)]
 pub(super) enum Mark {}
 
 pub(super) const SUPPORTED: bool = false;

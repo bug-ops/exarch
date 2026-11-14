@@ -987,7 +987,7 @@ mod macos {
                 &parent,
                 "everyone allow list,add_file,search,add_subdirectory,directory_inherit",
             );
-            let observed = parent.clone();
+            let observed = parent;
 
             let report = fx.extract_observed(staging, move || {
                 let stage = staging_dir_in(&observed);

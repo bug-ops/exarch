@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `--json` lists an incomplete mark outcome in `warnings`, matching the human output (#1190).
 - Tests: the extract SIGINT test waits on the child's write syscall on Linux instead of a fixed 100 ms sleep (#1190).
 - CI: the release job creates the GitHub release with `gh release` instead of a third-party action (#1190).
+- CI: the clippy 1.100 lints (`empty_enums`, `redundant_clone`, `used_underscore_items`) no longer fail the build (#1190).
 - Specs: `MOC-specs.md` hints name the last change each spec is synced through (#1190).
 
 ## [0.10.0] - 2026-11-10

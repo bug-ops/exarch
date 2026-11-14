@@ -997,8 +997,7 @@ fn a_racing_destination_flip_never_touches_a_planted_symlinks_target() {
         let stop = std::sync::Arc::new(AtomicBool::new(false));
 
         let attacker = {
-            let (stop, dest, victim, aside) =
-                (stop.clone(), dest.clone(), victim.clone(), aside.clone());
+            let (stop, dest, victim, aside) = (stop.clone(), dest.clone(), victim.clone(), aside);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     if std::fs::rename(&dest, &aside).is_ok() {

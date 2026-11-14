@@ -728,7 +728,7 @@ fn existing_destination_symlink_is_not_replaced() {
         symlink("p/q", out.path().join("x")).unwrap();
         let options = ExtractionOptions::default().with_existing_files(existing_files);
         let result = ExtractRequest::new(&allow_symlinks())
-            .with_options(options.clone())
+            .with_options(options)
             .extract(&path, out.path());
 
         if existing_files == ExistingFiles::Skip {
@@ -779,7 +779,7 @@ fn dangling_link_at_the_link_path_is_skipped_or_refused_by_policy() {
         let options = ExtractionOptions::default().with_existing_files(existing_files);
 
         let result = ExtractRequest::new(&allow_symlinks())
-            .with_options(options.clone())
+            .with_options(options)
             .extract(&path, out.path());
 
         if existing_files == ExistingFiles::Skip {

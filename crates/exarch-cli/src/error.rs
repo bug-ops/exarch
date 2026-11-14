@@ -1202,6 +1202,11 @@ fn dedicated_context(
         ArchiveError::SourceNotAccessible { path, error } => {
             source_not_accessible_context(op, path, error, message)
         }
+        ArchiveError::SourceChanged { path } => message
+            .restating_source()
+            .lit("Source changed during creation: ")
+            .path(path)
+            .hint_lit("Run the command again once the source is no longer being modified."),
         ArchiveError::DestinationNotAccessible { path, step, error } => message
             .restating_source()
             .lit("Destination is not accessible: ")

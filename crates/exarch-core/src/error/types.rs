@@ -700,6 +700,14 @@ pub enum ArchiveError {
         error: std::io::Error,
     },
 
+    /// A creation source no longer matches what the walk saw: it was replaced,
+    /// is not a regular file, or changed size while it was copied.
+    #[error("source path changed during creation: {path}")]
+    SourceChanged {
+        /// The source path.
+        path: PathBuf,
+    },
+
     /// A destination cannot be resolved, created or written.
     ///
     /// Raised when the destination probe of a listing fails, and when an
@@ -1024,6 +1032,7 @@ impl ArchiveError {
             | Self::TarAmbiguity(_)
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1091,6 +1100,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1158,6 +1168,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1202,6 +1213,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1245,6 +1257,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1358,6 +1371,7 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1391,6 +1405,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }

@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::IoContext;
 use crate::Result;
+use crate::creation::open::SourceChangedMidRead;
 use crate::creation::progress::CancelledMidEntry;
 use crate::formats::io_marker::IoMarker;
 use std::io;
@@ -13,10 +14,15 @@ use std::path::PathBuf;
 /// Classifies an I/O failure on the creation source `path`.
 ///
 /// A source that is gone (`NotFound`, or a parent that is not a directory) is
-/// [`ArchiveError::SourceNotFound`]; every other failure keeps its cause in
-/// [`ArchiveError::SourceNotAccessible`].
+/// [`ArchiveError::SourceNotFound`]; a source that stopped matching its header
+/// mid-read is [`ArchiveError::SourceChanged`]; every other failure keeps its
+/// cause in [`ArchiveError::SourceNotAccessible`].
 pub(crate) fn source_error(path: &Path, error: io::Error) -> ArchiveError {
-    if matches!(
+    if SourceChangedMidRead::find(&error).is_some() {
+        ArchiveError::SourceChanged {
+            path: path.to_path_buf(),
+        }
+    } else if matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
     ) {
@@ -57,7 +63,7 @@ fn duplicate(error: &io::Error) -> io::Error {
 }
 
 /// Wraps a source reader and keeps the first read error that is not
-/// `Interrupted` in `fault`.
+/// `Interrupted` or a [`SourceChangedMidRead`] in `fault`.
 ///
 /// A copy into the archive fails with one `io::Error` whether the read or the
 /// write side broke; the slot tells the two apart so only a read fault is
@@ -78,6 +84,7 @@ impl<R: Read> Read for FaultSlotReader<'_, R> {
         let result = self.inner.read(buf);
         if let Err(error) = &result
             && error.kind() != io::ErrorKind::Interrupted
+            && SourceChangedMidRead::find(error).is_none()
             && self.fault.is_none()
         {
             *self.fault = Some(duplicate(error));
@@ -96,6 +103,9 @@ pub(crate) fn copy_outcome<T>(
     result.map_err(|error| {
         if CancelledMidEntry::find(&error).is_some() {
             return ArchiveError::Cancelled;
+        }
+        if SourceChangedMidRead::find(&error).is_some() {
+            return source_error(path, error);
         }
         fault.map_or_else(|| error.into(), |fault| source_error(path, fault))
     })

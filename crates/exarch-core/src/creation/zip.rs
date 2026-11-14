@@ -15,6 +15,7 @@ use crate::ZipBombDetails;
 use crate::ZipBombScope;
 use crate::copy::CancelClock;
 use crate::creation::config::CreationConfig;
+use crate::creation::open::open_entry;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::progress::check_cancelled;
 use crate::creation::report::CreationReport;
@@ -23,10 +24,10 @@ use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
+use crate::creation::walker::FilteredEntry;
 use crate::creation::walker::collect_entries;
 use crate::security::Compressed;
 use crate::security::Uncompressed;
-use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
@@ -77,8 +78,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
         match &entry.entry_type {
             EntryType::File => add_file_to_zip_with_progress_and_buffer(
                 &mut zip,
-                &entry.path,
-                &entry.archive_path,
+                entry,
                 config,
                 &mut report,
                 &options,
@@ -102,8 +102,7 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
                 if config.follow_symlinks {
                     add_file_to_zip_with_progress_and_buffer(
                         &mut zip,
-                        &entry.path,
-                        &entry.archive_path,
+                        entry,
                         config,
                         &mut report,
                         &options,
@@ -195,23 +194,20 @@ fn extraction_ratio_warning<R: Read + Seek>(
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable
 /// buffer.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
-)]
 fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
-    file_path: &Path,
-    archive_path: &Path,
+    entry: &FilteredEntry,
     config: &CreationConfig,
     report: &mut CreationReport,
     options: &SimpleFileOptions,
     progress: &mut dyn ProgressCallback,
     buffer: &mut [u8],
 ) -> Result<()> {
-    let mut file = File::open(file_path).map_err(|e| source_error(file_path, e))?;
-    let metadata = file.metadata().map_err(|e| source_error(file_path, e))?;
-    let size = metadata.len();
+    let file_path = entry.path.as_path();
+    let archive_path: &Path = &entry.archive_path;
+    let source = open_entry(entry, config)?;
+    let size = source.size();
+    let (metadata, mut file) = source.into_exact();
 
     // Check file size limit
     if !config.max_file_size.admits(size) {
@@ -313,6 +309,7 @@ mod tests {
     use crate::creation::CompressionLevel;
     use std::assert_matches;
     use std::fs;
+    use std::fs::File;
     use tempfile::TempDir;
 
     #[test]

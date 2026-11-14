@@ -137,6 +137,7 @@ _SkipKind = Literal[
     "hidden",
     "over_max_file_size",
     "symlink_unsupported",
+    "special_file",
     "unreadable",
 ]
 _ErrorCode = Literal[
@@ -152,6 +153,7 @@ _ErrorCode = Literal[
     "INVALID_PERMISSIONS",
     "SOURCE_NOT_FOUND",
     "SOURCE_NOT_ACCESSIBLE",
+    "SOURCE_CHANGED",
     "OUTPUT_EXISTS",
     "INVALID_COMPRESSION_LEVEL",
     "UNKNOWN_FORMAT",
@@ -2528,6 +2530,17 @@ class SourceNotAccessibleError(ArchiveError, OSError):
     """
 
     ...
+
+class SourceChangedError(ArchiveError):
+    """
+    A creation source changed while it was archived (``code == "SOURCE_CHANGED"``).
+
+    Raised when a source was replaced after it was listed, is not a regular
+    file, or changed size while it was copied. Creation stops and the output
+    is not published.
+    """
+
+    path: str
 
 class InvalidConfigurationError(ArchiveError, ValueError):
     """

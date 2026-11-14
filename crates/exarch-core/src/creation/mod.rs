@@ -4,6 +4,7 @@
 //! sources with security and configuration options.
 
 pub(crate) mod filters;
+pub(crate) mod open;
 pub(crate) mod walker;
 
 pub(crate) mod compression;
@@ -14,6 +15,9 @@ pub(crate) mod source;
 pub(crate) mod staged;
 pub(crate) mod tar;
 pub(crate) mod zip;
+
+#[cfg(all(test, unix))]
+mod source_tests;
 
 // Re-exports for public API
 pub use config::CompressionLevel;

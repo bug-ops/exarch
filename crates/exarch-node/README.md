@@ -299,7 +299,7 @@ try {
 | `nonUtf8EntryPath` | an `INVALID_ARCHIVE` (`'ENTRY_NAME'`) refusal of an entry name that is not valid UTF-8 | The name written injectively: a backslash is `\x5C`, each invalid byte `\xNN` |
 | `restore`, `backupPath` | an `IO_ERROR` from a failed `'atomic_replace'` | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; paths are redacted like the message |
 | `leftoverPath` | a staging directory or an empty output reservation file stayed on disk (a failed `'atomic_replace'`, a rolled-back extraction, a creation that left its reservation) | The leftover, redacted like the message |
-| `path` | a `SOURCE_NOT_FOUND`, an `OUTPUT_EXISTS`, or an `IO_ERROR` that left an empty output reservation | The source, the existing output or destination, or the reservation file, redacted like the message |
+| `path` | a `SOURCE_NOT_FOUND`, a `SOURCE_CHANGED`, an `OUTPUT_EXISTS`, or an `IO_ERROR` that left an empty output reservation | The source, the existing output or destination, or the reservation file, redacted like the message |
 | `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
 | `protectedPath`, `collision`, `unmatchedPatterns` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, for creation sources that map to one entry name, or for include patterns that matched no entry | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }`; the unmatched patterns |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |

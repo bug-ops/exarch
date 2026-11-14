@@ -1461,18 +1461,19 @@ impl ArchiveError {
     /// use exarch_core::OccupancyDetail;
     /// use exarch_core::OccupiedBy;
     /// use exarch_core::Violation;
+    /// use std::assert_matches;
     ///
     /// let error: ArchiveError = Violation::ReplacesSymlink {
     ///     rel: "l".into(),
     ///     by: OccupiedBy::Existing,
     /// }
     /// .into();
-    /// assert!(matches!(
+    /// assert_matches!(
     ///     error.occupancy(),
     ///     Some(OccupancyDetail::ExistingSymlink {
     ///         by: OccupiedBy::Existing
     ///     })
-    /// ));
+    /// );
     /// assert!(ArchiveError::Cancelled.occupancy().is_none());
     /// ```
     #[must_use]

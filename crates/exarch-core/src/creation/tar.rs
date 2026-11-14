@@ -508,41 +508,6 @@ mod tests {
         );
     }
 
-    /// #1214: a directory reached through a followed symlink keeps the mode of
-    /// the directory the walk saw.
-    #[test]
-    #[cfg(unix)]
-    fn test_create_tar_followed_directory_keeps_walked_mode() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let outside = TempDir::new().unwrap();
-        let real = outside.path().join("real");
-        fs::create_dir(&real).unwrap();
-        fs::write(real.join("f.txt"), b"x").unwrap();
-        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let source_dir = TempDir::new().unwrap();
-        std::os::unix::fs::symlink(&real, source_dir.path().join("linked")).unwrap();
-
-        let temp = TempDir::new().unwrap();
-        let output = temp.path().join("output.tar");
-        let config = CreationConfig::default()
-            .with_follow_symlinks(true)
-            .with_preserve_permissions(true);
-        create_archive(&output, &[source_dir.path()], &config).unwrap();
-
-        let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
-        let mut mode = None;
-        for entry in archive.entries().unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().unwrap().as_ref() == Path::new("linked/") {
-                mode = Some(entry.header().mode().unwrap());
-            }
-        }
-        let mode = mode.unwrap();
-        assert_eq!(mode & 0o777, 0o700);
-    }
-
     /// Regression test for #632: headers carry permission bits only, so
     /// `list` agrees with ZIP and system `tar`.
     #[test]

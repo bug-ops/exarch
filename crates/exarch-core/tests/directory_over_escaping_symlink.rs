@@ -9,6 +9,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
@@ -203,10 +204,7 @@ fn sevenz_file_below_an_escaping_symlink_without_a_directory_entry_stays_path_tr
 
     let error = extract(&archive, &dest, ExistingFiles::Refuse).unwrap_err();
 
-    assert!(
-        matches!(error, ArchiveError::PathTraversal { .. }),
-        "{error}"
-    );
+    assert_matches!(error, ArchiveError::PathTraversal { .. }, "{error}");
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
 }
 

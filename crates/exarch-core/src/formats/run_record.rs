@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_diagnostic_record_saturates_at_its_cap_and_a_full_one_does_not() {
+    fn a_diagnostic_record_keeps_exactly_its_cap_and_saturates_on_the_next_landing() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("first"), b"x").unwrap();
@@ -397,10 +397,17 @@ mod tests {
         let full = RunRecord::new(RecordBudget::Full);
         diagnostic.note(&dir, leaf("first"), "first".as_ref());
         full.note(&dir, leaf("first"), "first".as_ref());
-        for index in 0..super::DIAGNOSTIC_RECORD_CAP {
-            for record in [&diagnostic, &full] {
-                record.insert(Some(super::LandingKey::Path(format!("p{index}").into())));
-            }
+        let filler = |index: usize| Some(super::LandingKey::Path(format!("p{index}").into()));
+        assert_eq!(super::DIAGNOSTIC_RECORD_CAP, 16384);
+
+        for index in 1..super::DIAGNOSTIC_RECORD_CAP {
+            diagnostic.insert(filler(index));
+        }
+        assert!(diagnostic.created_here(&dir, leaf("first"), "first".as_ref()));
+
+        diagnostic.insert(filler(super::DIAGNOSTIC_RECORD_CAP));
+        for index in 1..=super::DIAGNOSTIC_RECORD_CAP {
+            full.insert(filler(index));
         }
 
         assert!(!diagnostic.created_here(&dir, leaf("first"), "first".as_ref()));

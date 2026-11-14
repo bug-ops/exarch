@@ -5,6 +5,8 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
+use std::assert_matches;
+
 use exarch_core::ArchiveError;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractRequest;
@@ -81,14 +83,12 @@ fn directory_over_an_archive_symlink_past_path_max_is_replaces_symlink() {
             ArchiveError::PartialExtraction(partial) => partial.cause(),
             other => other,
         };
-        assert!(
-            matches!(
-                cause,
-                ArchiveError::SecurityViolation {
-                    kind: Violation::ReplacesSymlink { .. },
-                    ..
-                }
-            ),
+        assert_matches!(
+            cause,
+            ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink { .. },
+                ..
+            },
             "{policy:?}: {error}"
         );
     }

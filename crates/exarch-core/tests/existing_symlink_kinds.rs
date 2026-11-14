@@ -8,6 +8,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
@@ -158,17 +159,15 @@ fn symlink_parent_of_the_run_names_the_archive_as_the_maker() {
 
         let error = extract(&archive, dest.path(), policy, &config()).unwrap_err();
 
-        assert!(
-            matches!(
-                cause(&error),
-                ArchiveError::SecurityViolation {
-                    kind: Violation::SymlinkParent {
-                        by: OccupiedBy::Archive,
-                        ..
-                    },
+        assert_matches!(
+            cause(&error),
+            ArchiveError::SecurityViolation {
+                kind: Violation::SymlinkParent {
+                    by: OccupiedBy::Archive,
                     ..
-                }
-            ),
+                },
+                ..
+            },
             "{policy:?}: {error}"
         );
     }
@@ -240,17 +239,15 @@ fn file_over_an_existing_symlink_stays_replaces_symlink_when_overwriting() {
         .unwrap_err();
 
     for error in [host, check] {
-        assert!(
-            matches!(
-                cause(&error),
-                ArchiveError::SecurityViolation {
-                    kind: Violation::ReplacesSymlink {
-                        by: OccupiedBy::Existing,
-                        ..
-                    },
+        assert_matches!(
+            cause(&error),
+            ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink {
+                    by: OccupiedBy::Existing,
                     ..
-                }
-            ),
+                },
+                ..
+            },
             "{error}"
         );
     }
@@ -291,17 +288,15 @@ fn directory_over_an_escaping_existing_symlink_is_replaces_symlink_in_every_form
 
             let error = extract(&archive, &dest, policy, &SecurityConfig::default()).unwrap_err();
 
-            assert!(
-                matches!(
-                    cause(&error),
-                    ArchiveError::SecurityViolation {
-                        kind: Violation::ReplacesSymlink {
-                            by: OccupiedBy::Existing,
-                            ..
-                        },
+            assert_matches!(
+                cause(&error),
+                ArchiveError::SecurityViolation {
+                    kind: Violation::ReplacesSymlink {
+                        by: OccupiedBy::Existing,
                         ..
-                    }
-                ),
+                    },
+                    ..
+                },
                 "{policy:?} {}: {error}",
                 archive.display()
             );
@@ -355,17 +350,15 @@ fn directory_over_a_symlink_of_the_run_names_the_archive_under_every_mode() {
 
         let error = extract(&archive, dest.path(), policy, &config()).unwrap_err();
 
-        assert!(
-            matches!(
-                cause(&error),
-                ArchiveError::SecurityViolation {
-                    kind: Violation::ReplacesSymlink {
-                        by: OccupiedBy::Archive,
-                        ..
-                    },
+        assert_matches!(
+            cause(&error),
+            ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink {
+                    by: OccupiedBy::Archive,
                     ..
-                }
-            ),
+                },
+                ..
+            },
             "{policy:?}: {error}"
         );
     }

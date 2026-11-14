@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+use std::assert_matches;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
@@ -105,11 +106,10 @@ fn occupancy_existing_symlink_violations_carry_the_maker() {
         for violation in violations {
             let error: ArchiveError = violation.into();
 
-            assert!(
-                matches!(
+            assert_matches!(
                     error.occupancy(),
                     Some(OccupancyDetail::ExistingSymlink { by: seen }) if seen == by
-                ),
+                ,
                 "{error}"
             );
             assert_eq!(
@@ -128,13 +128,13 @@ fn occupancy_looks_through_a_partial_extraction() {
         PartialWrites::Kept,
     ));
 
-    assert!(matches!(
+    assert_matches!(
         wrapped.occupancy(),
         Some(OccupancyDetail::Occupied {
             by: OccupiedBy::Archive,
             ..
         })
-    ));
+    );
 }
 
 #[test]

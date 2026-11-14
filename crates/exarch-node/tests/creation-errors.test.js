@@ -63,7 +63,7 @@ describe('creation source errors', () => {
     assert.strictEqual(report.filesAdded, 1);
     assert.deepStrictEqual(
       report.skipped.counts.filter((c) => c.kind === 'special_file'),
-      [{ kind: 'special_file', count: 1 }],
+      [{ kind: 'special_file', count: 1 }]
     );
   });
 

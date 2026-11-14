@@ -385,6 +385,26 @@ export interface ExarchSourceNotFoundDetail {
   strerror?: undefined
 }
 
+/** A creation source that changed while it was archived; `path` is redacted like an error path. */
+export interface ExarchSourceChangedDetail {
+  code: 'SOURCE_CHANGED'
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  conflicts?: undefined
+  by?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
@@ -398,6 +418,7 @@ export interface ExarchPlainCodeDetail {
     | 'SOURCE_NOT_ACCESSIBLE'
     | 'OUTPUT_EXISTS'
     | 'SOURCE_NOT_FOUND'
+    | 'SOURCE_CHANGED'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -427,6 +448,7 @@ export type ExarchErrorCodeDetail =
   | ExarchSourceNotAccessibleDetail
   | ExarchOutputExistsDetail
   | ExarchSourceNotFoundDetail
+  | ExarchSourceChangedDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */
@@ -1777,7 +1799,7 @@ export type Durability = 'synced' | 'unsynced'
  * failed), `ENTRY_CALLBACK_ERROR` (an `onEntry` callback threw) and
  * `ABORT_ERR` (the `AbortSignal` fired).
  */
-export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'SOURCE_CHANGED' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'CANCELLED' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
 
 /**
  * What extraction does when a destination path is already occupied.
@@ -1837,12 +1859,13 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  *   `HARDLINK_ESCAPE`, `ZIP_BOMB`, `ZIP_INCONSISTENCY`, `QUOTA_EXCEEDED`,
  *   `SECURITY_VIOLATION`, `INVALID_ARCHIVE`, `IO_ERROR`,
  *   `INVALID_PERMISSIONS`, `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`,
- *   `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`, `UNKNOWN_FORMAT`,
- *   `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A path rejected at
- *   the boundary (null byte, too long) is a `SECURITY_VIOLATION` and a
- *   rejected setter value an `INVALID_CONFIGURATION`. Errors raised by the
- *   binding itself (an internal panic, a failed argument conversion) keep
- *   napi's status (`GenericFailure`) as `code`.
+ *   `SOURCE_CHANGED`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`,
+ *   `UNKNOWN_FORMAT`, `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A
+ *   path rejected at the boundary (null byte, too long) is a
+ *   `SECURITY_VIOLATION` and a rejected setter value an
+ *   `INVALID_CONFIGURATION`. Errors raised by the binding itself (an internal
+ *   panic, a failed argument conversion) keep napi's status (`GenericFailure`)
+ *   as `code`.
  * - `relaxableBy`: set on a `SECURITY_VIOLATION` that a `SecurityConfig`
  *   setting relaxes, one of `symlinks`, `hardlinks`, `solid_archives`,
  *   `banned_components`, `max_path_depth`, `windows_reserved_names` or
@@ -2895,7 +2918,7 @@ export interface SkipDisposition {
 }
 
 /** Why an entry was left out of an extraction or a creation. */
-export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'not_selected' | 'stripped_away' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'unreadable'
+export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'not_selected' | 'stripped_away' | 'excluded' | 'hidden' | 'over_max_file_size' | 'symlink_unsupported' | 'special_file' | 'unreadable'
 
 /** One skipped entry. */
 export interface SkippedEntry {

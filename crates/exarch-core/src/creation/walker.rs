@@ -12,6 +12,7 @@ use crate::SkipKind;
 use crate::Skips;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::open::WalkedSource;
 use crate::creation::source::source_error;
 use crate::creation::source::walk_error;
 use crate::creation::staged::ExcludedOutput;
@@ -146,6 +147,14 @@ impl<'a> FilteredWalker<'a> {
         let path = entry.path().to_path_buf();
         let metadata = entry.metadata().map_err(|e| walk_error(e, &path))?;
 
+        if is_special_file(&metadata) {
+            let shown = if relative.is_empty() { path } else { relative };
+            return Ok(Some(WalkItem::Skipped(Skip::new(
+                SkipKind::SpecialFile,
+                shown,
+            ))));
+        }
+
         // Determine entry type
         let entry_type = if metadata.is_symlink() {
             let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
@@ -171,17 +180,18 @@ impl<'a> FilteredWalker<'a> {
             return Ok(None);
         };
 
+        let identity = walked_if_opened(&entry_type, &path, &metadata, self.config)?;
         Ok(Some(WalkItem::Entry(FilteredEntry {
             path,
             archive_path,
             entry_type,
-            size,
+            identity,
         })))
     }
 }
 
 /// What the walker decided about one walked entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum WalkItem {
     /// The entry goes into the archive.
     Entry(FilteredEntry),
@@ -282,7 +292,7 @@ fn entry_name(path: &Path, relative: &Path, is_dir: bool) -> Result<Option<Archi
 ///
 /// Represents a file, directory, or symlink that passed all filtering rules
 /// and is ready to be added to an archive.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct FilteredEntry {
     /// Full filesystem path to the entry.
     pub path: PathBuf,
@@ -293,8 +303,9 @@ pub(crate) struct FilteredEntry {
     /// Type of entry (file, directory, or symlink).
     pub entry_type: EntryType,
 
-    /// Size in bytes (0 for directories).
-    pub size: u64,
+    /// The filesystem object the walk saw, which a later open must match;
+    /// `None` for an entry whose content is never opened.
+    pub identity: Option<WalkedSource>,
 }
 
 /// Type of directory entry.
@@ -377,17 +388,14 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
             // `metadata.is_dir()` can no longer be true here (that case is
             // routed to the walk branch above), so only `File` and
             // `Symlink` remain.
-            let size = if metadata.is_file() {
-                metadata.len()
+            // A followed link is judged by its target, which the later open
+            // must match.
+            let followed;
+            let seen = if config.follow_symlinks && metadata.is_symlink() {
+                followed = path.metadata().map_err(|e| source_error(path, e))?;
+                &followed
             } else {
-                0
-            };
-
-            let entry_type = if metadata.is_symlink() {
-                let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
-                EntryType::Symlink { target }
-            } else {
-                EntryType::File
+                &metadata
             };
 
             let relative = if let Some(parent) = path.parent() {
@@ -403,14 +411,31 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
                     .into()
             };
 
+            if is_special_file(seen) {
+                if !excluded.excludes(path) {
+                    collected
+                        .skipped
+                        .record(Skip::new(SkipKind::SpecialFile, relative))?;
+                }
+                continue;
+            }
+
+            let entry_type = if metadata.is_symlink() {
+                let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
+                EntryType::Symlink { target }
+            } else {
+                EntryType::File
+            };
+
             if !excluded.excludes(path)
                 && let Some(archive_path) = entry_name(path, &relative, false)?
             {
+                let identity = walked_if_opened(&entry_type, path, seen, config)?;
                 let entry = FilteredEntry {
                     path: path.to_path_buf(),
                     archive_path,
                     entry_type,
-                    size,
+                    identity,
                 };
                 names.claim(&entry)?;
                 collected.entries.push(entry);
@@ -419,6 +444,29 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
     }
 
     Ok(collected)
+}
+
+/// Records what the walk saw of an entry, only when its content will be
+/// opened: a file, or a link whose target is archived.
+fn walked_if_opened(
+    entry_type: &EntryType,
+    path: &Path,
+    metadata: &Metadata,
+    config: &CreationConfig,
+) -> Result<Option<WalkedSource>> {
+    let opened = match entry_type {
+        EntryType::File => true,
+        EntryType::Symlink { .. } => config.follow_symlinks,
+        EntryType::Directory => false,
+    };
+    opened.then(|| WalkedSource::of(path, metadata)).transpose()
+}
+
+/// Whether `metadata` describes a FIFO, socket or device, which creation
+/// leaves out instead of reading.
+fn is_special_file(metadata: &Metadata) -> bool {
+    let kind = metadata.file_type();
+    !kind.is_file() && !kind.is_dir() && !kind.is_symlink()
 }
 
 /// Gets the file size from metadata in a cross-platform way.
@@ -762,13 +810,12 @@ mod tests {
             path: PathBuf::from("/tmp/file.txt"),
             archive_path: ArchiveEntryName::from_relative(Path::new("file.txt")).unwrap(),
             entry_type: EntryType::File,
-            size: 1024,
+            identity: None,
         };
 
         assert_eq!(entry.path, Path::new("/tmp/file.txt"));
         assert_eq!(&*entry.archive_path, Path::new("file.txt"));
         assert_matches!(entry.entry_type, EntryType::File);
-        assert_eq!(entry.size, 1024);
     }
 
     #[test]
@@ -777,11 +824,10 @@ mod tests {
             path: PathBuf::from("/tmp/dir"),
             archive_path: ArchiveEntryName::from_relative(Path::new("dir")).unwrap(),
             entry_type: EntryType::Directory,
-            size: 0,
+            identity: None,
         };
 
         assert_matches!(entry.entry_type, EntryType::Directory);
-        assert_eq!(entry.size, 0);
     }
 
     #[test]
@@ -792,7 +838,7 @@ mod tests {
             entry_type: EntryType::Symlink {
                 target: PathBuf::from("target.txt"),
             },
-            size: 0,
+            identity: None,
         };
 
         match &entry.entry_type {

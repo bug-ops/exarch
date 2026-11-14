@@ -49,6 +49,24 @@ describe('creation source errors', () => {
     assert.ok(!fs.existsSync(out));
   });
 
+  it('a FIFO in the source is skipped as special_file, not read', (t) => {
+    if (process.platform === 'win32') {
+      return t.skip('needs mkfifo');
+    }
+    const tree = path.join(tempDir, 'tree');
+    fs.mkdirSync(tree);
+    fs.writeFileSync(path.join(tree, 'a.txt'), 'x');
+    require('node:child_process').execFileSync('mkfifo', [path.join(tree, 'pipe')]);
+
+    const report = createArchiveSync(path.join(tempDir, 'o.tar.gz'), [tree]);
+
+    assert.strictEqual(report.filesAdded, 1);
+    assert.deepStrictEqual(
+      report.skipped.counts.filter((c) => c.kind === 'special_file'),
+      [{ kind: 'special_file', count: 1 }]
+    );
+  });
+
   it('a missing source carries no OS failure properties', () => {
     assert.throws(
       () => createArchiveSync(path.join(tempDir, 'o.tar'), [path.join(tempDir, 'missing')]),

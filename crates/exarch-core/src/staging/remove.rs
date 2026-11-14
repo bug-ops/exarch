@@ -90,6 +90,7 @@ pub(super) enum Outcome {
     Kept,
 }
 
+#[cfg(target_os = "macos")]
 impl Outcome {
     /// `Removed` when `removed` holds.
     pub(super) const fn of(removed: bool) -> Self {
@@ -97,8 +98,11 @@ impl Outcome {
     }
 }
 
-/// Unlinks every entry that is not a directory.
-struct Plain;
+/// Unlinks every entry that is not a directory, keeping the first failure.
+#[derive(Default)]
+struct Plain {
+    error: Option<io::Error>,
+}
 
 impl Visit for Plain {
     fn enter(&mut self, _dir: &File) -> Enter {
@@ -106,7 +110,13 @@ impl Visit for Plain {
     }
 
     fn leaf(&mut self, dir: &File, name: &OsStr, _stat: &Stat, _trail: Trail<'_>) -> Outcome {
-        Outcome::of(rustix::fs::unlinkat(dir, name, AtFlags::empty()).is_ok())
+        match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
+            Ok(()) => Outcome::Removed,
+            Err(e) => {
+                self.error.get_or_insert_with(|| e.into());
+                Outcome::Kept
+            }
+        }
     }
 }
 
@@ -255,62 +265,89 @@ impl Walk {
 /// A directory the removal cannot open, list or empty and an entry it cannot
 /// unlink are left in place. Symlinks are unlinked, never followed.
 pub(super) fn remove_children(dir: &File) -> bool {
-    walk(dir, &mut Plain)
+    walk(dir, &mut Plain::default())
+}
+
+/// [`remove_children`] that reports why something was left: the first
+/// failure the walk met.
+pub(super) fn remove_children_checked(dir: &File) -> io::Result<()> {
+    let mut plain = Plain::default();
+    let walked = walk_checked(dir, &mut plain);
+    plain.error.map_or(walked, Err)
 }
 
 /// Visits everything below `dir` depth first, unlinking each directory once
 /// `visit` has dealt with what it held. Says whether nothing was left.
 pub(super) fn walk(dir: &File, visit: &mut impl Visit) -> bool {
-    let Ok(mut walk) = Walk::new(dir) else {
-        return false;
-    };
-    let mut removed = true;
+    walk_checked(dir, visit).is_ok()
+}
+
+/// [`walk`] reporting the first failure.
+fn walk_checked(dir: &File, visit: &mut impl Visit) -> io::Result<()> {
+    let mut walk = Walk::new(dir)?;
+    let mut first = Ok(());
     while let Some(top) = walk.levels.len().checked_sub(1) {
-        match walk.levels.last_mut().and_then(|level| level.pending.pop()) {
-            Some(name) => removed &= visit_entry(&mut walk, top, &name, visit),
-            None => removed &= close_level(&mut walk, top),
+        let step = match walk.levels.last_mut().and_then(|level| level.pending.pop()) {
+            Some(name) => visit_entry(&mut walk, top, &name, visit),
+            None => close_level(&mut walk, top),
+        };
+        if first.is_ok() {
+            first = step;
         }
     }
-    removed
+    first
+}
+
+fn kept() -> io::Error {
+    io::Error::other("an entry was kept")
 }
 
 /// Hands the entry `name` of the level `top` to `visit`, or descends into it
-/// when it is a directory. Says whether the entry is gone or will be once the
+/// when it is a directory. Succeeds when the entry is gone or will be once the
 /// level it opens is closed.
-fn visit_entry(walk: &mut Walk, top: usize, name: &OsStr, visit: &mut impl Visit) -> bool {
-    let Ok((dir, trail)) = walk.view(top) else {
-        if let Some(level) = walk.levels.last_mut() {
-            level.pending.clear();
+fn visit_entry(
+    walk: &mut Walk,
+    top: usize,
+    name: &OsStr,
+    visit: &mut impl Visit,
+) -> io::Result<()> {
+    let (dir, trail) = match walk.view(top) {
+        Ok(view) => view,
+        Err(e) => {
+            if let Some(level) = walk.levels.last_mut() {
+                level.pending.clear();
+            }
+            return Err(e);
         }
-        return false;
     };
     let stat = match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,
-        Err(Errno::NOENT) => return true,
-        Err(_) => return false,
+        Err(Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(e.into()),
     };
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-        return visit.leaf(dir, name, &stat, trail) == Outcome::Removed;
+        return match visit.leaf(dir, name, &stat, trail) {
+            Outcome::Removed => Ok(()),
+            Outcome::Kept => Err(kept()),
+        };
     }
-    let Ok(parent) = dir.try_clone() else {
-        return false;
-    };
-    walk.descend(&parent, name, visit)
-        .is_ok_and(|entered| entered == Enter::Descend)
+    let parent = dir.try_clone()?;
+    match walk.descend(&parent, name, visit)? {
+        Enter::Descend => Ok(()),
+        Enter::Keep => Err(kept()),
+    }
 }
 
 /// Removes the emptied level `top` from the one above it. The root, which is
 /// the last level, is left to the caller.
-fn close_level(walk: &mut Walk, top: usize) -> bool {
-    let Some(level) = walk.levels.pop() else {
-        return false;
-    };
+fn close_level(walk: &mut Walk, top: usize) -> io::Result<()> {
+    let level = walk.levels.pop().ok_or_else(not_found)?;
     let Some(parent) = top.checked_sub(1) else {
-        return true;
+        return Ok(());
     };
     drop(level.dir);
-    walk.dir_at(parent)
-        .is_ok_and(|dir| rustix::fs::unlinkat(dir, &level.name, AtFlags::REMOVEDIR).is_ok())
+    let dir = walk.dir_at(parent)?;
+    Ok(rustix::fs::unlinkat(dir, &level.name, AtFlags::REMOVEDIR)?)
 }
 
 #[cfg(test)]
@@ -414,7 +451,8 @@ mod tests {
                 .unwrap()
                 .try_clone()
                 .unwrap();
-            walk.descend(&parent, OsStr::new("d"), &mut Plain).unwrap();
+            walk.descend(&parent, OsStr::new("d"), &mut Plain::default())
+                .unwrap();
         }
         for level in walk.levels.iter_mut().skip(1) {
             level.dir = None;

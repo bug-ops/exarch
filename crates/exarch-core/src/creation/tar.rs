@@ -10,6 +10,7 @@ use crate::Skip;
 #[cfg(not(unix))]
 use crate::SkipKind;
 use crate::creation::config::CreationConfig;
+use crate::creation::open::open_entry;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
@@ -19,10 +20,10 @@ use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
+use crate::creation::walker::FilteredEntry;
 use crate::creation::walker::collect_entries;
 use crate::formats::compression::CompressionCodec;
 use crate::writer::CountingWriter;
-use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use tar::Builder;
@@ -81,8 +82,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
         match &entry.entry_type {
             EntryType::File => add_file_to_tar_with_progress_impl(
                 &mut builder,
-                &entry.path,
-                &entry.archive_path,
+                entry,
                 config,
                 &mut report,
                 guard.progress_mut(),
@@ -98,8 +98,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                 if config.follow_symlinks {
                     add_file_to_tar_with_progress_impl(
                         &mut builder,
-                        &entry.path,
-                        &entry.archive_path,
+                        entry,
                         config,
                         &mut report,
                         guard.progress_mut(),
@@ -164,15 +163,15 @@ fn add_directory_to_tar<W: Write>(
 /// Adds a single file to the TAR archive with progress reporting.
 fn add_file_to_tar_with_progress_impl<W: Write>(
     builder: &mut Builder<W>,
-    file_path: &Path,
-    archive_path: &Path,
+    entry: &FilteredEntry,
     config: &CreationConfig,
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let file = File::open(file_path).map_err(|e| source_error(file_path, e))?;
-    let metadata = file.metadata().map_err(|e| source_error(file_path, e))?;
-    let size = metadata.len();
+    let file_path = entry.path.as_path();
+    let source = open_entry(entry, config)?;
+    let size = source.size();
+    let (metadata, file) = source.into_exact();
 
     let mut header = Header::new_gnu();
     header.set_size(size);
@@ -186,7 +185,7 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     let appended = {
         let mut tracked_file =
             ProgressReader::new(FaultSlotReader::new(file, &mut fault), progress);
-        builder.append_data(&mut header, archive_path, &mut tracked_file)
+        builder.append_data(&mut header, &*entry.archive_path, &mut tracked_file)
     };
     copy_outcome(appended, fault, file_path)?;
 

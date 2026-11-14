@@ -1095,6 +1095,9 @@ impl VerificationIssue {
             ArchiveError::SourceNotAccessible { path, .. } => {
                 high_invalid_archive(format!("Source not accessible: {}", path.display()))
             }
+            ArchiveError::SourceChanged { path } => {
+                high_invalid_archive(format!("Source changed: {}", path.display()))
+            }
             ArchiveError::DestinationNotAccessible { path, .. } => {
                 high_invalid_archive(format!("Destination not accessible: {}", path.display()))
             }

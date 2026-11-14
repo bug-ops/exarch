@@ -65,6 +65,8 @@ closed_enum! {
         SourceNotFound => "SOURCE_NOT_FOUND",
         /// [`ArchiveError::SourceNotAccessible`].
         SourceNotAccessible => "SOURCE_NOT_ACCESSIBLE",
+        /// [`ArchiveError::SourceChanged`].
+        SourceChanged => "SOURCE_CHANGED",
         /// [`ArchiveError::OutputExists`].
         OutputExists => "OUTPUT_EXISTS",
         /// [`ArchiveError::InvalidCompressionLevel`].
@@ -353,6 +355,8 @@ pub enum FfiKind {
     SourceNotFound,
     /// Creation source cannot be read.
     SourceNotAccessible,
+    /// Creation source changed while it was archived.
+    SourceChanged,
     /// Output file already exists.
     OutputExists,
     /// Compression level out of range.
@@ -387,6 +391,7 @@ impl FfiKind {
             | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
+            | Self::SourceChanged
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
@@ -413,6 +418,7 @@ impl FfiKind {
             | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
+            | Self::SourceChanged
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat => None,
@@ -439,6 +445,7 @@ impl FfiKind {
             | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
+            | Self::SourceChanged
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
@@ -463,6 +470,7 @@ impl FfiKind {
             Self::Cancelled => ErrorCode::Cancelled,
             Self::SourceNotFound => ErrorCode::SourceNotFound,
             Self::SourceNotAccessible => ErrorCode::SourceNotAccessible,
+            Self::SourceChanged => ErrorCode::SourceChanged,
             Self::OutputExists => ErrorCode::OutputExists,
             Self::InvalidCompressionLevel => ErrorCode::InvalidCompressionLevel,
             Self::UnknownFormat => ErrorCode::UnknownFormat,
@@ -501,6 +509,7 @@ impl FfiKind {
             | Self::Cancelled
             | Self::SourceNotFound
             | Self::SourceNotAccessible
+            | Self::SourceChanged
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
@@ -872,6 +881,7 @@ impl ArchiveError {
             Self::ReplaceFailed(failure) => FfiKind::Io(failure.error.kind()),
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
+            Self::SourceChanged { .. } => FfiKind::SourceChanged,
             Self::DestinationOccupied { .. } | Self::OutputExists { .. } => FfiKind::OutputExists,
             Self::InvalidCompressionLevel { .. } => FfiKind::InvalidCompressionLevel,
             Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
@@ -892,6 +902,7 @@ impl ArchiveError {
     fn ffi_path(&self) -> Option<String> {
         match self {
             Self::SourceNotFound { .. }
+            | Self::SourceChanged { .. }
             | Self::OutputExists { .. }
             | Self::DestinationOccupied { .. }
             | Self::DestinationNotAccessible { .. }
@@ -942,6 +953,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1046,6 +1058,7 @@ impl ArchiveError {
             | Self::SecurityViolation { .. }
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
+            | Self::SourceChanged { .. }
             | Self::DestinationNotAccessible { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
@@ -1107,6 +1120,7 @@ impl ArchiveError {
                     sanitize_io_error_for_error(error)
                 )
             }
+            Self::SourceChanged { .. } => format!("source path changed during creation: {path}"),
             Self::OutputExists { .. } => format!("output file already exists: {path}"),
             Self::UnknownFormat { .. } => {
                 format!("cannot determine archive format from: {path}")
@@ -1436,6 +1450,9 @@ mod tests {
                 path: PathBuf::from("test"),
                 error: std::io::Error::other("test"),
             },
+            ArchiveError::SourceChanged {
+                path: PathBuf::from("test"),
+            },
             ArchiveError::DestinationNotAccessible {
                 path: PathBuf::from("test"),
                 step: crate::DestinationStep::Resolve,
@@ -1614,6 +1631,7 @@ mod tests {
     fn path_and_leftover_path_are_filled_for_the_errors_that_name_one() {
         let path = |error: ArchiveError| error.into_ffi_message().path;
         assert!(path(ArchiveError::SourceNotFound { path: "a/b".into() }).is_some());
+        assert!(path(ArchiveError::SourceChanged { path: "a/b".into() }).is_some());
         assert!(path(ArchiveError::OutputExists { path: "a/b".into() }).is_some());
         assert!(
             path(ArchiveError::DestinationOccupied {

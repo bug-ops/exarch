@@ -48,6 +48,7 @@ create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 // catching the parent still work.
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ArchiveError);
+create_exception!(exarch, SourceChangedError, ArchiveError);
 
 /// An exception class that derives from [`ArchiveError`] and from a builtin
 /// exception, so `except OSError` and `except ValueError` handlers keep
@@ -184,6 +185,7 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
         ErrorCode::InvalidArchive => |d| InvalidArchiveError::new_err(d),
         ErrorCode::SourceNotFound => |d| SOURCE_NOT_FOUND.error(d),
         ErrorCode::SourceNotAccessible => |d| SOURCE_NOT_ACCESSIBLE.error(d),
+        ErrorCode::SourceChanged => |d| SourceChangedError::new_err(d),
         ErrorCode::OutputExists => |d| OUTPUT_EXISTS.error(d),
         ErrorCode::InvalidCompressionLevel => |d| INVALID_COMPRESSION_LEVEL.error(d),
         ErrorCode::InvalidConfiguration => |d| INVALID_CONFIGURATION.error(d),
@@ -228,6 +230,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
         let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
         if let Some(fault) = source_fault {
             set_os_error_fields(&err, &fault);
+        }
+        if matches!(kind, FfiKind::SourceChanged) {
+            set_attr(&err, "path", path.clone());
         }
         if let (Some(errno), Some(filename)) = (errno_name(&kind), path) {
             set_errno_fields(&err, errno, &filename);
@@ -585,6 +590,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     invalid_archive.setattr("sub_code", m.py().None())?;
     invalid_archive.setattr("non_utf8_entry_path", m.py().None())?;
     m.add("InvalidArchiveError", invalid_archive)?;
+    m.add(
+        "SourceChangedError",
+        m.py().get_type::<SourceChangedError>(),
+    )?;
     for dual in DUAL_CLASSES {
         m.add(dual.name, dual.class(m.py())?)?;
     }
@@ -1012,6 +1021,21 @@ mod tests {
                 py_err
             );
         });
+    }
+
+    #[test]
+    fn test_source_changed_carries_the_path() {
+        let py_err = convert_error(CoreError::SourceChanged {
+            path: PathBuf::from("src/a.txt"),
+        });
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<SourceChangedError>(py));
+        });
+        assert!(
+            attr_str(&py_err, "path").is_some_and(|path| path.ends_with("a.txt")),
+            "{py_err}"
+        );
+        assert_eq!(attr_str(&py_err, "code").as_deref(), Some("SOURCE_CHANGED"));
     }
 
     #[test]

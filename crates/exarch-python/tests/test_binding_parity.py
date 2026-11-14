@@ -87,6 +87,7 @@ SHARED = [
     ("ArchiveError", ["ExarchErrorBase"], ["code", "leftover_path"]),
     ("OutputExistsError", ["ExarchOutputExistsDetail"], ["conflicts", "filename"]),
     ("SourceNotFoundError", ["ExarchSourceNotFoundDetail"], ["filename"]),
+    ("SourceChangedError", ["ExarchSourceChangedDetail"], ["path"]),
     (
         "InvalidConfigurationError",
         ["ExarchInvalidConfigurationDetail"],

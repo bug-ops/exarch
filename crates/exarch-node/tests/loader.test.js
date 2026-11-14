@@ -53,7 +53,7 @@ describe('npm loader (#1200)', () => {
     const addons = new Set(
       requireArguments(source)
         .map((argument) => argument.match(LITERAL)?.[2])
-        .filter((name) => name?.endsWith('.node')),
+        .filter((name) => name?.endsWith('.node'))
     );
     assert.strictEqual(addons.size, pkg.napi.targets.length);
   });
@@ -71,8 +71,8 @@ describe('npm loader (#1200)', () => {
   });
 
   it('the build scripts do not regenerate the committed loader', () => {
-    assert.match(pkg.scripts.build, /--no-js-binding/);
-    assert.match(pkg.scripts['build:debug'], /--no-js-binding/);
+    assert.match(pkg.scripts.build, /--no-js\b/);
+    assert.match(pkg.scripts['build:debug'], /--no-js\b/);
   });
 
   it('the package gate script exists', () => {

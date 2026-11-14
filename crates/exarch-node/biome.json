@@ -40,7 +40,6 @@
       "!**/target",
       "!**/*.node",
       "!**/package-lock.json",
-      "!**/index.js",
       "!**/index.d.ts"
     ]
   }

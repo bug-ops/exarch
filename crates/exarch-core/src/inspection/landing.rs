@@ -21,11 +21,11 @@ use crate::SkipKind;
 use crate::closed_enum::closed_enum;
 use crate::error::Violation;
 use crate::formats::common::is_extension_allowed;
-use crate::formats::common::occupied_without_destination;
 use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::is_run_duplicate;
 use crate::formats::occupant::refuse_unless_duplicate;
 use crate::formats::occupant::tree_occupant_refusal;
@@ -414,9 +414,10 @@ fn skip_duplicate_or_refuse(
 ) -> Result<Disposition> {
     refuse_unless_duplicate(
         shape,
+        rel,
         Some(held),
         || keys.made_here(rel),
-        |found| occupied_without_destination(rel, found),
+        OccupiedSite::Detached,
     )
     .map(|_| Disposition::Skip(SkipKind::Duplicate))
 }
@@ -1811,7 +1812,7 @@ mod tests {
                         by: OccupiedBy::Archive,
                     },
                     Some(kind),
-                ) => assert_eq!(conflicts[0].occupant, Some(kind)),
+                ) => assert!(conflicts.iter().map(|c| c.occupant).eq([Some(kind)])),
                 (
                     ArchiveError::SecurityViolation {
                         kind:

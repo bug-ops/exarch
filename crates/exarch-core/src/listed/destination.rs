@@ -18,6 +18,7 @@ use crate::ArchiveError;
 use crate::DestinationCheck;
 use crate::OccupiedBy;
 use crate::OccupiedPath;
+use crate::OccupiedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::formats::common::check_directory_occupant;
@@ -323,13 +324,13 @@ pub(super) fn check(
     }
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     conflicts.dedup_by(|a, b| a.path == b.path);
-    conflicts
-        .is_empty()
-        .ok_or_else(|| ArchiveError::DestinationOccupied {
+    OccupiedPaths::from_vec(conflicts).map_or(Ok(()), |conflicts| {
+        Err(ArchiveError::DestinationOccupied {
             destination: Some(dest.to_path_buf()),
-            conflicts: conflicts.into_boxed_slice(),
+            conflicts,
             by: crate::OccupiedBy::Existing,
         })
+    })
 }
 
 /// Whether an I/O failure only says that the path is absent or sits below a

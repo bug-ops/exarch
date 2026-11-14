@@ -441,10 +441,10 @@ mod tests {
         assert_eq!(advice_after_recheck(Ok(())), ConflictAdvice::UseForce);
         let occupied = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([exarch_core::OccupiedPath::new(
+            conflicts: exarch_core::OccupiedPaths::one(exarch_core::OccupiedPath::new(
                 std::path::PathBuf::from("a"),
                 None,
-            )]),
+            )),
             by: exarch_core::OccupiedBy::Existing,
         };
         assert_eq!(

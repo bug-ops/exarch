@@ -14,6 +14,7 @@ use exarch_core::FfiDetail;
 use exarch_core::FfiKind;
 use exarch_core::OccupiedBy;
 use exarch_core::OccupiedPath;
+use exarch_core::OccupiedPaths;
 use exarch_core::PathOccupant;
 use exarch_core::SecurityViolationSubCode;
 use exarch_core::Violation;
@@ -25,10 +26,13 @@ fn occupied(
 ) -> ArchiveError {
     ArchiveError::DestinationOccupied {
         destination: destination.map(PathBuf::from),
-        conflicts: conflicts
-            .iter()
-            .map(|(path, occupant)| OccupiedPath::new(PathBuf::from(path), *occupant))
-            .collect(),
+        conflicts: OccupiedPaths::from_vec(
+            conflicts
+                .iter()
+                .map(|(path, occupant)| OccupiedPath::new(PathBuf::from(path), *occupant))
+                .collect(),
+        )
+        .unwrap(),
         by,
     }
 }

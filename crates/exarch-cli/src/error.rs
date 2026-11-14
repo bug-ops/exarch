@@ -670,7 +670,7 @@ fn occupied_message(
 /// no destination and take the archive-conflict advice.
 fn occupied_context(
     destination: Option<&Path>,
-    conflicts: &[exarch_core::OccupiedPath],
+    conflicts: &exarch_core::OccupiedPaths,
     by: OccupiedBy,
     advice: &ConflictAdvice,
 ) -> Message {
@@ -1211,7 +1211,7 @@ fn dedicated_context(
             .restating_source()
             .lit("Destination is not accessible: ")
             .path(path)
-            .text(format!(": {step}: {error}")),
+            .text(format!(": {}: {error}", step.phrase())),
         ArchiveError::OutputExists { path } => message
             .restating_source()
             .lit("Output path already exists: ")
@@ -2285,7 +2285,10 @@ mod tests {
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
                 destination: Some(path()),
-                conflicts: Box::new([exarch_core::OccupiedPath::new(path(), None)]),
+                conflicts: exarch_core::OccupiedPaths::one(exarch_core::OccupiedPath::new(
+                    path(),
+                    None,
+                )),
                 by: exarch_core::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
@@ -2446,7 +2449,10 @@ mod tests {
     fn a_conflict_with_an_entry_the_archive_made_names_the_entry_and_hints_no_flag() {
         let occupied = |by| ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("/tmp/.exarch-mine")),
-            conflicts: Box::new([exarch_core::OccupiedPath::new(PathBuf::from("x"), None)]),
+            conflicts: exarch_core::OccupiedPaths::one(exarch_core::OccupiedPath::new(
+                PathBuf::from("x"),
+                None,
+            )),
             by,
         };
 

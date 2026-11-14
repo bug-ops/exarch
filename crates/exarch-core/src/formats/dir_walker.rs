@@ -29,6 +29,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::formats::handle_resolution::LinkCursor;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::occupied_by;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
@@ -385,15 +386,22 @@ impl DirWalker {
         entry: &Path,
         links: Links,
     ) -> Result<Hop<'r>> {
+        let LinkSite { parent, leaf, .. } = *site;
+        let made_by = || {
+            occupied_by(Some(Occupant::Symlink), || {
+                root.created().created_here(parent, leaf, walked)
+            })
+        };
         if links == Links::Strict {
-            return Err(ParentBlocker::Symlink.error(entry, walked));
+            return Err(ParentBlocker::Symlink.error(entry, walked, made_by()));
         }
         match (Followed::of(root, site), self.links) {
-            (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
+            (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked, made_by())),
             (Followed::Failed(error), _) => Err(error),
             (Followed::Inside { .. }, LinkPolicy::Refuse) => {
                 Err(ArchiveError::from(Violation::SymlinkComponent {
                     walked: walked.display().to_string().into(),
+                    by: made_by(),
                 }))
             }
             (Followed::Inside { position, dir }, LinkPolicy::ContainedOnly) => {
@@ -428,11 +436,13 @@ fn file_parent(
     entry: &Path,
 ) -> ArchiveError {
     match missing {
-        Missing::Create => root
-            .occupied(walked, Some(Occupant::File))
-            .occupied_by(occupied_by(Some(Occupant::File), || {
+        Missing::Create => OccupiedSite::Host(root).refuse(
+            walked,
+            Some(Occupant::File),
+            occupied_by(Some(Occupant::File), || {
                 root.created().created_here(parent, leaf, walked)
-            })),
+            }),
+        ),
         Missing::Fail => ParentBlocker::file_io_error(entry, walked),
     }
 }
@@ -981,7 +991,7 @@ mod tests {
             err,
             ArchiveError::DestinationOccupied { destination: Some(_), by: OccupiedBy::Existing, conflicts }
                 if matches!(
-                    &*conflicts,
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("f")
                 ),
             "{err}"

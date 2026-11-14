@@ -22,6 +22,7 @@ use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::replaces_symlink;
 use crate::formats::output_root::OutputRoot;
@@ -178,12 +179,13 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             let root = self.inner.root();
             let action = tally.options.existing_files.on_occupant(
                 EntryShape::File,
+                safe_path.as_path(),
                 || Ok(occupancy.occupant()),
                 || {
                     root.created()
                         .created_here(&parent, leaf, safe_path.as_path())
                 },
-                |found| root.occupied(safe_path.as_path(), found),
+                OccupiedSite::Host(root),
             )?;
             match action {
                 OccupantAction::Skip => {
@@ -349,9 +351,10 @@ impl PrePass for HostPrePass<'_> {
         if occupancy.is_occupied() {
             let action = self.options.existing_files.on_occupant(
                 EntryShape::File,
+                safe_path.as_path(),
                 || Ok(occupancy.occupant()),
                 || false,
-                |found| self.root.occupied(safe_path.as_path(), found),
+                OccupiedSite::Host(self.root),
             )?;
             if matches!(action, OccupantAction::Skip) {
                 return Ok(FilePlan::Skip);

@@ -443,6 +443,7 @@ fn attach_detail(err: &PyErr, detail: FfiDetail) {
             set_attr(err, "unmatched_patterns", Some(patterns.into_vec()));
         }
         FfiDetail::NonUtf8EntryPath { path } => set_attr(err, "non_utf8_entry_path", Some(path)),
+        FfiDetail::Destination { step } => set_optional_str(err, "step", Some(step.as_str())),
     }
 }
 
@@ -1573,11 +1574,11 @@ mod tests {
         pyo3::Python::initialize();
         let err = CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/out")),
-            conflicts: vec![
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![
                 occupied("a/b.txt", Some(exarch_core::PathOccupant::File)),
                 occupied("gone", None),
-            ]
-            .into_boxed_slice(),
+            ])
+            .unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         };
         let py_err = convert_error(err);
@@ -1612,7 +1613,8 @@ mod tests {
         for &kind in exarch_core::PathOccupant::ALL {
             let py_err = convert_error(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![occupied("a", Some(kind))].into_boxed_slice(),
+                conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied("a", Some(kind))])
+                    .unwrap(),
                 by: exarch_core::OccupiedBy::Existing,
             });
             Python::attach(|py| {
@@ -1644,8 +1646,11 @@ mod tests {
         for &by in OccupiedBy::ALL {
             let py_err = convert_error(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
-                    .into_boxed_slice(),
+                conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied(
+                    "a",
+                    Some(exarch_core::PathOccupant::File),
+                )])
+                .unwrap(),
                 by,
             });
             assert_eq!(attr_str(&py_err, "by").as_deref(), Some(by.as_str()));
@@ -1675,9 +1680,9 @@ mod tests {
     #[test]
     fn test_other_security_violations_keep_by_none() {
         pyo3::Python::initialize();
-        let py_err = convert_error(CoreError::from(exarch_core::Violation::SymlinkComponent {
-            walked: "w".into(),
-        }));
+        let py_err = convert_error(CoreError::from(exarch_core::Violation::LinksNotAllowed(
+            exarch_core::LinkKind::Symlink,
+        )));
         assert_eq!(attr_str(&py_err, "by"), None);
     }
 

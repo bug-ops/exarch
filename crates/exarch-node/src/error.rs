@@ -1380,6 +1380,7 @@ fn apply_detail(obj: &mut Object<'_>, detail: FfiDetail) {
             set_property(obj, "unmatchedPatterns", patterns.into_vec());
         }
         FfiDetail::NonUtf8EntryPath { path } => set_property(obj, "nonUtf8EntryPath", path),
+        FfiDetail::Destination { step } => set_property(obj, "step", step.as_str()),
     }
 }
 
@@ -2469,8 +2470,11 @@ mod tests {
     fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
         let d = described(CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/app/out")),
-            conflicts: vec![occupied("a.txt", Some(exarch_core::PathOccupant::File))]
-                .into_boxed_slice(),
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied(
+                "a.txt",
+                Some(exarch_core::PathOccupant::File),
+            )])
+            .unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
@@ -2547,11 +2551,11 @@ mod tests {
     fn test_destination_occupied_lists_the_conflicting_entries() {
         let d = described(CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/app/out")),
-            conflicts: vec![
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![
                 occupied("a.txt", Some(exarch_core::PathOccupant::File)),
                 occupied("d/b.txt", Some(exarch_core::PathOccupant::Directory)),
-            ]
-            .into_boxed_slice(),
+            ])
+            .unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(
@@ -2576,8 +2580,11 @@ mod tests {
         for &by in exarch_core::OccupiedBy::ALL {
             let d = described(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
-                    .into_boxed_slice(),
+                conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied(
+                    "a",
+                    Some(exarch_core::PathOccupant::File),
+                )])
+                .unwrap(),
                 by,
             });
             assert_eq!(d.props.path, None);
@@ -2659,8 +2666,11 @@ mod tests {
     fn test_partial_extraction_keeps_the_typed_destination_detail() {
         let source = CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("out")),
-            conflicts: vec![occupied("a.txt", Some(exarch_core::PathOccupant::File))]
-                .into_boxed_slice(),
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied(
+                "a.txt",
+                Some(exarch_core::PathOccupant::File),
+            )])
+            .unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         };
         let partial =
@@ -2679,7 +2689,7 @@ mod tests {
     fn test_conflict_without_a_probed_occupant_has_no_kind() {
         let d = described(CoreError::DestinationOccupied {
             destination: None,
-            conflicts: vec![occupied("gone", None)].into_boxed_slice(),
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied("gone", None)]).unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(
@@ -2696,7 +2706,8 @@ mod tests {
         for &kind in exarch_core::PathOccupant::ALL {
             let d = described(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![occupied("a", Some(kind))].into_boxed_slice(),
+                conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied("a", Some(kind))])
+                    .unwrap(),
                 by: exarch_core::OccupiedBy::Existing,
             });
             assert_eq!(
@@ -2710,8 +2721,11 @@ mod tests {
     fn test_atomic_refusal_names_the_caller_destination() {
         let d = described(CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/app/out")),
-            conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
-                .into_boxed_slice(),
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![occupied(
+                "a",
+                Some(exarch_core::PathOccupant::File),
+            )])
+            .unwrap(),
             by: exarch_core::OccupiedBy::Existing,
         });
         let path = d.props.path.expect("the destination is named");
@@ -2738,9 +2752,9 @@ mod tests {
 
     #[test]
     fn test_other_security_violations_carry_no_maker() {
-        let d = described(CoreError::from(exarch_core::Violation::SymlinkComponent {
-            walked: "w".into(),
-        }));
+        let d = described(CoreError::from(exarch_core::Violation::LinksNotAllowed(
+            exarch_core::LinkKind::Symlink,
+        )));
         assert_eq!(d.props.detail, FfiDetail::None);
     }
 

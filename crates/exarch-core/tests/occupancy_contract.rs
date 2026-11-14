@@ -9,7 +9,6 @@
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
-use exarch_core::ClosedEnum;
 use exarch_core::DestinationStep;
 use exarch_core::ExtractionReport;
 use exarch_core::FfiDetail;

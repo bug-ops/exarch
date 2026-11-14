@@ -48,6 +48,7 @@ use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::occupied_by;
@@ -644,9 +645,10 @@ fn open_output_slot(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let action = duplicates.on_occupant(
                 EntryShape::File,
+                rel,
                 || dir.probe(leaf),
                 || root.created().created_here(dir, leaf, rel),
-                |found| root.occupied(rel, found),
+                OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
                 return Ok(None);
@@ -662,21 +664,6 @@ fn open_output_slot(
             }))
         }
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, root, e)),
-    }
-}
-
-/// The refusal of an occupied path for a run with no host destination (the
-/// in-memory sink and the `list` model); a host run uses
-/// [`PinnedRoot::occupied`].
-///
-/// Every site that decides what to do with an occupant must route `Refuse` to
-/// one of the two and never into an overwrite branch: a missed arm would
-/// replace a file the caller asked to keep.
-pub(crate) fn occupied_without_destination(rel: &Path, occupant: Option<Occupant>) -> ArchiveError {
-    ArchiveError::DestinationOccupied {
-        destination: None,
-        conflicts: Box::new([crate::OccupiedPath::at(rel, occupant)]),
-        by: crate::OccupiedBy::Existing,
     }
 }
 
@@ -728,7 +715,7 @@ pub(crate) fn kept_refusal_at(
         kept,
         rel,
         || root.created().created_here(dir, leaf, rel),
-        |found| root.occupied(rel, found),
+        OccupiedSite::Host(root),
     )
 }
 
@@ -803,7 +790,9 @@ pub(crate) fn check_directory_occupant(
         Err(e) => {
             return match first_blocking_ancestor(&HostFs, dest, rel) {
                 Some((_, ParentBlocker::File)) => Ok(()),
-                Some((parent, blocker)) => Err(blocker.error(rel, &parent)),
+                Some((parent, blocker)) => {
+                    Err(blocker.error(rel, &parent, maker(Occupant::Symlink)))
+                }
                 None => Err(e.into()),
             };
         }
@@ -816,9 +805,7 @@ pub(crate) fn check_directory_occupant(
             .lands_in_dir(dest)
             .ok_or_else(|| replaces_symlink(rel, maker(Occupant::Symlink)));
     }
-    Err(root
-        .occupied(rel, Some(Occupant::File))
-        .occupied_by(maker(Occupant::File)))
+    Err(OccupiedSite::Host(root).refuse(rel, Some(Occupant::File), maker(Occupant::File)))
 }
 
 /// Who made the `occupant` at `rel`: the run when its record confirms it, read
@@ -903,9 +890,10 @@ pub(crate) fn create_symlink<P: ParentCheck>(
             let link_path = safe_symlink.link().as_path();
             let action = duplicates.on_occupant(
                 EntryShape::Link(LinkKind::Symlink),
+                link_path,
                 || Ok(Some(existing)),
                 || root.created().created_here(&parent, leaf, link_path),
-                |found| root.occupied(link_path, found),
+                OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
                 return record_duplicate_skip(report, link_path);
@@ -1275,7 +1263,12 @@ mod tests {
         assert!(!a.contains('\u{FFFD}'), "{a}");
 
         let occupant = |bytes: &[u8]| {
-            occupied_without_destination(Path::new(OsStr::from_bytes(bytes)), Some(Occupant::File))
+            OccupiedSite::Detached
+                .refuse(
+                    Path::new(OsStr::from_bytes(bytes)),
+                    Some(Occupant::File),
+                    crate::OccupiedBy::Existing,
+                )
                 .to_string()
         };
         assert_ne!(occupant(b"caf\xe9"), occupant(b"caf\xe8"));

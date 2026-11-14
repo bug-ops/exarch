@@ -742,10 +742,11 @@ mod tests {
     fn occupancy_is_reported_as_objects_and_by_for_both_refusals() {
         let occupied = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([
+            conflicts: exarch_core::OccupiedPaths::from_vec(vec![
                 exarch_core::OccupiedPath::new(PathBuf::from("a"), Some(PathOccupant::Directory)),
                 exarch_core::OccupiedPath::new(PathBuf::from("b"), None),
-            ]),
+            ])
+            .unwrap(),
             by: OccupiedBy::Archive,
         };
         let json =

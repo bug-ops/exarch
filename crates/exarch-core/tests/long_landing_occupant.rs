@@ -79,7 +79,7 @@ fn assert_refused_as_a_file(error: &ArchiveError, expected_by: OccupiedBy, entry
         ArchiveError::DestinationOccupied { by, conflicts, .. }
             if *by == expected_by
                 && matches!(
-                    &conflicts[..],
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [conflict] if conflict.path == Path::new(entry)
                         && conflict.occupant == Some(PathOccupant::File)
                 ),

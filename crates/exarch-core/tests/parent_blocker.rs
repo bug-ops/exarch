@@ -139,7 +139,7 @@ fn assert_file_parent_refusal(error: &ArchiveError, expected_by: OccupiedBy) {
         ArchiveError::DestinationOccupied { destination: Some(_), by, conflicts }
             if *by == expected_by
                 && matches!(
-                    &conflicts[..],
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [conflict] if conflict.path == Path::new("x")
                         && conflict.occupant == Some(PathOccupant::File)
                 ),

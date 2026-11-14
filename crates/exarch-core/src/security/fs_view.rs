@@ -52,12 +52,13 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::OccupiedBy;
 use crate::QuotaResource;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::closed_enum::closed_enum;
-use crate::formats::common::occupied_without_destination;
 use crate::formats::handle_resolution::LinkCursor;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -712,7 +713,10 @@ impl Occupant {
     /// built by the same function so the in-memory tree's I/O error and the
     /// typed refusal name the entry and the occupant in the same words.
     pub(crate) fn refusal(self, rel: &Path) -> String {
-        crate::error::occupied_text(None, &[crate::OccupiedPath::at(rel, Some(self))])
+        crate::error::occupied_text(
+            None,
+            &crate::OccupiedPaths::one(crate::OccupiedPath::at(rel, Some(self))),
+        )
     }
 }
 
@@ -755,16 +759,16 @@ impl ParentBlocker {
     /// the single source of text and category for extraction and `verify`.
     ///
     /// A file parent is the typed occupant refusal of that file,
-    /// destination-less and made by
-    /// [`OccupiedBy::Existing`](crate::OccupiedBy); a host run that knows its
-    /// destination and the maker restates both.
-    pub(crate) fn error(self, entry: &Path, parent: &Path) -> ArchiveError {
+    /// destination-less; a host run that knows its destination restates it.
+    /// `by` says who made the blocking file or symlink.
+    pub(crate) fn error(self, entry: &Path, parent: &Path, by: OccupiedBy) -> ArchiveError {
         let parent: PathBuf = parent.components().collect();
         match self {
-            Self::File => occupied_without_destination(&parent, Some(Occupant::File)),
+            Self::File => OccupiedSite::Detached.refuse(&parent, Some(Occupant::File), by),
             Self::Symlink => ArchiveError::from(Violation::SymlinkParent {
                 entry: normalized_display(entry).into(),
                 parent: normalized_display(&parent).into(),
+                by,
             }),
             Self::Escape => ArchiveError::SymlinkEscape { path: parent },
         }
@@ -784,8 +788,7 @@ impl BlockedParent {
     /// archive made any file occupant.
     pub(crate) fn error(&self) -> ArchiveError {
         self.blocker
-            .error(&self.entry, &self.parent)
-            .occupied_by(crate::OccupiedBy::Archive)
+            .error(&self.entry, &self.parent, OccupiedBy::Archive)
     }
 }
 
@@ -848,11 +851,8 @@ pub(crate) fn blocked_parent_error<V: FsView>(
     root: &V::Root,
     rel: &Path,
 ) -> Option<ArchiveError> {
-    first_blocking_ancestor(view, root, rel).map(|(parent, blocker)| {
-        blocker
-            .error(rel, &parent)
-            .occupied_by(view.occupant_maker())
-    })
+    first_blocking_ancestor(view, root, rel)
+        .map(|(parent, blocker)| blocker.error(rel, &parent, view.occupant_maker()))
 }
 
 /// Whether a projected landing is held to the model's name limits.
@@ -2129,7 +2129,9 @@ mod tests {
         for blocker in [ParentBlocker::File, ParentBlocker::Symlink] {
             let message = |entry: &[u8]| {
                 let parent = name(entry);
-                blocker.error(&parent.join("f"), &parent).to_string()
+                blocker
+                    .error(&parent.join("f"), &parent, OccupiedBy::Existing)
+                    .to_string()
             };
             let (a, b) = (message(b"d\xe9"), message(b"d\xe8"));
             assert_ne!(a, b, "{blocker:?}");
@@ -3066,21 +3068,22 @@ mod tests {
         let parent = Path::new("x");
 
         assert_matches!(
-            ParentBlocker::File.error(entry, parent),
+            ParentBlocker::File.error(entry, parent, OccupiedBy::Existing),
             ArchiveError::DestinationOccupied { destination: None, conflicts, by: OccupiedBy::Existing }
                 if matches!(
-                    &*conflicts,
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("x")
                 )
         );
-        let (kind, text) = classified(ParentBlocker::Symlink.error(entry, parent));
+        let (kind, text) =
+            classified(ParentBlocker::Symlink.error(entry, parent, OccupiedBy::Existing));
         assert_eq!(kind, "violation");
         assert!(
             text.replace('\\', "/")
                 .contains("refusing to create x/y/z under the existing symlink at x")
         );
         assert_eq!(
-            classified(ParentBlocker::Escape.error(entry, parent)),
+            classified(ParentBlocker::Escape.error(entry, parent, OccupiedBy::Existing)),
             ("escape", "x".to_owned())
         );
     }
@@ -3103,7 +3106,7 @@ mod tests {
             conflict.into_archive_error(),
             ArchiveError::DestinationOccupied { destination: None, conflicts, by: OccupiedBy::Archive }
                 if matches!(
-                    &*conflicts,
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("x")
                 )
         );

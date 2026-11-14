@@ -488,18 +488,10 @@ impl PinnedRoot {
         &self.dest
     }
 
-    /// The refusal of the path `rel` of this run, naming the destination the
-    /// caller asked for (never a staging path) and the `occupant` found there.
-    ///
-    /// The one host constructor of [`ArchiveError::DestinationOccupied`]; the
-    /// maker defaults to [`OccupiedBy::Existing`](crate::OccupiedBy) until the
-    /// caller's decision says otherwise.
-    pub(crate) fn occupied(&self, rel: &Path, occupant: Option<Occupant>) -> ArchiveError {
-        ArchiveError::DestinationOccupied {
-            destination: Some(self.destination.clone()),
-            conflicts: Box::new([crate::OccupiedPath::at(rel, occupant)]),
-            by: crate::OccupiedBy::Existing,
-        }
+    /// The destination the caller asked for, never a staging path; what a
+    /// refusal names.
+    pub(crate) fn destination(&self) -> &Path {
+        &self.destination
     }
 
     pub(super) const fn dir(&self) -> &VettedDir {

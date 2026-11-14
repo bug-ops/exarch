@@ -233,9 +233,10 @@ fn assert_occupied(
     else {
         panic!("{context}: expected DestinationOccupied, got {error}");
     };
-    assert_eq!(conflicts.len(), 1, "{context}: {error}");
-    assert_eq!(conflicts[0].path, Path::new(path), "{context}");
-    assert_eq!(conflicts[0].occupant, Some(occupant), "{context}");
+    assert_eq!(conflicts.len().get(), 1, "{context}: {error}");
+    let only = conflicts.iter().next().unwrap();
+    assert_eq!(only.path, Path::new(path), "{context}");
+    assert_eq!(only.occupant, Some(occupant), "{context}");
     assert_eq!(*seen_by, by, "{context}");
     destination.clone()
 }

@@ -834,13 +834,13 @@ impl Heuristic {
                 "every CLI extract mode fails at {}, as does any caller that does not skip \
                  existing entries: an earlier entry is a {}",
                 crate::path_text(rel),
-                occupant.noun()
+                occupant.as_str()
             ),
             Self::OverwriteConflict { rel, occupant } => format!(
                 "extraction with overwrite fails at {}: an earlier entry is a {} (default \
                  extraction skips this entry)",
                 crate::path_text(rel),
-                occupant.noun()
+                occupant.as_str()
             ),
             Self::UnreadSymlinkTargets { count } => {
                 let (subject, validated) = if *count == 1 {

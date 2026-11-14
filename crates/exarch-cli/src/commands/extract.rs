@@ -281,7 +281,12 @@ fn advice_after_recheck(recheck: std::result::Result<(), ArchiveError>) -> Confl
     match recheck {
         Ok(()) => ConflictAdvice::UseForce,
         Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
-            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(conflicts))
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(
+                conflicts
+                    .iter()
+                    .map(|conflict| conflict.path.clone())
+                    .collect(),
+            ))
         }
         Err(_) => ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown),
     }
@@ -436,7 +441,10 @@ mod tests {
         assert_eq!(advice_after_recheck(Ok(())), ConflictAdvice::UseForce);
         let occupied = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([std::path::PathBuf::from("a")]),
+            conflicts: Box::new([exarch_core::OccupiedPath::new(
+                std::path::PathBuf::from("a"),
+                None,
+            )]),
             by: exarch_core::OccupiedBy::Existing,
         };
         assert_eq!(

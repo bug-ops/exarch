@@ -2,6 +2,7 @@
 
 use crate::operation::Operation;
 use anyhow::Result;
+use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
@@ -13,13 +14,16 @@ use exarch_core::ExtractionWarning;
 use exarch_core::FfiKind;
 use exarch_core::IoKind;
 use exarch_core::MarkOutcome;
+use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
+use exarch_core::PathOccupant;
 use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
 use exarch_core::VerificationReport;
+use exarch_core::Violation;
 use exarch_core::VolumeIdentity;
 use exarch_core::path_text;
 use serde::Serialize;
@@ -145,6 +149,8 @@ mod sealed {
     impl Sealed for exarch_core::SubCode {}
     impl Sealed for exarch_core::ConfigSetting {}
     impl Sealed for exarch_core::IoKind {}
+    impl Sealed for exarch_core::OccupiedBy {}
+    impl Sealed for exarch_core::PathOccupant {}
 }
 
 /// A closed core enum whose `Display` is its stable identifier (`as_str`).
@@ -157,6 +163,8 @@ impl StableId for exarch_core::PolicySetting {}
 impl StableId for exarch_core::SubCode {}
 impl StableId for exarch_core::ConfigSetting {}
 impl StableId for exarch_core::IoKind {}
+impl StableId for exarch_core::OccupiedBy {}
+impl StableId for exarch_core::PathOccupant {}
 
 /// Serializes a closed core enum as its stable identifier.
 #[derive(Debug, Clone, Copy)]
@@ -407,6 +415,22 @@ impl From<&ExtractionWarning> for JsonWarning {
     }
 }
 
+impl JsonWarning {
+    /// The `kind` token of the warning the CLI raises for an incomplete mark;
+    /// it is not a core warning kind.
+    pub const MARK_INCOMPLETE_KIND: &'static str = "mark_incomplete";
+
+    /// The warning for a mark that did not reach every extracted item,
+    /// worded like the human formatter's line.
+    fn mark_incomplete() -> Self {
+        Self {
+            kind: Self::MARK_INCOMPLETE_KIND,
+            message: "some extracted items did not receive the download mark".to_owned(),
+            fields: None,
+        }
+    }
+}
+
 impl From<&CreationWarning> for JsonWarning {
     fn from(warning: &CreationWarning) -> Self {
         let fields = match warning {
@@ -489,6 +513,11 @@ pub struct JsonExtractionCounts {
 
 impl From<&ExtractionReport> for JsonExtractionCounts {
     fn from(report: &ExtractionReport) -> Self {
+        let mut warnings: Vec<JsonWarning> =
+            report.warnings.iter().map(JsonWarning::from).collect();
+        if report.mark.is_incomplete() {
+            warnings.push(JsonWarning::mark_incomplete());
+        }
         Self {
             files_extracted: report.files_extracted,
             directories_created: report.directories_created,
@@ -496,7 +525,7 @@ impl From<&ExtractionReport> for JsonExtractionCounts {
             bytes_written: report.bytes_written,
             skips: JsonSkips::from(&report.skipped),
             mark_propagation: report.mark.into(),
-            warnings: report.warnings.iter().map(JsonWarning::from).collect(),
+            warnings,
         }
     }
 }
@@ -512,6 +541,17 @@ pub struct JsonPartialReport {
     pub writes: JsonId<PartialWrites>,
 }
 
+/// One refused path of an occupied destination.
+#[derive(Debug, Serialize)]
+pub struct JsonConflict {
+    /// The archive-relative path.
+    pub path: String,
+    /// The kind of occupant the refusal observed; absent when it vanished
+    /// before the refusal probed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occupant: Option<JsonId<PathOccupant>>,
+}
+
 /// Structured error object in JSON output
 #[derive(Debug, Serialize)]
 pub struct JsonError {
@@ -525,10 +565,14 @@ pub struct JsonError {
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_report: Option<Box<JsonPartialReport>>,
-    /// The archive-relative paths an occupied destination refused, for a
-    /// `DestinationOccupied` error.
+    /// The archive-relative paths an occupied destination refused, each with
+    /// the kind of its occupant, for a `DestinationOccupied` error.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub conflicts: Option<Vec<String>>,
+    pub conflicts: Option<Vec<JsonConflict>>,
+    /// Who made the occupant behind a `DestinationOccupied` error or an
+    /// existing-symlink refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<JsonId<OccupiedBy>>,
     /// A staging directory or reservation file the failed run left behind;
     /// what the user must clean up.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -553,15 +597,40 @@ impl JsonError {
             hint: None,
             partial_report: None,
             conflicts: None,
+            by: None,
             leftover_path: None,
             discriminants: None,
         }
     }
 
-    /// Names the archive-relative paths an occupied destination refused.
+    /// Records what an occupied-path refusal names: the refused paths with
+    /// their occupant kinds for a `DestinationOccupied` error, and who made
+    /// the occupant there or for an existing-symlink refusal. Any other
+    /// error leaves the object unchanged.
     #[must_use]
-    pub fn with_conflicts(mut self, conflicts: Vec<String>) -> Self {
-        self.conflicts = Some(conflicts);
+    pub fn with_occupancy(mut self, error: &ArchiveError) -> Self {
+        match error {
+            ArchiveError::DestinationOccupied { conflicts, by, .. } => {
+                self.conflicts = Some(
+                    conflicts
+                        .iter()
+                        .map(|conflict| JsonConflict {
+                            path: path_text(&conflict.path),
+                            occupant: conflict.occupant.map(JsonId),
+                        })
+                        .collect(),
+                );
+                self.by = Some(JsonId(*by));
+            }
+            ArchiveError::SecurityViolation {
+                kind: Violation::ReplacesSymlink { by, .. },
+                ..
+            } => self.by = Some(JsonId(*by)),
+            ArchiveError::PartialExtraction(partial) => {
+                return self.with_occupancy(partial.cause());
+            }
+            _ => {}
+        }
         self
     }
 
@@ -599,6 +668,7 @@ impl JsonError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use exarch_core::ExtractionWarningKind;
     use exarch_core::MarkState;
     use std::path::PathBuf;
 
@@ -626,6 +696,81 @@ mod tests {
             assert_eq!(json.get("marked").is_some(), counted, "{state:?}");
             assert_eq!(json.get("failed").is_some(), counted, "{state:?}");
         }
+    }
+
+    #[test]
+    fn an_incomplete_mark_adds_one_mark_incomplete_warning() {
+        for &state in MarkState::ALL {
+            let mark = mark_outcome_of(state);
+            let mut report = ExtractionReport::new();
+            report.mark = mark;
+            let json = serde_json::to_value(JsonExtractionCounts::from(&report)).unwrap();
+            let warnings = json["warnings"].as_array().unwrap();
+            if mark.is_incomplete() {
+                assert_eq!(warnings.len(), 1, "{state:?}");
+                assert_eq!(warnings[0]["kind"], JsonWarning::MARK_INCOMPLETE_KIND);
+                assert!(warnings[0]["message"].is_string(), "{state:?}");
+            } else {
+                assert!(warnings.is_empty(), "{state:?}");
+            }
+        }
+        assert!(MarkOutcome::Unreadable.is_incomplete());
+    }
+
+    #[test]
+    fn a_propagated_mark_without_failures_adds_no_warning() {
+        let mut report = ExtractionReport::new();
+        report.mark = MarkOutcome::Propagated {
+            marked: 2,
+            failed: 0,
+        };
+        let json = serde_json::to_value(JsonExtractionCounts::from(&report)).unwrap();
+        assert!(json["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_mark_incomplete_token_is_not_a_core_warning_kind() {
+        assert!(
+            ExtractionWarningKind::ALL
+                .iter()
+                .all(|kind| kind.as_str() != JsonWarning::MARK_INCOMPLETE_KIND)
+        );
+    }
+
+    #[test]
+    fn occupancy_is_reported_as_objects_and_by_for_both_refusals() {
+        let occupied = ArchiveError::DestinationOccupied {
+            destination: None,
+            conflicts: Box::new([
+                exarch_core::OccupiedPath::new(PathBuf::from("a"), Some(PathOccupant::Directory)),
+                exarch_core::OccupiedPath::new(PathBuf::from("b"), None),
+            ]),
+            by: OccupiedBy::Archive,
+        };
+        let json =
+            serde_json::to_value(JsonError::new(JsonKind::Generic, "m").with_occupancy(&occupied))
+                .unwrap();
+        assert_eq!(
+            json["conflicts"],
+            serde_json::json!([{"path": "a", "occupant": "directory"}, {"path": "b"}])
+        );
+        assert_eq!(json["by"], "archive");
+
+        let symlink = ArchiveError::from(Violation::ReplacesSymlink {
+            rel: "x".into(),
+            by: OccupiedBy::Existing,
+        });
+        let json =
+            serde_json::to_value(JsonError::new(JsonKind::Generic, "m").with_occupancy(&symlink))
+                .unwrap();
+        assert_eq!(json["by"], "existing");
+        assert!(json.get("conflicts").is_none());
+
+        let json = serde_json::to_value(
+            JsonError::new(JsonKind::Generic, "m").with_occupancy(&ArchiveError::Cancelled),
+        )
+        .unwrap();
+        assert!(json.get("by").is_none());
     }
 
     #[test]

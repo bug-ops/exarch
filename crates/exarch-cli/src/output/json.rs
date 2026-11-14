@@ -348,9 +348,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                 writes: JsonId(ctx.writes),
             });
         }
-        if let Some(ArchiveError::DestinationOccupied { conflicts, .. }) = extraction_err {
-            json_error =
-                json_error.with_conflicts(conflicts.iter().map(|c| path_text(c)).collect());
+        if let Some(error) = extraction_err {
+            json_error = json_error.with_occupancy(error);
         }
         json_error = json_error.with_leftover_path(leftover_path(error).map(HostPath::from));
         if let Some(kind) = &ffi_kind {
@@ -995,6 +994,35 @@ mod tests {
         assert_eq!(v["operation"], "extract");
         assert_eq!(v["status"], "error");
         assert_eq!(v["error"]["kind"], "ZipBomb");
+    }
+
+    #[test]
+    fn an_unreadable_mark_adds_a_mark_incomplete_warning_to_the_success_data() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let mut report = exarch_core::ExtractionReport::new();
+        report.mark = exarch_core::MarkOutcome::Unreadable;
+        f.format_extraction_result(&report).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["data"]["warnings"][0]["kind"], "mark_incomplete");
+        assert_eq!(v["data"]["warnings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_mark_adds_a_mark_incomplete_warning_to_the_partial_report() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let mut report = exarch_core::ExtractionReport::new();
+        report.mark = exarch_core::MarkOutcome::Unreadable;
+        let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
+            ArchiveError::Cancelled,
+            report,
+            exarch_core::PartialWrites::Kept,
+        ));
+        let converted = crate::error::convert_error(Operation::Extract, err, Path::new("a.tar"));
+        f.format_error(Operation::Extract, &converted);
+        let v = parsed(&f);
+        let warnings = v["error"]["partial_report"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["kind"], "mark_incomplete");
     }
 
     #[test]

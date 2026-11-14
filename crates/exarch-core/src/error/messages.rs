@@ -20,6 +20,7 @@ use super::types::PolicySetting;
 use super::types::QuotaKind;
 use super::types::ReaderFormatError;
 use super::types::ZipBombScope;
+use super::violation::Violation;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -605,9 +606,14 @@ pub enum FfiDetail {
     None,
     /// The archive-relative paths of an occupied destination.
     Occupied {
-        /// The occupied paths.
-        conflicts: Box<[String]>,
+        /// The occupied paths, each with the kind of its occupant.
+        conflicts: Box<[FfiOccupiedPath]>,
         /// Who made the occupying entry.
+        by: OccupiedBy,
+    },
+    /// The maker of the symlink an entry would have replaced.
+    ExistingSymlink {
+        /// Who made the symlink.
         by: OccupiedBy,
     },
     /// What a failed whole-destination replace did to the original.
@@ -667,6 +673,18 @@ impl FfiRestore {
             Self::Failed { .. } => RestoreKind::Failed,
         }
     }
+}
+
+/// An occupied archive-relative path of a refused destination, spelled for a
+/// binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FfiOccupiedPath {
+    /// The archive-relative path.
+    pub path: String,
+    /// The kind of occupant, `None` when it vanished before the refusal
+    /// probed it.
+    pub occupant: Option<crate::PathOccupant>,
 }
 
 /// Two entry names the host filesystem treats as one, redacted for a binding.
@@ -943,10 +961,16 @@ impl ArchiveError {
             Self::DestinationOccupied { conflicts, by, .. } => FfiDetail::Occupied {
                 conflicts: conflicts
                     .iter()
-                    .map(|path| format_entry_path_for_error(path))
+                    .map(|conflict| FfiOccupiedPath {
+                        path: format_entry_path_for_error(&conflict.path),
+                        occupant: conflict.occupant,
+                    })
                     .collect(),
                 by: *by,
             },
+            Self::SecurityViolation {
+                kind: Violation::ReplacesSymlink { by, .. },
+            } => FfiDetail::ExistingSymlink { by: *by },
             Self::ReplaceFailed(failure) => FfiDetail::Replace(match &failure.restore {
                 Restore::NotNeeded => FfiRestore::NotNeeded,
                 Restore::Restored => FfiRestore::Restored,
@@ -1070,12 +1094,7 @@ impl ArchiveError {
                 conflicts,
                 ..
             } => {
-                let named = destination.as_ref().map(|_| format!("{path} "));
-                format!(
-                    "destination {}already holds {} of the paths to extract",
-                    named.as_deref().unwrap_or_default(),
-                    conflicts.len()
-                )
+                super::types::occupied_text(destination.as_ref().map(|_| path.as_str()), conflicts)
             }
             Self::DestinationNotAccessible { step, error, .. } => format!(
                 "destination is not accessible: {path}: {step}: {}",
@@ -1258,23 +1277,26 @@ mod tests {
     fn test_occupied_without_destination_names_no_path() {
         let error = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([PathBuf::from("a")]),
+            conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a"), None)]),
             by: crate::OccupiedBy::Archive,
         };
         assert_eq!(
             error.to_string(),
-            "destination already holds 1 of the paths to extract"
+            "refusing to replace the existing entry at a"
         );
         let msg = error.into_ffi_message();
         assert_eq!(msg.path, None);
         assert_eq!(
             msg.description,
-            "destination already holds 1 of the paths to extract"
+            "refusing to replace the existing entry at a"
         );
         assert_eq!(
             msg.detail,
             FfiDetail::Occupied {
-                conflicts: Box::new(["a".to_string()]),
+                conflicts: Box::new([FfiOccupiedPath {
+                    path: "a".to_string(),
+                    occupant: None,
+                }]),
                 by: crate::OccupiedBy::Archive,
             }
         );
@@ -1435,7 +1457,7 @@ mod tests {
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
                 destination: Some(PathBuf::from("dest")),
-                conflicts: Box::new([PathBuf::from("a")]),
+                conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a"), None)]),
                 by: crate::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
@@ -1644,14 +1666,26 @@ mod tests {
     fn details_are_built_once_and_unwrapped_through_a_partial() {
         let occupied = ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("dest")),
-            conflicts: Box::new([PathBuf::from("b"), PathBuf::from("a")]),
+            conflicts: Box::new([
+                crate::OccupiedPath::new(PathBuf::from("b"), None),
+                crate::OccupiedPath::new(PathBuf::from("a"), None),
+            ]),
             by: crate::OccupiedBy::Existing,
         }
         .rolled_back();
         assert_eq!(
             occupied.into_ffi_message().detail,
             FfiDetail::Occupied {
-                conflicts: Box::new(["b".to_string(), "a".to_string()]),
+                conflicts: Box::new([
+                    FfiOccupiedPath {
+                        path: "b".to_string(),
+                        occupant: None,
+                    },
+                    FfiOccupiedPath {
+                        path: "a".to_string(),
+                        occupant: None,
+                    },
+                ]),
                 by: crate::OccupiedBy::Existing,
             }
         );

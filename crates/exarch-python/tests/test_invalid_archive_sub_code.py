@@ -72,7 +72,7 @@ def test_duplicate_hardlink_within_the_archive_is_an_archive_conflict(temp_dir):
     with pytest.raises(exarch.OutputExistsError) as caught:
         exarch.extract_archive(archive, temp_dir / "out", config, options)
 
-    assert caught.value.conflicts == ["h"]
+    assert [(c.path, c.occupant) for c in caught.value.conflicts] == [("h", "file")]
     assert caught.value.by == "archive"
 
 
@@ -90,7 +90,7 @@ def test_hardlink_over_a_file_already_in_the_destination_is_an_existing_conflict
     with pytest.raises(exarch.OutputExistsError) as caught:
         exarch.extract_archive(archive, out, config, options)
 
-    assert caught.value.conflicts == ["h"]
+    assert [(c.path, c.occupant) for c in caught.value.conflicts] == [("h", "file")]
     assert caught.value.by == "existing"
 
 

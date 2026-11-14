@@ -362,7 +362,7 @@ impl<P: ParentCheck> SafePath<P> {
 
         // Full path canonicalization: skip when symlinks are impossible
         if ctx.needs_full_canonicalize() {
-            match view.canonicalize(&resolved, root) {
+            match view.canonicalize(&canonical_target(dest, &final_path, &resolved), root) {
                 Ok(Containment::Within(_)) => {}
                 Ok(Containment::Escapes) => {
                     return Err(ArchiveError::PathTraversal {
@@ -629,6 +629,27 @@ pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
         (rest.next(), rest.next()),
         (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}' | '\u{2074}'..='\u{2079}'), None)
     )
+}
+
+/// The path to canonicalize for the full containment check of `final_path`.
+///
+/// A trailing separator makes a host resolve the entry as a directory, so a
+/// link to a file would fail with `NotADirectory` caused by the entry's own
+/// last component. The check judges the link the entry names instead:
+/// `dest.join(final_path)` rebuilt from its components, which drop the
+/// separator. Built from `final_path`, never the raw entry, so a leading root
+/// stripped earlier cannot make `join` discard `dest`.
+fn canonical_target<'a>(dest: &Path, final_path: &Path, resolved: &'a Path) -> Cow<'a, Path> {
+    let ends_with_separator = final_path
+        .as_os_str()
+        .as_encoded_bytes()
+        .last()
+        .is_some_and(|byte| std::path::is_separator(char::from(*byte)));
+    if ends_with_separator {
+        Cow::Owned(dest.join(final_path.components().collect::<PathBuf>()))
+    } else {
+        Cow::Borrowed(resolved)
+    }
 }
 
 /// Checks if a path contains null bytes.

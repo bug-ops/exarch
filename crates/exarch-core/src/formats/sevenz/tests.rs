@@ -2229,7 +2229,7 @@ fn test_overwrite_directory_returns_error_without_deleting_it() {
     assert_matches!(
         &err,
         ArchiveError::DestinationOccupied { conflicts, .. }
-            if conflicts.as_ref() == [std::path::PathBuf::from("target")],
+            if conflicts.iter().map(|c| c.path.as_path()).eq([std::path::Path::new("target")]),
         "must fail with the typed directory refusal naming the entry, not a generic or \
          misclassified error, got: {err:?}"
     );

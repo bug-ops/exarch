@@ -85,7 +85,7 @@ impl ExistingFiles {
         arriving: EntryShape,
         occupant: impl FnOnce() -> std::io::Result<Option<Occupant>>,
         created_here: impl FnOnce() -> bool,
-        refusal: impl FnOnce() -> ArchiveError,
+        refusal: impl FnOnce(Option<Occupant>) -> ArchiveError,
     ) -> Result<OccupantAction> {
         match self {
             Self::Skip => Ok(OccupantAction::Skip),
@@ -132,14 +132,14 @@ pub(crate) fn refuse_unless_duplicate(
     arriving: EntryShape,
     occupant: Option<Occupant>,
     created_here: impl FnOnce() -> bool,
-    refusal: impl FnOnce() -> ArchiveError,
+    refusal: impl FnOnce(Option<Occupant>) -> ArchiveError,
 ) -> Result<RunDuplicate> {
     let by = occupied_by(occupant, created_here);
     match occupant {
         Some(found) if by == OccupiedBy::Archive && is_run_duplicate(arriving, found) => {
             Ok(RunDuplicate(()))
         }
-        _ => Err(refusal().occupied_by(by)),
+        _ => Err(refusal(occupant).occupied_by(by)),
     }
 }
 
@@ -157,6 +157,14 @@ pub(crate) enum KeptOccupant {
 }
 
 impl KeptOccupant {
+    /// The occupant this kept occupant is.
+    pub(crate) const fn occupant(self) -> Occupant {
+        match self {
+            Self::Directory => Occupant::Directory,
+            Self::Symlink => Occupant::Symlink,
+        }
+    }
+
     /// The kept occupant `occupant` is, or `None` for a file.
     pub(crate) const fn of(occupant: Occupant) -> Option<Self> {
         match occupant {
@@ -168,21 +176,23 @@ impl KeptOccupant {
 }
 
 /// The security refusal of a path that holds a symlink no write replaces,
-/// naming the entry `rel`.
+/// naming the entry `rel` and who made the symlink.
 ///
 /// The one constructor of [`Violation::ReplacesSymlink`] for an occupant, so
 /// the write phase, the in-memory sink and the destination pre-check read
 /// alike.
-pub(crate) fn replaces_symlink(rel: &Path) -> ArchiveError {
+pub(crate) fn replaces_symlink(rel: &Path, by: OccupiedBy) -> ArchiveError {
     Violation::ReplacesSymlink {
         rel: normalized_display(rel).into(),
+        by,
     }
     .into()
 }
 
 /// The typed refusal of a path whose occupant no write replaces: a symlink
 /// gives [`replaces_symlink`], a directory the [`ArchiveError`] built by
-/// `occupied` with the maker ([`OccupiedBy`]) `created_here` decides.
+/// `occupied` from the occupant, both with the maker ([`OccupiedBy`])
+/// `created_here` decides.
 ///
 /// Shared by the write phase, the in-memory sink and the destination
 /// pre-check, so they report one error class for one occupant.
@@ -190,13 +200,41 @@ pub(crate) fn kept_occupant_refusal(
     kept: KeptOccupant,
     rel: &Path,
     created_here: impl FnOnce() -> bool,
-    occupied: impl FnOnce() -> ArchiveError,
+    occupied: impl FnOnce(Option<Occupant>) -> ArchiveError,
 ) -> ArchiveError {
+    let occupant = kept.occupant();
+    let by = occupied_by(Some(occupant), created_here);
     match kept {
-        KeptOccupant::Symlink => replaces_symlink(rel),
-        KeptOccupant::Directory => {
-            occupied().occupied_by(occupied_by(Some(Occupant::Directory), created_here))
-        }
+        KeptOccupant::Symlink => replaces_symlink(rel, by),
+        KeptOccupant::Directory => occupied(Some(occupant)).occupied_by(by),
+    }
+}
+
+/// The refusal of an entry `arriving` over an occupant of the in-memory tree,
+/// which holds only what the run itself delivered, or `None` when the
+/// conflict is of another kind.
+///
+/// Shared by the sink and the `list` model so a directory over a file or a
+/// symlink, and a non-directory over a directory, read alike on both. Always
+/// made by the archive ([`OccupiedBy::Archive`]) and without a destination.
+pub(crate) fn tree_occupant_refusal(
+    arriving: EntryShape,
+    occupant: Occupant,
+    rel: &Path,
+) -> Option<ArchiveError> {
+    let by = OccupiedBy::Archive;
+    let arriving_directory = arriving == EntryShape::Directory;
+    match occupant {
+        Occupant::Symlink if arriving_directory => Some(replaces_symlink(rel, by)),
+        Occupant::File if arriving_directory => Some(
+            crate::formats::common::occupied_without_destination(rel, Some(occupant))
+                .occupied_by(by),
+        ),
+        Occupant::Directory if !arriving_directory => Some(
+            crate::formats::common::occupied_without_destination(rel, Some(occupant))
+                .occupied_by(by),
+        ),
+        Occupant::File | Occupant::Symlink | Occupant::Directory => None,
     }
 }
 
@@ -214,11 +252,11 @@ pub(crate) fn refuse_hardlink_replace(
     found: Option<Occupant>,
     rel: &Path,
     created_here: impl FnOnce() -> bool,
-    occupied: impl FnOnce() -> ArchiveError,
+    occupied: impl FnOnce(Option<Occupant>) -> ArchiveError,
 ) -> ArchiveError {
     match found.and_then(KeptOccupant::of) {
         Some(kept) => kept_occupant_refusal(kept, rel, created_here, occupied),
-        None => occupied().occupied_by(occupied_by(found, created_here)),
+        None => occupied(found).occupied_by(occupied_by(found, created_here)),
     }
 }
 
@@ -241,7 +279,7 @@ mod tests {
     use crate::security::fs_view::Occupant;
     use crate::selection::EntryShape;
 
-    fn refusal() -> ArchiveError {
+    fn refusal(_found: Option<Occupant>) -> ArchiveError {
         ArchiveError::Cancelled
     }
 
@@ -315,7 +353,7 @@ mod tests {
             by
         };
         let occupied =
-            || crate::formats::common::destination_occupied(Path::new("d"), Path::new("x"));
+            |found| crate::formats::common::occupied_without_destination(Path::new("x"), found);
         let dir = || Ok(Some(Occupant::Directory));
 
         let made = ExistingFiles::Refuse.on_occupant(FILE, dir, || true, occupied);
@@ -329,7 +367,8 @@ mod tests {
 
     #[test]
     fn a_kept_directory_is_a_typed_conflict_and_a_kept_symlink_a_violation() {
-        let occupied = || crate::formats::common::occupied_without_destination(Path::new("d"));
+        let occupied =
+            |found| crate::formats::common::occupied_without_destination(Path::new("d"), found);
 
         let made =
             kept_occupant_refusal(KeptOccupant::Directory, Path::new("d"), || true, occupied);
@@ -355,7 +394,7 @@ mod tests {
         assert_matches!(
             link,
             ArchiveError::SecurityViolation {
-                kind: crate::Violation::ReplacesSymlink { rel },
+                kind: crate::Violation::ReplacesSymlink { rel, .. },
                 ..
             } if &*rel == "a/l"
         );
@@ -369,7 +408,7 @@ mod tests {
                 found,
                 Path::new("h"),
                 || true,
-                || crate::formats::common::occupied_without_destination(Path::new("h")),
+                |found| crate::formats::common::occupied_without_destination(Path::new("h"), found),
             )
         };
 
@@ -398,6 +437,35 @@ mod tests {
                 ..
             }
         );
+    }
+
+    #[test]
+    fn the_tree_refuses_a_directory_over_a_file_or_symlink_and_a_file_over_a_directory() {
+        use super::tree_occupant_refusal;
+
+        let refuse = |arriving, occupant| tree_occupant_refusal(arriving, occupant, Path::new("p"));
+
+        assert_matches!(
+            refuse(EntryShape::Directory, Occupant::File),
+            Some(ArchiveError::DestinationOccupied { by: OccupiedBy::Archive, conflicts, .. })
+                if conflicts[0].occupant == Some(Occupant::File)
+        );
+        assert_matches!(
+            refuse(FILE, Occupant::Directory),
+            Some(ArchiveError::DestinationOccupied { by: OccupiedBy::Archive, conflicts, .. })
+                if conflicts[0].occupant == Some(Occupant::Directory)
+        );
+        assert_matches!(
+            refuse(EntryShape::Directory, Occupant::Symlink),
+            Some(ArchiveError::SecurityViolation {
+                kind: crate::Violation::ReplacesSymlink {
+                    by: OccupiedBy::Archive,
+                    ..
+                }
+            })
+        );
+        assert_matches!(refuse(EntryShape::Directory, Occupant::Directory), None);
+        assert_matches!(refuse(FILE, Occupant::File), None);
     }
 
     #[test]

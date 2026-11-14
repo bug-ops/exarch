@@ -768,13 +768,14 @@ pub enum ArchiveError {
     /// `destination` is a host path and is redacted like any other; it is
     /// `None` when there is no host destination (the in-memory sink and the
     /// `list` model).
-    #[error("{}", OccupiedMessage(.destination.as_deref(), .conflicts.len()))]
+    #[error("{}", occupied_text(.destination.as_deref().map(|d| d.display().to_string()).as_deref(), .conflicts))]
     DestinationOccupied {
         /// The extraction destination, or `None` when the run has no host
         /// destination.
         destination: Option<PathBuf>,
-        /// The archive-relative paths that are occupied.
-        conflicts: Box<[PathBuf]>,
+        /// The archive-relative paths that are occupied, each with the kind
+        /// of occupant the refusal observed.
+        conflicts: Box<[OccupiedPath]>,
         /// Who made the occupying entry.
         by: OccupiedBy,
     },
@@ -1542,17 +1543,78 @@ impl ArchiveError {
     }
 }
 
-/// Renders [`ArchiveError::DestinationOccupied`], naming the destination only
-/// when there is one.
-struct OccupiedMessage<'a>(Option<&'a std::path::Path>, usize);
-
-impl std::fmt::Display for OccupiedMessage<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("destination ")?;
-        if let Some(destination) = self.0 {
-            write!(f, "{} ", destination.display())?;
+/// The text of [`ArchiveError::DestinationOccupied`], naming the destination
+/// only when there is one.
+///
+/// `destination` is already spelled by the caller, so the host `Display` and
+/// the redacted binding description share the wording and differ only in how
+/// the destination reads. One conflict names its occupant and entry; several
+/// are counted and the first is named.
+pub(crate) fn occupied_text(destination: Option<&str>, conflicts: &[OccupiedPath]) -> String {
+    let describe = |conflict: &OccupiedPath| {
+        format!(
+            "{} at {}",
+            conflict
+                .occupant
+                .map_or("entry", crate::PathOccupant::as_str),
+            super::redaction::format_entry_path_for_error(&conflict.path)
+        )
+    };
+    match conflicts {
+        [only] => {
+            let lead = destination.map_or_else(String::new, |d| format!("destination {d}: "));
+            format!("{lead}refusing to replace the existing {}", describe(only))
         }
-        write!(f, "already holds {} of the paths to extract", self.1)
+        [first, ..] => {
+            let named = destination.map_or_else(String::new, |d| format!("{d} "));
+            format!(
+                "destination {named}already holds {} of the paths to extract, first: {}",
+                conflicts.len(),
+                describe(first)
+            )
+        }
+        [] => {
+            let named = destination.map_or_else(String::new, |d| format!("{d} "));
+            format!("destination {named}already holds 0 of the paths to extract")
+        }
+    }
+}
+
+/// An occupied path of a refused destination and what occupies it.
+///
+/// `occupant` is `None` only when the occupant vanished before the refusal
+/// probed it.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::OccupiedPath;
+/// use exarch_core::PathOccupant;
+///
+/// let conflict = OccupiedPath::new("a/b".into(), Some(PathOccupant::Directory));
+/// assert_eq!(conflict.path.to_str(), Some("a/b"));
+/// assert_eq!(conflict.occupant, Some(PathOccupant::Directory));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OccupiedPath {
+    /// The archive-relative path that is occupied.
+    pub path: PathBuf,
+    /// The kind of occupant the refusal observed.
+    pub occupant: Option<crate::PathOccupant>,
+}
+
+impl OccupiedPath {
+    /// Creates a conflict at `path` with the `occupant` the refusal observed.
+    #[must_use]
+    pub const fn new(path: PathBuf, occupant: Option<crate::PathOccupant>) -> Self {
+        Self { path, occupant }
+    }
+
+    /// A conflict at the entry `rel`, spelled by its components so `x/` and
+    /// `./x` both read `x`.
+    pub(crate) fn at(rel: &std::path::Path, occupant: Option<crate::PathOccupant>) -> Self {
+        Self::new(rel.components().collect(), occupant)
     }
 }
 
@@ -2417,7 +2479,7 @@ mod tests {
             (
                 ArchiveError::DestinationOccupied {
                     destination: Some(path()),
-                    conflicts: Box::new([path()]),
+                    conflicts: Box::new([OccupiedPath::new(path(), None)]),
                     by: OccupiedBy::Existing,
                 },
                 Classes::NONE,

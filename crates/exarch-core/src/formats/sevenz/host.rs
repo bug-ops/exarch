@@ -15,6 +15,7 @@ use super::write::lstat_dest;
 use super::write::refuse_undecoded_target_in;
 use super::write::write_file_direct;
 use super::write::write_file_with_permit;
+use crate::OccupiedBy;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
@@ -25,6 +26,7 @@ use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::replaces_symlink;
 use crate::formats::output_root::OutputRoot;
 use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
@@ -44,7 +46,6 @@ use crate::security::validator::EntryPath;
 use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
 use crate::selection::EntryShape;
-use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
@@ -182,7 +183,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                     root.created()
                         .created_here(&parent, leaf, safe_path.as_path())
                 },
-                || common::destination_occupied(root.dest().as_path(), safe_path.as_path()),
+                |found| root.occupied(safe_path.as_path(), found),
             )?;
             match action {
                 OccupantAction::Skip => {
@@ -317,7 +318,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 /// The host's pre-pass: paths against the disk as it is now.
 struct HostPrePass<'a> {
     core: ValidatorCore<'a>,
-    dest: &'a DestDir,
+    root: &'a PinnedRoot,
     config: &'a SecurityConfig,
     options: SinkOptions,
 }
@@ -330,7 +331,7 @@ impl PrePass for HostPrePass<'_> {
     ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx: ValidationContext<HostFs> = self.core.context();
         self.core
-            .route_entry_in(path, shape, self.dest, &HostFs, &ctx)
+            .route_entry_in(path, shape, self.root.dest(), &HostFs, &ctx)
     }
 
     fn directory(&mut self, _landing: &SafePath) -> Result<()> {
@@ -339,18 +340,18 @@ impl PrePass for HostPrePass<'_> {
 
     fn symlink(&mut self, link: &SafePath, file: &sevenz_rust2::ArchiveEntry) -> Result<()> {
         common::require_symlink_creation()?;
-        refuse_undecoded_target_in(link, file, self.dest, self.config, &HostFs)
+        refuse_undecoded_target_in(link, file, self.root.dest(), self.config, &HostFs)
     }
 
     fn file(&mut self, safe_path: &SafePath) -> Result<FilePlan> {
-        let dest_path = self.dest.join(safe_path);
+        let dest_path = self.root.dest().join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() {
             let action = self.options.existing_files.on_occupant(
                 EntryShape::File,
                 || Ok(occupancy.occupant()),
                 || false,
-                || common::destination_occupied(self.dest.as_path(), safe_path.as_path()),
+                |found| self.root.occupied(safe_path.as_path(), found),
             )?;
             if matches!(action, OccupantAction::Skip) {
                 return Ok(FilePlan::Skip);
@@ -359,7 +360,7 @@ impl PrePass for HostPrePass<'_> {
         // Fail here too, before any entry is written, so the pre-pass keeps
         // its no-partial-extraction guarantee for this refusal.
         if occupancy.kept_symlink().is_some() {
-            return Err(replaces_symlink(safe_path.as_path()));
+            return Err(replaces_symlink(safe_path.as_path(), OccupiedBy::Existing));
         }
         Ok(FilePlan::Reserve)
     }
@@ -386,7 +387,7 @@ impl SevenZTarget for SevenZHostTarget<'_> {
     ) -> Result<()> {
         let mut pre = HostPrePass {
             core: ValidatorCore::new(config),
-            dest: self.inner.dest(),
+            root: self.inner.root(),
             config,
             options,
         };

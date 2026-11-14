@@ -666,6 +666,21 @@ fn occupied_message(
     message.hint_parts(advice.hint())
 }
 
+/// The message of a refused occupied destination: the run's own entries name
+/// no destination and take the archive-conflict advice.
+fn occupied_context(
+    destination: Option<&Path>,
+    conflicts: &[exarch_core::OccupiedPath],
+    by: OccupiedBy,
+    advice: &ConflictAdvice,
+) -> Message {
+    let paths: Vec<PathBuf> = conflicts.iter().map(|c| c.path.clone()).collect();
+    match by {
+        OccupiedBy::Archive => occupied_message(None, &paths, &ConflictAdvice::ArchiveConflict),
+        _ => occupied_message(destination, &paths, advice),
+    }
+}
+
 /// `text` with its first letter in upper case.
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
@@ -1090,6 +1105,15 @@ fn refusal_hint(kind: &Violation) -> Option<String> {
             Flag::Exclude.long(),
             Flag::Flatten.long(),
         )),
+        Violation::ReplacesSymlink {
+            by: OccupiedBy::Archive,
+            ..
+        } => Some(
+            "The archive itself creates a symlink at that path and a later entry would replace \
+             it; a symlink is never replaced in place, so the archive cannot be extracted as it \
+             is."
+            .to_owned(),
+        ),
         Violation::ReplacesSymlink { .. } => Some(
             "An existing symlink at that path is never replaced in place; remove it or choose \
              another destination."
@@ -1195,12 +1219,7 @@ fn dedicated_context(
             destination,
             conflicts,
             by,
-        } => match by {
-            OccupiedBy::Archive => {
-                occupied_message(None, conflicts, &ConflictAdvice::ArchiveConflict)
-            }
-            _ => occupied_message(destination.as_deref(), conflicts, advice),
-        },
+        } => occupied_context(destination.as_deref(), conflicts, *by, advice),
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
@@ -2261,7 +2280,7 @@ mod tests {
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
                 destination: Some(path()),
-                conflicts: Box::new([path()]),
+                conflicts: Box::new([exarch_core::OccupiedPath::new(path(), None)]),
                 by: exarch_core::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
@@ -2304,6 +2323,23 @@ mod tests {
     fn occupied_message_escapes_hostile_paths() {
         let msg = occupied_text(&[PathBuf::from("a\x1b[2J\nforged")]);
         assert!(msg.ends_with("  a\\x1b[2J\\x0aforged"), "{msg:?}");
+    }
+
+    #[test]
+    fn the_existing_symlink_hint_differs_by_who_made_the_symlink() {
+        let hint = |by| {
+            refusal_hint(&Violation::ReplacesSymlink {
+                rel: "x".into(),
+                by,
+            })
+            .unwrap_or_default()
+        };
+        let archive = hint(OccupiedBy::Archive);
+        let existing = hint(OccupiedBy::Existing);
+        assert!(!archive.is_empty());
+        assert_ne!(archive, existing);
+        assert!(existing.contains("remove it"), "{existing}");
+        assert!(!archive.contains("remove it"), "{archive}");
     }
 
     #[test]
@@ -2405,7 +2441,7 @@ mod tests {
     fn a_conflict_with_an_entry_the_archive_made_names_the_entry_and_hints_no_flag() {
         let occupied = |by| ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("/tmp/.exarch-mine")),
-            conflicts: Box::new([PathBuf::from("x")]),
+            conflicts: Box::new([exarch_core::OccupiedPath::new(PathBuf::from("x"), None)]),
             by,
         };
 

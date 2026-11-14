@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Core API: `DestinationOccupied.conflicts` is `Box<[OccupiedPath]>` (path plus `Option<PathOccupant>`), `Violation::ReplacesSymlink` gains `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190).
+- Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
+- Extraction: the `DestinationOccupied` text (core `Display`, FFI description, Node `message`) now reads "refusing to replace the existing <kind> at <entry>" instead of "already holds N of the paths to extract" for a single conflict (#1190).
+- Core API: `PathOccupant` is `#[non_exhaustive]` and `verify` reports a directory entry over a non-directory as a Medium `InvalidArchive` finding with the typed refusal text (#1190).
+- CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects and `EXISTING_SYMLINK` errors carry `error.by` (#1190).
+- Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
+- Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
+
+### Fixed
+
+- Staged (`--atomic`, `--force`) extractions name the caller's destination in `DestinationOccupied` instead of the staging directory (#1190).
+- A directory entry over an archive symlink to a file is refused with `EXISTING_SYMLINK` instead of failing with "Not a directory" on Linux, and one over a symlink to a directory inside the destination is accepted on every host (#1190).
+- CLI: the existing-symlink hint no longer tells the user to remove a symlink the archive created, and the skill documents the real `--json` fields (#1190).
+- CLI: `--json` lists an incomplete mark outcome in `warnings`, matching the human output (#1190).
+- Tests: the extract SIGINT test waits on the child's write syscall on Linux instead of a fixed 100 ms sleep (#1190).
+- CI: the release job creates the GitHub release with `gh release` instead of a third-party action (#1190).
+- Specs: `MOC-specs.md` hints name the last change each spec is synced through (#1190).
+
 ## [0.10.0] - 2026-11-10
 
 ### Breaking

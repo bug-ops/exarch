@@ -41,7 +41,7 @@ use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
 use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::refuse_hardlink_replace;
-use crate::formats::occupant::replaces_symlink;
+use crate::formats::occupant::tree_occupant_refusal;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -723,7 +723,7 @@ fn kept_refusal(kept: KeptOccupant, rel: &Path) -> ArchiveError {
         kept,
         rel,
         || true,
-        || common::occupied_without_destination(rel),
+        |found| common::occupied_without_destination(rel, found),
     )
 }
 
@@ -741,7 +741,7 @@ fn occupied_action(
         arriving,
         || Ok(Some(occupant)),
         || true,
-        || common::occupied_without_destination(rel),
+        |found| common::occupied_without_destination(rel, found),
     )
 }
 
@@ -874,12 +874,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             .tree
             .project_landing(path, Node::Dir, LandingLimits::Enforced)
             .map_err(|error| match error {
-                PlaceError::Conflict(conflict)
-                    if conflict.blocked.is_none()
-                        && conflict.occupant == Some(Occupant::Symlink) =>
-                {
-                    replaces_symlink(rel)
-                }
+                PlaceError::Conflict(conflict) if conflict.blocked.is_none() => conflict
+                    .occupant
+                    .and_then(|held| tree_occupant_refusal(EntryShape::Directory, held, rel))
+                    .unwrap_or_else(|| place_error(PlaceError::Conflict(conflict))),
                 other => place_error(other),
             })?;
         if !occupied && !rel.is_empty() {
@@ -1023,7 +1021,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     Some(occupant),
                     link.as_path(),
                     || true,
-                    || common::occupied_without_destination(link.as_path()),
+                    |found| common::occupied_without_destination(link.as_path(), found),
                 )),
             };
         }

@@ -672,36 +672,40 @@ impl CollisionKind {
     }
 }
 
-/// What already occupies a path an insert collided with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Occupant {
-    /// A regular file or materialized hardlink.
-    File,
-    /// A directory.
-    Directory,
-    /// A symlink, readable or opaque.
-    Symlink,
+closed_enum! {
+    /// What already occupies a path an insert collided with.
+    ///
+    /// `#[non_exhaustive]` so a future occupant kind is not a breaking change
+    /// for downstream matches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PathOccupant;
+    ///
+    /// assert_eq!(PathOccupant::Directory.as_str(), "directory");
+    /// assert_eq!(PathOccupant::NAMES, &["file", "directory", "symlink"]);
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum Occupant {
+        /// A regular file or materialized hardlink.
+        File => "file",
+        /// A directory.
+        Directory => "directory",
+        /// A symlink, readable or opaque.
+        Symlink => "symlink",
+    }
 }
 
 impl Occupant {
-    /// The noun used in reports.
-    pub(crate) const fn noun(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Directory => "directory",
-            Self::Symlink => "symlink",
-        }
-    }
-
-    /// The text of a refusal to replace this occupant at `rel`, shared by the
-    /// host extraction error and the `verify` model so both name the entry and
-    /// the occupant in the same words.
+    /// The text of a refusal to replace this occupant at `rel`: the
+    /// destination-less wording of
+    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied),
+    /// built by the same function so the in-memory tree's I/O error and the
+    /// typed refusal name the entry and the occupant in the same words.
     pub(crate) fn refusal(self, rel: &Path) -> String {
-        format!(
-            "refusing to replace the existing {} at {}",
-            self.noun(),
-            normalized_display(rel)
-        )
+        crate::error::occupied_text(None, &[crate::OccupiedPath::at(rel, Some(self))])
     }
 }
 
@@ -739,7 +743,7 @@ impl ParentBlocker {
         match self {
             Self::File => ArchiveError::Io(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                refusal(Occupant::File.noun()),
+                refusal(Occupant::File.as_str()),
             )),
             Self::Symlink => ArchiveError::from(Violation::SymlinkParent {
                 entry: normalized_display(entry).into(),

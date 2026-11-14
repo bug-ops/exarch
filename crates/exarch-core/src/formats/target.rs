@@ -42,7 +42,6 @@ use crate::security::quota::EntryCount;
 use crate::security::validator::Gated;
 use crate::security::validator::ValidatorCore;
 use crate::selection::EntryShape;
-use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::ParentCheck;
@@ -316,10 +315,6 @@ impl<'a> HostTarget<'a> {
         })
     }
 
-    pub(super) const fn dest(&self) -> &DestDir {
-        self.root.dest()
-    }
-
     pub(super) const fn root(&self) -> &PinnedRoot {
         &self.root
     }
@@ -547,7 +542,7 @@ impl ExtractTarget for HostTarget<'_> {
                             .created()
                             .created_here(&link_dir, link_leaf, link.as_path())
                     },
-                    || common::destination_occupied(self.root.dest().as_path(), link.as_path()),
+                    |found| self.root.occupied(link.as_path(), found),
                 )?;
                 return match action {
                     OccupantAction::Skip => {
@@ -566,12 +561,7 @@ impl ExtractTarget for HostTarget<'_> {
                                     link.as_path(),
                                 )
                             },
-                            || {
-                                common::destination_occupied(
-                                    self.root.dest().as_path(),
-                                    link.as_path(),
-                                )
-                            },
+                            |found| self.root.occupied(link.as_path(), found),
                         ))
                     }
                 };

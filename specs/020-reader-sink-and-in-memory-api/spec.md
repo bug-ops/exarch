@@ -10,7 +10,7 @@ tags:
   - in-memory
   - bindings
 created: 2026-11-02
-updated: 2026-11-10
+updated: 2026-11-14
 status: implemented
 related:
   - "[[constitution]]"
@@ -169,7 +169,7 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-014 | Validation SHALL assume an empty namespace and count the bytes the archive produces, not what the sink stores; occupants SHALL follow `SinkOptions::existing_files` (default `Skip`) exactly as the path-based API; a sink holds only entries of the current run, so under `Refuse` every occupant was made by the archive: a file, symlink or hardlink over a file or symlink is an in-archive duplicate and is skipped as under `Skip`, while a non-directory over a directory is refused (`destination_occupied`), by the one `is_run_duplicate` rule that host extraction and `list` also apply (#1127, #1130, #1132); under `Skip` such an entry is still skipped | must |
 | FR-015 | A sink error SHALL end the extraction as `ArchiveError::Io` when no entry was delivered and as `PartialExtraction` wrapping it afterwards; an `io::ErrorKind::QuotaExceeded` error carrying `SinkFull` SHALL map to `QuotaExceeded { resource: SinkCapacity { max } }` | must |
 | FR-016 | `SinkOptions` (`#[non_exhaustive]`, Copy) SHALL carry `existing_files: ExistingFiles` and `decode_reuse: DecodeReuse` (default `Off`, set through `with_decode_reuse`; #890, #946); `SinkOptions::try_from(&ExtractionOptions)` SHALL carry only `existing_files` and set `decode_reuse` to `Off`, and SHALL fail with `InvalidConfiguration` when `staging` is `Atomic` or `AtomicReplace`, since staged extraction renames a directory (#794, #808) | must |
-| FR-017 | Symlinks SHALL be delivered on every platform, including hosts where the path-based API refuses to create them; a hardlink to a directory SHALL be `InvalidArchive`; a directory or file entry through a dangling symlink, or over a file or symlink, SHALL be refused with the same entry-naming message as `extract` and `verify` (#802, #803) | must |
+| FR-017 | Symlinks SHALL be delivered on every platform, including hosts where the path-based API refuses to create them; a hardlink to a directory SHALL be `InvalidArchive`; a directory or file entry through a dangling symlink, or over a file or symlink, SHALL be refused with the same entry-naming message as `extract` and `verify` (#802, #803); the refusal is typed through the shared `tree_occupant_refusal`: `DestinationOccupied` with the entry in `conflicts` as an `OccupiedPath` carrying `occupant` (`file` for a directory over a file, `directory` for a non-directory over a directory), `by` `Archive` and no `destination`, or `ReplacesSymlink` with `by` `Archive` for a directory over a symlink, identical to the list model (#1181, #1183) | must |
 | FR-018 | For a 7z source the file-table checks (admission, ratios, quotas, link policy, paths, name lengths for the sink's `PathModel`) SHALL run and refuse before any block is decoded or any entry is delivered (#772, #785) | must |
 | FR-019 | The in-memory destination model SHALL charge each distinct name against a node budget of `max_file_count * max_path_depth + 1`; exhausting it SHALL fail with `QuotaExceeded { resource: TreeNodes { max } }`; a link path that leaves the root and returns SHALL be refused as an escape | must |
 

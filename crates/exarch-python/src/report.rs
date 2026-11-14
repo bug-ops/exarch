@@ -1816,6 +1816,11 @@ mod tests {
                 exarch_core::OccupiedBy::as_str,
             ),
             literal_line(
+                "_PathOccupant",
+                exarch_core::PathOccupant::ALL,
+                exarch_core::PathOccupant::as_str,
+            ),
+            literal_line(
                 "_Restore",
                 exarch_core::RestoreKind::ALL,
                 exarch_core::RestoreKind::as_str,

@@ -50,6 +50,7 @@ _MarkState = Literal[
     "not_requested", "unsupported_platform", "unmarked", "unreadable", "propagated"
 ]
 _OccupiedBy = Literal["existing", "archive"]
+_PathOccupant = Literal["file", "directory", "symlink"]
 _Restore = Literal["not_needed", "restored", "failed"]
 _ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
@@ -2484,13 +2485,18 @@ class OutputExistsError(ArchiveError, FileExistsError):
     existing path (``code == "OUTPUT_EXISTS"``).
 
     ``errno`` is ``EEXIST`` and ``filename`` the output or destination path,
-    redacted like an exception message, as ``open()`` fills them.
+    redacted like an exception message, as ``open()`` fills them. Unlike a
+    builtin ``OSError``, ``str(err)`` is the full description, which names the
+    refused entry and its kind (or the count of conflicts) rather than only
+    the path.
 
     Attributes:
-        conflicts: The archive-relative paths an extraction found occupied: with
-            ``existing_files == "refuse"``, or with ``"overwrite"`` when the
-            occupant is a directory or a hardlink would replace a file;
-            ``None`` for a creation output that exists.
+        conflicts: The archive-relative paths an extraction found occupied, each
+            with the kind of its occupant: with ``existing_files == "refuse"``,
+            or with ``"overwrite"`` when the occupant is a directory or a
+            hardlink would replace a file; a directory entry over a file is
+            refused under every value; ``None`` for a creation output that
+            exists.
         by: Who made the occupant of the first refused path: ``"existing"``
             (it was there before the run, or its maker is unknown: removing
             it or choosing another destination helps, and
@@ -2501,7 +2507,7 @@ class OutputExistsError(ArchiveError, FileExistsError):
             output that exists.
     """
 
-    conflicts: list[str] | None
+    conflicts: list[OccupiedPath] | None
     by: _OccupiedBy | str | None
 
 class SourceNotFoundError(ArchiveError, FileNotFoundError):
@@ -2562,6 +2568,29 @@ class NameCollision:
     @property
     def second(self) -> str:
         """The second source, redacted like an exception message."""
+        ...
+
+@final
+class OccupiedPath:
+    """
+    An archive-relative path that an extraction found occupied.
+
+    Constructible so a pickled ``OutputExistsError`` revives its ``conflicts``.
+    """
+
+    def __init__(self, path: str, occupant: str | None = None) -> None: ...
+    @property
+    def path(self) -> str:
+        """The archive-relative path, as the archive spells it."""
+        ...
+
+    @property
+    def occupant(self) -> _PathOccupant | str | None:
+        """
+        What occupies the path: ``"file"``, ``"directory"`` or ``"symlink"``
+        (a future core value reads as a plain ``str``); ``None`` when the
+        occupant vanished before the refusal probed it.
+        """
         ...
 
 class InvalidCompressionLevelError(ArchiveError, ValueError):
@@ -2734,6 +2763,11 @@ class SecurityViolationError(ArchiveError):
         sub_code: The family of the refusal, set on every violation raised by the
             core (``"PATH_NAME"``, ``"LINK_TARGET"``, ``"ENCRYPTED"``,
             ``"TAR_TRAILER"``, ...); ``None`` only on the class itself.
+        by: With ``sub_code == "EXISTING_SYMLINK"`` when an entry refused to
+            replace a symlink, who made it: ``"existing"`` (there before the run,
+            or its maker is unknown) or ``"archive"`` (an earlier entry of the
+            same archive); a future core value reads as a plain ``str``;
+            ``None`` for every other violation.
     """
 
     files_extracted: int
@@ -2743,6 +2777,7 @@ class SecurityViolationError(ArchiveError):
     warnings: list[AnyExtractionWarning]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None
+    by: _OccupiedBy | str | None
 
 class UnsupportedFormatError(ArchiveError):
     """Archive format not supported."""

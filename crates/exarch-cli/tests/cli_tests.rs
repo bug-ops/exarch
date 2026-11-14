@@ -6757,8 +6757,9 @@ fn test_create_tar_gz_of_compressible_data_has_no_ratio_warning() {
         .stdout(predicate::str::contains("Warnings").not());
 }
 
-/// Regression test for #802: a directory entry over an earlier file names the
-/// entry and the occupant, with and without `--force`, and `verify` agrees.
+/// Regression test for #802: a directory entry over an earlier file is an
+/// occupied-destination refusal naming the entry, with and without `--force`,
+/// and `verify` agrees.
 #[test]
 fn test_extract_directory_over_file_names_the_entry() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -6781,8 +6782,9 @@ fn test_extract_directory_over_file_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("refusing to replace the existing file at x")
-                    .and(predicate::str::contains("os error").not()),
+                predicate::str::contains("1 destination file already exists")
+                    .and(predicate::str::contains("os error").not())
+                    .and(predicate::str::is_match(r"(?m)^\s+x/?$").unwrap()),
             );
     }
 
@@ -7473,7 +7475,7 @@ fn test_extract_conflict_json_is_typed_with_sorted_conflicts() {
         .as_array()
         .expect("conflicts array")
         .iter()
-        .map(|c| c.as_str().expect("path"))
+        .map(|c| c["path"].as_str().expect("path"))
         .collect();
     assert!(!conflicts.is_empty(), "{json}");
     let mut sorted = conflicts.clone();
@@ -7519,7 +7521,11 @@ fn test_extract_conflicts_are_listed_in_path_component_order() {
     let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
     assert_eq!(
         json["error"]["conflicts"],
-        serde_json::json!(["a/b", "a-b", "a.c"]),
+        serde_json::json!([
+            {"path": "a/b", "occupant": "file"},
+            {"path": "a-b", "occupant": "file"},
+            {"path": "a.c", "occupant": "file"},
+        ]),
         "{json}"
     );
 
@@ -7644,7 +7650,10 @@ fn test_extract_conflicts_list_every_occupant_and_the_hint_only_the_unreplaceabl
     let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
     assert_eq!(
         json["error"]["conflicts"],
-        serde_json::json!(["blocked", "plain"]),
+        serde_json::json!([
+            {"path": "blocked", "occupant": "directory"},
+            {"path": "plain", "occupant": "file"},
+        ]),
         "{json}"
     );
     let hint = json["error"]["hint"].as_str().expect("hint");
@@ -8698,8 +8707,58 @@ mod interrupt {
         assert!(out.exists(), "the run must have published the destination");
     }
 
+    /// Polls `/proc/<pid>/syscall` until the child sits in `write(1, ..)` or
+    /// `writev(1, ..)`, failing fast if it exits first.
+    #[cfg(target_os = "linux")]
+    fn wait_until_blocked_writing_stdout(child: &mut Reaped) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let path = format!("/proc/{}/syscall", child.id());
+        loop {
+            if let Some(status) = child.try_wait().expect("poll") {
+                panic!("the child exited ({status:?}) before blocking on the full stdout pipe");
+            }
+            let syscall = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+            let mut fields = syscall.split_whitespace();
+            let number = fields.next().and_then(|n| n.parse::<libc::c_long>().ok());
+            let blocked = matches!(number, Some(libc::SYS_write | libc::SYS_writev))
+                && fields.next() == Some("0x1");
+            if blocked {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never blocked writing stdout, last syscall: {syscall:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Asserts SIGINT is still ignored and has no handler installed, which a
+    /// handler registered over the inherited `SIG_IGN` would violate even
+    /// though `SA_RESTART` hides it from a blocked write.
+    #[cfg(target_os = "linux")]
+    fn assert_sigint_ignored_not_caught(child: &std::process::Child) {
+        let sigint_bit = 1_u64 << (libc::SIGINT - 1);
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
+            .expect("read process status");
+        let mask = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+                .unwrap_or_else(|| panic!("no {key} line in {status}"))
+        };
+        assert_ne!(mask("SigIgn:") & sigint_bit, 0, "SIGINT is not ignored");
+        assert_eq!(mask("SigCgt:") & sigint_bit, 0, "SIGINT has a handler");
+    }
+
     /// The result report blocks on a full stdout pipe after the armed window
     /// has closed, which holds the process in that state while SIGINT arrives.
+    /// Linux waits on the blocked `write(1)` and checks the signal masks;
+    /// elsewhere (macOS exposes neither the disposition nor the blocked
+    /// syscall to an unprivileged reader) a pause, a grace after each signal
+    /// and a liveness poll stand in.
     #[test]
     fn an_inherited_ignored_sigint_stays_ignored_after_the_window_closes() {
         use std::io::Write as _;
@@ -8744,9 +8803,6 @@ mod interrupt {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::null())
             .spawn_reaped();
-        // The destination appears when core publishes it, which is the end of
-        // the run; the grace covers the guard dropping before the report
-        // blocks.
         let published = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !out.exists() {
             assert!(
@@ -8755,15 +8811,26 @@ mod interrupt {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        for _ in 0..3 {
-            sigint(&child);
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        #[cfg(target_os = "linux")]
+        {
+            wait_until_blocked_writing_stdout(&mut child);
+            assert_sigint_ignored_not_caught(&child);
+            for _ in 0..3 {
+                sigint(&child);
+            }
         }
-        assert!(
-            child.try_wait().expect("poll").is_none(),
-            "SIGINT ended a process that inherited it as ignored"
-        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            for _ in 0..3 {
+                sigint(&child);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(
+                child.try_wait().expect("poll").is_none(),
+                "SIGINT ended a process that inherited it as ignored"
+            );
+        }
 
         done.store(true, Ordering::SeqCst);
         std::io::copy(&mut reader, &mut std::io::sink()).expect("drain stdout");

@@ -16,6 +16,8 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::DestinationCheck;
+use crate::OccupiedBy;
+use crate::OccupiedPath;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::formats::common::check_directory_occupant;
@@ -41,7 +43,7 @@ enum Occupancy {
     /// Nothing is there, or what is there is acceptable.
     Free,
     /// Something is there that the write phase refuses to replace.
-    Conflict,
+    Conflict(Occupant),
 }
 
 /// Opens `dest` for probing, or `None` when it does not exist: nothing can
@@ -304,7 +306,7 @@ pub(super) fn check(
     };
     let walker = DirWalker::new(config);
     let mut parents = ParentCache::new();
-    let mut conflicts: Vec<PathBuf> = Vec::new();
+    let mut conflicts: Vec<OccupiedPath> = Vec::new();
     for landing in manifest.landings(config) {
         let rel = landing.path().as_path();
         if rel.is_empty() {
@@ -312,13 +314,15 @@ pub(super) fn check(
         }
         match inspect(walker, &root, &mut parents, &landing, check) {
             Ok(Occupancy::Free) => {}
-            Ok(Occupancy::Conflict) => conflicts.push(rel.to_path_buf()),
-            Err(ArchiveError::Io(error)) if is_below_a_conflict(&error, &conflicts) => {}
+            Ok(Occupancy::Conflict(occupant)) => {
+                conflicts.push(OccupiedPath::at(rel, Some(occupant)));
+            }
+            Err(ArchiveError::Io(error)) if is_below_a_conflict(&error, !conflicts.is_empty()) => {}
             Err(error) => return Err(error),
         }
     }
-    conflicts.sort();
-    conflicts.dedup();
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    conflicts.dedup_by(|a, b| a.path == b.path);
     conflicts
         .is_empty()
         .ok_or_else(|| ArchiveError::DestinationOccupied {
@@ -330,10 +334,10 @@ pub(super) fn check(
 
 /// Whether an I/O failure only says that the path is absent or sits below a
 /// conflict already reported at one of its ancestors.
-fn is_below_a_conflict(error: &std::io::Error, conflicts: &[PathBuf]) -> bool {
+fn is_below_a_conflict(error: &std::io::Error, any_conflict: bool) -> bool {
     match error.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => true,
-        std::io::ErrorKind::NotADirectory => !conflicts.is_empty(),
+        std::io::ErrorKind::NotADirectory => any_conflict,
         _ => false,
     }
 }
@@ -352,13 +356,13 @@ fn inspect<'r>(
     let Some(occupant) = parent.probe(leaf)? else {
         return Ok(Occupancy::Free);
     };
-    let refuse_symlink = || Err(replaces_symlink(rel));
+    let refuse_symlink = || Err(replaces_symlink(rel, OccupiedBy::Existing));
     let replaceable = check == DestinationCheck::Replaceable;
     match (&arrival, occupant) {
         (Arrival::Directory, Occupant::Directory) => Ok(Occupancy::Free),
         (Arrival::Directory, Occupant::Symlink) => vet_symlinked_directory(walker, root, landing),
         (Arrival::File | Arrival::Symlink(_), Occupant::File) if replaceable => Ok(Occupancy::Free),
-        (_, Occupant::Directory | Occupant::File) => Ok(Occupancy::Conflict),
+        (_, held @ (Occupant::Directory | Occupant::File)) => Ok(Occupancy::Conflict(held)),
         (Arrival::Symlink(target), Occupant::Symlink) if replaceable => match target {
             LinkTarget::Recorded(recorded) if parent.read_link(leaf)? == *recorded => {
                 Ok(Occupancy::Free)
@@ -378,7 +382,7 @@ fn vet_symlinked_directory(
 ) -> Result<Occupancy> {
     let rel = landing.path().as_path();
     if matches!(landing.kind(), LandingKind::Entry(_)) {
-        check_directory_occupant(&root.dest().probe(rel), rel, root.dest())?;
+        check_directory_occupant(root, rel, |_| OccupiedBy::Existing)?;
     }
     walker.vet_dir(root, rel)?;
     Ok(Occupancy::Free)

@@ -104,12 +104,16 @@ def test_destination_error_keeps_its_step_across_pickle(temp_dir):
     assert revived.filename == info.value.filename
 
 
+def _extract_refusing(archive, out):
+    exarch.extract_archive(archive, out, None, _refuse())
+
+
 def test_partial_error_crosses_a_process_pool(temp_dir):
     archive = _tar(temp_dir / "a.tar", [("x", False), ("x", True)])
     out = temp_dir / "out"
     out.mkdir()
 
     with concurrent.futures.ProcessPoolExecutor(1) as pool:
-        future = pool.submit(exarch.extract_archive, str(archive), str(out), None, _refuse())
+        future = pool.submit(_extract_refusing, str(archive), str(out))
         with pytest.raises(exarch.ArchiveError):
             future.result(timeout=60)

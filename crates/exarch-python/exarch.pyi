@@ -987,8 +987,19 @@ class CreationConfig:
 
 @final
 class Skip:
-    """One entry an operation left out."""
+    """
+    One entry an operation left out.
 
+    Constructible so a pickled exception revives its ``skipped`` sample;
+    ``ValueError`` for an unknown ``kind`` or ``io_kind``.
+    """
+
+    def __new__(
+        cls,
+        kind: _SkipKind | str,
+        path: str | Path,
+        io_kind: _IoKind | str | None = None,
+    ) -> Skip: ...
     @property
     def kind(self) -> _SkipKind | str:
         """Why the entry was skipped."""
@@ -1009,8 +1020,12 @@ class Skipped:
     """
     Everything an operation left out: exact counts per kind plus a bounded
     sample of the individual entries.
+
+    Constructible so a pickled exception revives its ``skipped`` with the same
+    exact counts.
     """
 
+    def __new__(cls, counts: dict[str, int], sample: list[Skip]) -> Skipped: ...
     @property
     def total(self) -> int:
         """How many entries were skipped, over all kinds."""
@@ -2566,8 +2581,14 @@ class InvalidConfigurationError(ArchiveError, ValueError):
 
 @final
 class NameCollision:
-    """Two creation sources that map to one entry name."""
+    """
+    Two creation sources that map to one entry name.
 
+    Constructible so a pickled ``InvalidConfigurationError`` revives its
+    ``collision``.
+    """
+
+    def __new__(cls, name: str, first: str, second: str) -> NameCollision: ...
     @property
     def name(self) -> str:
         """The entry name both sources map to."""
@@ -2591,7 +2612,7 @@ class OccupiedPath:
     Constructible so a pickled ``OutputExistsError`` revives its ``conflicts``.
     """
 
-    def __init__(self, path: str, occupant: str | None = None) -> None: ...
+    def __new__(cls, path: str, occupant: str | None = None) -> OccupiedPath: ...
     @property
     def path(self) -> str:
         """The archive-relative path, as the archive spells it."""

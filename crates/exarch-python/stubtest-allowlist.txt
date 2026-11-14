@@ -1,0 +1,22 @@
+# Known stubtest differences, one regex per line (mypy.stubtest --allowlist).
+# Every entry states why the stub cannot or should not match the runtime.
+
+# The runtime lists the public names; the stub exports them by declaration.
+exarch.__all__
+
+# Native submodule behind the package, not public API.
+exarch.exarch
+
+# Built only with the panic-injection feature, which CI enables for one
+# regression test (#395) and published wheels never do.
+exarch._trigger_panic_for_testing
+
+# PyO3 base classes of the typed hierarchies are disjoint bases at runtime;
+# @disjoint_base needs typing_extensions in a stub that has no runtime
+# dependencies. Subclassing them from Python is not supported.
+exarch.ArchiveEntry
+exarch.CreationWarning
+exarch.EntryDisposition
+exarch.ExtractionWarning
+exarch.LinkTarget
+exarch.MemoryEntry

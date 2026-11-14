@@ -490,6 +490,11 @@ jobs:
       - name: Install Python bindings
         run: uv pip install --system target/wheels/*.whl
 
+      - name: Check the stubs against the runtime with stubtest
+        run: |
+          cd crates/exarch-python
+          python -m mypy.stubtest exarch --allowlist stubtest-allowlist.txt
+
       - name: Test Python bindings
         if: matrix.python-version != '3.12'
         run: |

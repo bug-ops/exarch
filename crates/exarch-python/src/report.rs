@@ -8,6 +8,7 @@ use exarch_core::Disposition;
 use exarch_core::DispositionKind;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::IntegrityGaps;
+use exarch_core::IoKind;
 use exarch_core::LinkTarget;
 use exarch_core::LinkTargetState;
 use exarch_core::ManifestEntryKind;
@@ -17,8 +18,10 @@ use exarch_core::Skips as CoreSkips;
 use exarch_core::UnixTime;
 use exarch_core::VerificationIssue;
 use exarch_core::VerificationReport;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use pyo3::types::PyType;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -39,15 +42,49 @@ use crate::warning::extraction_warnings;
 /// * `path` - The entry's path as the operation names it
 /// * `io_kind` - The stable kind of the I/O failure behind an `"unreadable"`
 ///   skip (`"PermissionDenied"`, ...), else `None`
-#[pyclass(name = "Skip", frozen)]
+#[pyclass(name = "Skip", frozen, from_py_object, module = "exarch")]
+#[derive(Clone)]
 pub struct PySkip {
     kind: SkipKind,
     path: PathBuf,
     io_kind: Option<&'static str>,
 }
 
+/// The constructor arguments of a [`PySkip`], as pickle replays them.
+type SkipArgs = (&'static str, PathBuf, Option<&'static str>);
+
+/// The constructor arguments of a [`PySkips`], as pickle replays them.
+type SkipsArgs = (BTreeMap<&'static str, usize>, Vec<PySkip>);
+
 #[pymethods]
 impl PySkip {
+    // Exists so a pickled exception revives its `skipped` sample.
+    #[new]
+    #[pyo3(signature = (kind, path, io_kind=None))]
+    fn new(kind: &str, path: PathBuf, io_kind: Option<&str>) -> PyResult<Self> {
+        let io_kind = io_kind
+            .map(|name| {
+                IoKind::NAMES
+                    .iter()
+                    .copied()
+                    .find(|known| *known == name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown io_kind {name:?}")))
+            })
+            .transpose()?;
+        Ok(Self {
+            kind: parse_one(ConfigSetting::SkipKind, kind)?,
+            path,
+            io_kind,
+        })
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> (Bound<'py, PyType>, SkipArgs) {
+        (
+            py.get_type::<Self>(),
+            (self.kind.as_str(), self.path.clone(), self.io_kind),
+        )
+    }
+
     #[getter]
     fn kind(&self) -> &'static str {
         self.kind.as_str()
@@ -85,54 +122,78 @@ impl From<&CoreSkip> for PySkip {
 /// Everything an operation left out: exact counts per kind plus a bounded
 /// sample of the individual entries.
 ///
+/// Holds a snapshot of the counts and the sample rather than the core value, so
+/// a pickled exception revives the same counts.
+///
 /// # Attributes
 ///
 /// * `total` - How many entries were skipped, over all kinds
 /// * `counts` - The exact count of each kind that occurred
 /// * `sample` - The first skipped entries (at most 64)
-#[pyclass(name = "Skipped", frozen)]
+#[pyclass(name = "Skipped", frozen, module = "exarch")]
 #[derive(Clone)]
 pub struct PySkips {
-    inner: CoreSkips,
+    counts: BTreeMap<SkipKind, usize>,
+    sample: Vec<PySkip>,
 }
 
 #[pymethods]
 impl PySkips {
+    // Exists so a pickled exception revives its `skipped`.
+    #[new]
+    fn new(counts: BTreeMap<String, usize>, sample: Vec<PySkip>) -> PyResult<Self> {
+        let counts = counts
+            .into_iter()
+            .map(|(kind, count)| Ok((parse_one(ConfigSetting::SkipKind, &kind)?, count)))
+            .collect::<PyResult<_>>()?;
+        Ok(Self { counts, sample })
+    }
+
     #[getter]
     fn total(&self) -> usize {
-        self.inner.total()
+        self.counts
+            .values()
+            .fold(0_usize, |sum, count| sum.saturating_add(*count))
     }
 
     /// The exact count of `kind`, which must be one of the kind strings.
     fn count(&self, kind: &str) -> PyResult<usize> {
-        parse_one::<SkipKind>(ConfigSetting::SkipKind, kind).map(|kind| self.inner.count(kind))
+        parse_one::<SkipKind>(ConfigSetting::SkipKind, kind)
+            .map(|kind| self.counts.get(&kind).copied().unwrap_or(0))
     }
 
     #[getter]
     fn counts(&self) -> BTreeMap<&'static str, usize> {
-        self.inner
-            .counts()
-            .map(|(kind, count)| (kind.as_str(), count))
+        self.counts
+            .iter()
+            .map(|(kind, count)| (kind.as_str(), *count))
             .collect()
     }
 
     #[getter]
     fn sample(&self) -> Vec<PySkip> {
-        self.inner.sample().iter().map(PySkip::from).collect()
+        self.sample.clone()
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> (Bound<'py, PyType>, SkipsArgs) {
+        (py.get_type::<Self>(), (self.counts(), self.sample()))
     }
 
     fn __len__(&self) -> usize {
-        self.inner.total()
+        self.total()
     }
 
     fn __repr__(&self) -> String {
-        format!("Skipped(total={})", self.inner.total())
+        format!("Skipped(total={})", self.total())
     }
 }
 
 impl From<CoreSkips> for PySkips {
-    fn from(inner: CoreSkips) -> Self {
-        Self { inner }
+    fn from(skips: CoreSkips) -> Self {
+        Self {
+            counts: skips.counts().collect(),
+            sample: skips.sample().iter().map(PySkip::from).collect(),
+        }
     }
 }
 

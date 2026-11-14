@@ -102,6 +102,17 @@ impl DualClass {
                         )?,
                     )?;
                 }
+                // The builtin `OSError` reduce rebuilds from `(errno, strerror,
+                // filename)`, which would drop the one-argument description
+                // `__str__` relies on; the OS fields travel in the state.
+                namespace.set_item(
+                    "__reduce__",
+                    py.eval(
+                        c"lambda self: (type(self), self.args, {**self.__dict__, **{n: getattr(self, n) for n in ('errno', 'strerror', 'filename') if isinstance(self, OSError)}})",
+                        None,
+                        None,
+                    )?,
+                )?;
                 for attr in self.optional_attrs {
                     namespace.set_item(attr, py.None())?;
                 }
@@ -327,7 +338,7 @@ const fn errno_name(kind: &FfiKind) -> Option<&'static str> {
 /// * `name` - The entry name both sources map to
 /// * `first` - The first source, redacted like an exception message
 /// * `second` - The second source, redacted like an exception message
-#[pyclass(name = "NameCollision", frozen)]
+#[pyclass(name = "NameCollision", frozen, module = "exarch")]
 pub struct PyNameCollision {
     #[pyo3(get)]
     name: String,
@@ -339,6 +350,23 @@ pub struct PyNameCollision {
 
 #[pymethods]
 impl PyNameCollision {
+    // Exists so a pickled `InvalidConfigurationError` revives its `collision`.
+    #[new]
+    const fn new(name: String, first: String, second: String) -> Self {
+        Self {
+            name,
+            first,
+            second,
+        }
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> (Bound<'py, PyType>, (String, String, String)) {
+        (
+            py.get_type::<Self>(),
+            (self.name.clone(), self.first.clone(), self.second.clone()),
+        )
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "NameCollision(name={:?}, first={:?}, second={:?})",

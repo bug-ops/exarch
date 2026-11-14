@@ -32,6 +32,9 @@ related:
 > **Origin**: #931 (staged output), #915 (format moved off `CreationConfig`), #916 (typed exclude patterns) — 50-issue batch, 2026-11-04, shipped in 0.9.0 (#956, #953, #961 added typed source errors and durability)
 > **Status**: implemented — documents the behavior that shipped in 0.9.0. FR-019 to FR-021 are superseded by [[023-entry-selection-glob-patterns/spec]] (glob grammar, #1000)
 
+> [!note] Revision 2026-11-14: a source is read exactly as the walk saw it
+> Each walked source is opened relative to its pinned parent directory and accepted only when it is the regular file the walk reported; a source that changes is a typed `SourceChanged` failure, a special file is a counted skip, and an entry's data always agrees with its header (FR-048 to FR-052).
+
 > [!note] Batch #981 amendments
 > A creation stop is the typed `ArchiveError::Cancelled` (FR-044); a duplicate entry name is refused before any write (FR-045); a leftover reservation and a failed directory sync are typed (FR-046).
 
@@ -189,6 +192,11 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-027 | `Durability` (`closed_enum!`, `#[non_exhaustive]`: `Synced` default, `Unsynced`; `ConfigSetting::Durability`) SHALL be set on `OutputFile` (`with_durability`, `durability()`) and passed to `StagedOutput::commit(self, Durability)`; `Synced` flushes the staged file and then the parent directory, `Unsynced` flushes neither; the rename stays atomic under both | must |
 | FR-028 | The `Unsynced` documentation SHALL state that after a crash or power loss a `Replace` target can be empty or truncated and a `CreateNew` file can be empty, and that write-back errors (NFS, quota, delayed-allocation `ENOSPC`) are not reported, so an `Ok` result does not mean the bytes reached disk | must |
 | FR-029 | WHEN a creation source exists but cannot be read (open, metadata, read, readlink, directory read, or the top-level `lstat`), THE SYSTEM SHALL fail with `ArchiveError::SourceNotAccessible { path, error: io::Error }` (Display `source path is not accessible: {path}: {error}`); `NotFound` and `NotADirectory` give `SourceNotFound` (a file removed mid-walk included); a directory-walk loop with no I/O cause keeps the `Io` `directory walk failed` context; one helper (`creation::source_error`) maps every site, and a reader wrapper records the first read fault that is not `Interrupted` so a failed copy is reported with its cause; the field is named `error`, not `#[source]`, keeping the error-chain rule | must |
+| FR-048 | THE SYSTEM SHALL read a walked source only through its pinned parent directory: the parent is opened without following a symlink, non-blocking and search-only where the platform has it (a directory without read permission still works), and it SHALL be accepted only while its device and inode equal those the walk recorded; otherwise creation SHALL fail with `SourceChanged` without opening the source | must |
+| FR-049 | THE SYSTEM SHALL open the source relative to the verified parent, non-blocking and without following a symlink (unless following links was requested), and SHALL accept the opened handle only as a regular file whose `FileIdentity` (device and inode) equals the one the walk recorded; a source that no longer matches the walk SHALL be rejected with `SourceChanged`; on a platform without a stable file identity only the regular-file check applies | must |
+| FR-050 | THE SYSTEM SHALL NOT open a FIFO, socket or device for reading: such an entry SHALL be recorded as `SkipKind::SpecialFile` (kind name `special_file`), and a source that is not a regular file when opened SHALL be rejected under FR-049 | must |
+| FR-051 | THE SYSTEM SHALL copy exactly the size the opened handle reported into the archive entry, so the data always matches the entry header; content that does not match that size SHALL fail with `SourceChanged` and publish nothing (FR-006) | must |
+| FR-052 | THE SYSTEM SHALL report any mismatch of FR-048, FR-049 and FR-051 as `ArchiveError::SourceChanged { path }` (Display `source path changed during creation: {path}`, `ErrorCode` `SOURCE_CHANGED`, failure class, `path` redacted in binding release builds like any other path); the Python and Node bindings and the CLI JSON envelope SHALL expose it with that code; the staged output is deleted and the target is unchanged | must |
 
 ### Surfaces
 
@@ -249,6 +257,9 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | A non-UTF-8 file name and a pattern | Matched by raw bytes |
 | The progress callback raises (or throws) during creation | Creation stops with `Cancelled`, the staged file is deleted and the previous archive is kept (Python and Node surface the callback's exception) |
 | Pattern `*.tmp` and a source root under `x.tmp/` | Ancestors are not matched; the archive is not empty |
+| A source that no longer matches what the walk reported (kind, identity or size) | `SourceChanged`; nothing is published and the creator never blocks (FR-048 to FR-051) |
+| A source file in a directory without read permission (for example `0311`) | Archived normally (FR-048) |
+| Windows: no file identity is available | Only the regular-file and size checks apply (FR-049) |
 | Single-file top-level source matching an exclude pattern | Not filtered (unchanged behavior) |
 
 ## 7. Success Criteria
@@ -259,6 +270,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | SC-002 | Replaced file keeps its mode, stripped of setuid, setgid and sticky | Unix unit tests in `creation/staged.rs`, live CLI check |
 | SC-003 | Every exclude shape the old matcher accepted is refused or matches the same files under a non-matching root | Legacy-equivalence tests in `creation/filters.rs` |
 | SC-004 | Self-inclusion cannot loop | Python and CLI tests with the output inside the source directory |
+| SC-005 | A source that does not match the walk never yields an inconsistent archive or a hang | `creation/source_tests.rs` for TAR, TAR.GZ and ZIP, Node and Python creation-error tests |
 
 ## 8. Agent Boundaries
 
@@ -266,6 +278,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 - Decide target refusals in `StagedOutput::begin` before reading sources
 - Keep `StagedOutput` crate-private; route creation through `CreateRequest::create`
 - Compare excluded names by path, never by file identity
+- Open every source relative to its verified parent and verify its `FileIdentity` against the walk before reading (FR-048, FR-049)
+- Copy exactly the size the opened handle reported (FR-051)
 
 ### Ask First
 - Preserving owner, ACLs or xattrs of a replaced file
@@ -277,6 +291,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 - Add a `Default` for `OutputPolicy` or accept a `bool` for it
 - Store an unparsed exclude string in `CreationConfig`
 - Delete a reservation file without confirming its identity
+- Open a walked source by path, follow a symlink for it under the refuse policy, or block on a FIFO, socket or device (FR-048 to FR-050)
+- Write archive data that disagrees with the entry header
 
 ## 9. Open Questions
 

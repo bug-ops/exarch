@@ -114,6 +114,23 @@ impl FileIdentity {
             .map_or(Self::Unknown, Self::Known)
     }
 
+    /// The identity `metadata` describes, with the same refusals as
+    /// [`of_stat`](IdentityKey::of_stat): a device number that is negative as
+    /// the platform's signed `st_dev` is [`Unknown`](Self::Unknown), never a
+    /// key that could equal another inode's.
+    #[cfg(unix)]
+    pub(crate) fn of_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.dev().cast_signed() < 0 {
+            return Self::Unknown;
+        }
+        Self::Known(IdentityKey {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
     /// The identity of an open file, from the volume serial number and file
     /// id of its handle ([`Unknown`](Self::Unknown) when the volume reports
     /// none, as FAT and some redirectors do).

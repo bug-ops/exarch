@@ -385,6 +385,26 @@ export interface ExarchSourceNotFoundDetail {
   strerror?: undefined
 }
 
+/** A creation source that changed while it was archived; `path` is redacted like an error path. */
+export interface ExarchSourceChangedDetail {
+  code: 'SOURCE_CHANGED'
+  path: string
+  subCode?: undefined
+  relaxableBy?: undefined
+  setting?: undefined
+  ioKind?: undefined
+  nonUtf8EntryPath?: undefined
+  restore?: undefined
+  backupPath?: undefined
+  conflicts?: undefined
+  by?: undefined
+  protectedPath?: undefined
+  collision?: undefined
+  unmatchedPatterns?: undefined
+  errno?: undefined
+  strerror?: undefined
+}
+
 /** Every other code carries no detail property. */
 export interface ExarchPlainCodeDetail {
   code: Exclude<
@@ -398,6 +418,7 @@ export interface ExarchPlainCodeDetail {
     | 'SOURCE_NOT_ACCESSIBLE'
     | 'OUTPUT_EXISTS'
     | 'SOURCE_NOT_FOUND'
+    | 'SOURCE_CHANGED'
   >
   subCode?: undefined
   relaxableBy?: undefined
@@ -427,6 +448,7 @@ export type ExarchErrorCodeDetail =
   | ExarchSourceNotAccessibleDetail
   | ExarchOutputExistsDetail
   | ExarchSourceNotFoundDetail
+  | ExarchSourceChangedDetail
   | ExarchPlainCodeDetail
 
 /** The partial-extraction shapes, discriminated by `writes`. */

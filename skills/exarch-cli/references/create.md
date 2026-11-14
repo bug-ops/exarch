@@ -17,6 +17,8 @@
 
 Missing or unreadable sources fail with `SourceNotFound` / `SourceNotAccessible` (message names the path and OS error); no archive is left behind.
 
+FIFOs, sockets and devices in a source are not archived and not opened: each is counted in `skipped_by_kind.special_file` (with `--follow-symlinks`, also a link to one). A source that stops matching what the walk saw (replaced by a link or another file type, or grown or shrunk while copied) fails the run with `SourceChanged`; no archive is left behind. A link is never followed to open a source unless `--follow-symlinks` is set.
+
 ## Exclude grammar
 
 - `*`: any run of bytes within one component. `?`: exactly one byte (`caf?` does not match `café`). `[a-c]`, `[0-9]`: one byte from a positive ASCII class (range ends in `0-9`, `a-z`, or `A-Z`). `**` as a whole component: any number of components, none included.

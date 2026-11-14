@@ -134,6 +134,9 @@ pub enum ErrorCode {
     /// Source path is not accessible.
     #[napi(value = "SOURCE_NOT_ACCESSIBLE")]
     SourceNotAccessible,
+    /// A creation source changed while it was archived.
+    #[napi(value = "SOURCE_CHANGED")]
+    SourceChanged,
     /// Output file already exists.
     #[napi(value = "OUTPUT_EXISTS")]
     OutputExists,
@@ -669,6 +672,7 @@ mirror_from_core!(
         InvalidPermissions,
         SourceNotFound,
         SourceNotAccessible,
+        SourceChanged,
         OutputExists,
         InvalidCompressionLevel,
         UnknownFormat,
@@ -1781,6 +1785,7 @@ mod tests {
             Hidden,
             OverMaxFileSize,
             SymlinkUnsupported,
+            SpecialFile,
             Unreadable
         ]
     );
@@ -2213,6 +2218,7 @@ mod tests {
                 path: path.clone(),
                 error: std::io::Error::other("x"),
             },
+            CoreError::SourceChanged { path: path.clone() },
             CoreError::OutputExists { path: path.clone() },
             CoreError::UnknownFormat { path },
         ];
@@ -2439,6 +2445,16 @@ mod tests {
         });
         let path = d.props.path.expect("the destination is named");
         assert!(path.ends_with("sub"), "{path}");
+    }
+
+    #[test]
+    fn test_source_changed_names_the_path() {
+        let d = described(CoreError::SourceChanged {
+            path: PathBuf::from("src/a.txt"),
+        });
+        assert_eq!(d.props.code.as_str(), "SOURCE_CHANGED");
+        let path = d.props.path.expect("the source is named");
+        assert!(path.ends_with("a.txt"), "{path}");
     }
 
     #[test]

@@ -551,6 +551,9 @@ pub enum SkipKind {
     /// A symlink that cannot be stored.
     #[napi(value = "symlink_unsupported")]
     SymlinkUnsupported,
+    /// A FIFO, socket or device that creation does not archive.
+    #[napi(value = "special_file")]
+    SpecialFile,
     /// An entry that could not be read.
     #[napi(value = "unreadable")]
     Unreadable,
@@ -569,6 +572,7 @@ mirror_from_core!(
         Hidden,
         OverMaxFileSize,
         SymlinkUnsupported,
+        SpecialFile,
         Unreadable
     ]
 );

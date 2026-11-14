@@ -34,7 +34,8 @@ use crate::warning::extraction_warnings;
 ///
 /// * `kind` - Why it was skipped (`"duplicate"`, `"extension_not_allowed"`,
 ///   `"not_selected"`, `"stripped_away"`, `"excluded"`, `"hidden"`,
-///   `"over_max_file_size"`, `"symlink_unsupported"` or `"unreadable"`)
+///   `"over_max_file_size"`, `"symlink_unsupported"`, `"special_file"` or
+///   `"unreadable"`)
 /// * `path` - The entry's path as the operation names it
 /// * `io_kind` - The stable kind of the I/O failure behind an `"unreadable"`
 ///   skip (`"PermissionDenied"`, ...), else `None`

@@ -259,6 +259,7 @@ Extract an archive to the specified directory with security validation.
 | `UnsupportedFormatError` | Archive format not supported |
 | `UnknownFormatError` | Archive format cannot be determined from path or magic bytes (subclass of `UnsupportedFormatError`) |
 | `InvalidArchiveError` | Archive is corrupted |
+| `SourceChangedError` | A creation source changed while it was archived |
 | `IOError` | I/O operation failed |
 
 ### `create_archive(output_path, sources, config=None, overwrite=True, durability="synced", format=None)`

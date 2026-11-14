@@ -204,6 +204,7 @@ impl JsonKind {
                 ErrorCode::QuotaExceeded => "QuotaExceeded",
                 ErrorCode::SourceNotFound => "SourceNotFound",
                 ErrorCode::SourceNotAccessible => "SourceNotAccessible",
+                ErrorCode::SourceChanged => "SourceChanged",
                 ErrorCode::OutputExists => "OutputExists",
                 ErrorCode::InvalidCompressionLevel => "InvalidCompressionLevel",
                 ErrorCode::UnknownFormat => "UnknownFormat",

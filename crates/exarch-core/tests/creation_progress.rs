@@ -17,12 +17,19 @@ use tempfile::TempDir;
 struct Recorder {
     starts: Vec<(PathBuf, usize)>,
     completes: Vec<PathBuf>,
+    #[cfg(unix)]
+    change_to_link: Option<(PathBuf, PathBuf)>,
 }
 
 impl ProgressCallback for Recorder {
     fn on_entry_start(&mut self, path: &Path, position: exarch_core::EntryPosition) {
         let total = position.total.known().unwrap_or(0);
         self.starts.push((path.to_path_buf(), total));
+        #[cfg(unix)]
+        if let Some((file, target)) = &self.change_to_link {
+            std::fs::remove_file(file).unwrap();
+            std::os::unix::fs::symlink(target, file).unwrap();
+        }
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
@@ -126,23 +133,27 @@ fn symlink_emptied_by_strip_prefix_is_refused() {
     assert_matches!(err, ArchiveError::InvalidConfiguration { .. }, "{err:?}");
 }
 
-/// A socket cannot be opened as a file, for any user including root.
+/// A source that changed since the walk is refused, for any user including
+/// root.
 #[cfg(unix)]
 #[test]
 fn failing_entry_is_still_completed() {
     for name in ["out.tar.gz", "out.zip"] {
         let src = one_file_source();
-        let socket = src.path().join("sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        assert!(std::fs::File::open(&socket).is_err());
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("elsewhere.txt");
+        std::fs::write(&target, b"elsewhere").unwrap();
         let out = TempDir::new().unwrap();
-        let mut progress = Recorder::default();
+        let mut progress = Recorder {
+            change_to_link: Some((src.path().join("a.txt"), target)),
+            ..Recorder::default()
+        };
 
         let result = CreateRequest::new(&CreationConfig::default())
             .with_progress(&mut progress)
             .create(&OutputFile::replace(out.path().join(name)), &[src.path()]);
 
-        assert!(result.is_err(), "{name}");
+        assert_matches!(result, Err(ArchiveError::SourceChanged { .. }), "{name}");
         assert!(!progress.starts.is_empty(), "{name}");
         assert_eq!(
             progress.starts.len(),

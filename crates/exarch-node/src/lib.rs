@@ -182,12 +182,13 @@ const _: () = assert!(
 ///   `HARDLINK_ESCAPE`, `ZIP_BOMB`, `ZIP_INCONSISTENCY`, `QUOTA_EXCEEDED`,
 ///   `SECURITY_VIOLATION`, `INVALID_ARCHIVE`, `IO_ERROR`,
 ///   `INVALID_PERMISSIONS`, `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`,
-///   `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`, `UNKNOWN_FORMAT`,
-///   `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A path rejected at
-///   the boundary (null byte, too long) is a `SECURITY_VIOLATION` and a
-///   rejected setter value an `INVALID_CONFIGURATION`. Errors raised by the
-///   binding itself (an internal panic, a failed argument conversion) keep
-///   napi's status (`GenericFailure`) as `code`.
+///   `SOURCE_CHANGED`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`,
+///   `UNKNOWN_FORMAT`, `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A
+///   path rejected at the boundary (null byte, too long) is a
+///   `SECURITY_VIOLATION` and a rejected setter value an
+///   `INVALID_CONFIGURATION`. Errors raised by the binding itself (an internal
+///   panic, a failed argument conversion) keep napi's status (`GenericFailure`)
+///   as `code`.
 /// - `relaxableBy`: set on a `SECURITY_VIOLATION` that a `SecurityConfig`
 ///   setting relaxes, one of `symlinks`, `hardlinks`, `solid_archives`,
 ///   `banned_components`, `max_path_depth`, `windows_reserved_names` or

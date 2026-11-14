@@ -91,3 +91,14 @@ def test_missing_source_stays_source_not_found(tmp_path):
         exarch.create_archive(tmp_path / "o.tar", [tmp_path / "missing"])
 
     assert info.value.code == "SOURCE_NOT_FOUND"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFO support")
+@pytest.mark.parametrize("name", ["o.tar", "o.tar.gz", "o.zip"])
+def test_fifo_in_source_is_skipped_not_read(tmp_path, source, name):
+    os.mkfifo(source / "pipe")
+
+    report = exarch.create_archive(tmp_path / name, [source])
+
+    assert report.files_added == 1
+    assert report.skipped.count("special_file") == 1

@@ -555,17 +555,41 @@ impl<'a> Displaced<'a> {
             .rename_dir_within(self.backup_name.as_leaf(), self.dest_name.as_leaf())
     }
 
-    /// Removes the backup after a successful swap and disarms the guard. A
-    /// removal that fails while the backup name still identifies the backup
-    /// is reported as a warning on `report`.
+    /// Empties the backup through a descriptor on the entry itself, then
+    /// unlinks its name only while the name still has the backup's identity.
+    /// A directory found at the name that is not the backup is left alone.
+    #[cfg(unix)]
+    fn remove_backup(&self) -> io::Result<()> {
+        let leaf = self.backup_name.as_leaf();
+        let dir = self.pin.open_dir_file(leaf)?;
+        ensure_backup(FileIdentity::of_file(&dir), self.backup.identity)?;
+        let emptied = super::remove::remove_children_checked(&dir);
+        drop(dir);
+        let observed = self
+            .pin
+            .status(leaf)?
+            .map_or(FileIdentity::Unknown, |s| s.identity);
+        ensure_backup(observed, self.backup.identity)?;
+        emptied?;
+        self.pin.remove_dir(leaf)
+    }
+
+    #[cfg(not(unix))]
     #[expect(
         clippy::disallowed_methods,
         reason = "removes the backup directory; std's removal does not follow symlinks"
     )]
+    fn remove_backup(&self) -> io::Result<()> {
+        std::fs::remove_dir_all(&self.backup_path)
+    }
+
+    /// Removes the backup after a successful swap and disarms the guard. A
+    /// removal that fails while the backup name still identifies the backup
+    /// is reported as a warning on `report`.
     fn discard(mut self, report: &mut ExtractionReport) {
         self.armed = false;
         make_removable(self.pin, self.backup_name.as_leaf(), self.backup.identity);
-        let Err(cleanup_error) = std::fs::remove_dir_all(&self.backup_path) else {
+        let Err(cleanup_error) = self.remove_backup() else {
             return;
         };
         let backup = self.backup;
@@ -596,6 +620,15 @@ impl Drop for Displaced<'_> {
                 .rename_dir_within(self.backup_name.as_leaf(), self.dest_name.as_leaf());
         }
     }
+}
+
+/// Fails when `observed` is known to be another directory than the backup.
+#[cfg(unix)]
+fn ensure_backup(observed: FileIdentity, backup: FileIdentity) -> io::Result<()> {
+    if observed.check(backup) == IdentityCheck::Different {
+        return Err(io::Error::other("the backup was replaced"));
+    }
+    Ok(())
 }
 
 /// Refuses the swap when the destination is no longer the directory that was
@@ -818,10 +851,16 @@ mod refusal_tests {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod displace_tests {
+    use std::path::Path;
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use super::Dest;
     use super::Displaced;
+    use super::ExtractionReport;
+    use super::ExtractionWarning;
+    use super::IoKind;
     use super::Refusal;
     use crate::ArchiveError;
     use crate::Violation;
@@ -868,6 +907,107 @@ mod displace_tests {
             names.iter().all(|n| !n.starts_with(".exarch-")),
             "{names:?}"
         );
+    }
+
+    /// A displaced `dest` holding one file, and the parent's pin.
+    fn displaced_destination(parent: &Path) -> (PathBuf, crate::formats::pinned_dir::VettedDir) {
+        let dest_path = parent.join("dest");
+        std::fs::create_dir(&dest_path).unwrap();
+        std::fs::write(dest_path.join("old"), b"original").unwrap();
+        (dest_path, pinned_at(parent))
+    }
+
+    fn displace<'a>(
+        pin: &'a crate::formats::pinned_dir::VettedDir,
+        name: &'a LeafBuf,
+        dest_path: &'a Path,
+        parent: &'a Path,
+    ) -> Displaced<'a> {
+        let dest = Dest {
+            name,
+            id: identity_of(dest_path).unwrap(),
+            path: dest_path,
+            parent,
+        };
+        Displaced::displace(pin, &dest).unwrap_or_else(|_| panic!("displace failed"))
+    }
+
+    #[test]
+    fn the_displaced_backup_is_removed_whole() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let (dest_path, pin) = displaced_destination(&parent);
+        std::fs::create_dir(dest_path.join("sub")).unwrap();
+        std::fs::write(dest_path.join("sub").join("deep"), b"x").unwrap();
+        let name = LeafBuf::of(&dest_path).unwrap();
+        let displaced = displace(&pin, &name, &dest_path, &parent);
+        let backup = displaced.backup_path.clone();
+        let mut report = ExtractionReport::new();
+
+        displaced.discard(&mut report);
+
+        assert!(!backup.exists());
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_unremovable_backup_reports_the_real_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let (dest_path, pin) = displaced_destination(&parent);
+        let locked = dest_path.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("inner"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let listable = std::fs::read_dir(&locked).is_ok();
+        let name = LeafBuf::of(&dest_path).unwrap();
+        let displaced = displace(&pin, &name, &dest_path, &parent);
+        let backup = displaced.backup_path.clone();
+        let mut report = ExtractionReport::new();
+
+        displaced.discard(&mut report);
+
+        if backup.join("locked").exists() {
+            std::fs::set_permissions(
+                backup.join("locked"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        if listable {
+            return;
+        }
+        let [ExtractionWarning::BackupCleanupFailed { io_kind, .. }] = report.warnings.as_slice()
+        else {
+            panic!("expected one cleanup warning, got {:?}", report.warnings);
+        };
+        assert_eq!(*io_kind, IoKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_backup_name_swapped_for_another_directory_is_left_untouched() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        let (dest_path, pin) = displaced_destination(&parent);
+        let name = LeafBuf::of(&dest_path).unwrap();
+        let displaced = displace(&pin, &name, &dest_path, &parent);
+        let backup = displaced.backup_path.clone();
+        let moved = parent.join("moved");
+        std::fs::rename(&backup, &moved).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("precious"), b"caller data").unwrap();
+        let mut report = ExtractionReport::new();
+
+        displaced.discard(&mut report);
+
+        assert_eq!(
+            std::fs::read(backup.join("precious")).unwrap(),
+            b"caller data"
+        );
+        assert_eq!(std::fs::read(moved.join("old")).unwrap(), b"original");
+        assert!(report.warnings.is_empty());
     }
 }
 

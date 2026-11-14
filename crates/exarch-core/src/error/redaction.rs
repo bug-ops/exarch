@@ -215,6 +215,7 @@ impl ArchiveError {
 
             Self::SourceNotFound { path }
             | Self::SourceNotAccessible { path, .. }
+            | Self::SourceChanged { path }
             | Self::OutputExists { path }
             | Self::OutputReservationLeft { path, .. }
             | Self::DestinationNotAccessible { path, .. }

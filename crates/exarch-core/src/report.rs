@@ -48,6 +48,8 @@ closed_enum! {
         OverMaxFileSize => "over_max_file_size",
         /// A symlink that cannot be stored (not followed, or unsupported here)
         SymlinkUnsupported => "symlink_unsupported",
+        /// A FIFO, socket or device that creation does not archive
+        SpecialFile => "special_file",
         /// An entry that could not be read
         Unreadable => "unreadable",
     }

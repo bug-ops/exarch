@@ -13,6 +13,16 @@
 use std::io::Cursor;
 use std::io::Write;
 
+/// Creates a FIFO at `path` with the host `mkfifo`.
+#[cfg(unix)]
+pub(crate) fn make_fifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+}
+
 /// The host's relative path limit, written out per host and independent of the
 /// production constant so a wrong value there is caught.
 #[cfg(target_os = "linux")]

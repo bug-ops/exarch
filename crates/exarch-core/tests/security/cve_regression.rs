@@ -1,5 +1,6 @@
 //! CVE regression tests: CVE-2024-12718, CVE-2024-12905, CVE-2025-29787,
-//! CVE-2025-48387, CVE-2026-24842, and Windows backslash path traversal.
+//! CVE-2025-48387, CVE-2026-24842, zip2 GHSA-66qv, cpython gh-161955, and
+//! Windows backslash path traversal.
 //!
 //! Each test constructs a minimal archive reproducing the attack vector and
 //! verifies that extraction fails with the expected security error.
@@ -9,6 +10,7 @@
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
 use exarch_testkit::raw_zip::RawEntry;
 use exarch_testkit::raw_zip::RawZip;
 use std::assert_matches;
@@ -83,51 +85,56 @@ impl TarTestBuilder {
 ///
 /// This is needed to craft archives that reproduce CVE attack vectors —
 /// attackers control raw archive bytes and are not constrained by safe APIs.
+fn raw_header(path: &[u8], size: usize, typeflag: u8) -> [u8; 512] {
+    let mut header = [0u8; 512];
+
+    // Filename: first 100 bytes (null-padded)
+    let path_len = path.len().min(100);
+    header[..path_len].copy_from_slice(&path[..path_len]);
+
+    // Mode "0000644\0"
+    header[100..108].copy_from_slice(b"0000644\0");
+    // UID / GID "0000000\0"
+    header[108..116].copy_from_slice(b"0000000\0");
+    header[116..124].copy_from_slice(b"0000000\0");
+
+    // Size in 11-digit octal + null
+    let size_str = format!("{size:011o}\0");
+    header[124..136].copy_from_slice(size_str.as_bytes());
+
+    // mtime (zero timestamp)
+    header[136..148].copy_from_slice(b"00000000000\0");
+
+    header[156] = typeflag;
+
+    // POSIX ustar magic + version
+    header[257..263].copy_from_slice(b"ustar ");
+    header[263..265].copy_from_slice(b" \0");
+
+    // Checksum: sum of all bytes with the checksum field treated as spaces
+    header[148..156].copy_from_slice(b"        ");
+    let checksum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+    // Format: 6-digit octal, NUL, space
+    let ck_str = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(ck_str.as_bytes());
+    header
+}
+
+fn push_padded(out: &mut Vec<u8>, data: &[u8]) {
+    out.extend_from_slice(data);
+    let rem = data.len() % 512;
+    if rem != 0 {
+        out.extend(std::iter::repeat_n(0u8, 512 - rem));
+    }
+}
+
 fn make_raw_tar(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
 
     for (path, data) in entries {
-        let mut header = [0u8; 512];
-
-        // Filename: first 100 bytes (null-padded)
-        let path_len = path.len().min(100);
-        header[..path_len].copy_from_slice(&path[..path_len]);
-
-        // Mode "0000644\0"
-        header[100..108].copy_from_slice(b"0000644\0");
-        // UID / GID "0000000\0"
-        header[108..116].copy_from_slice(b"0000000\0");
-        header[116..124].copy_from_slice(b"0000000\0");
-
-        // Size in 11-digit octal + null
-        let size_str = format!("{:011o}\0", data.len());
-        header[124..136].copy_from_slice(size_str.as_bytes());
-
-        // mtime (zero timestamp)
-        header[136..148].copy_from_slice(b"00000000000\0");
-
         // Typeflag: '0' = regular file
-        header[156] = b'0';
-
-        // POSIX ustar magic + version
-        header[257..263].copy_from_slice(b"ustar ");
-        header[263..265].copy_from_slice(b" \0");
-
-        // Checksum: sum of all bytes with the checksum field treated as spaces
-        header[148..156].copy_from_slice(b"        ");
-        let checksum: u32 = header.iter().map(|&b| u32::from(b)).sum();
-        // Format: 6-digit octal, NUL, space
-        let ck_str = format!("{checksum:06o}\0 ");
-        header[148..156].copy_from_slice(ck_str.as_bytes());
-
-        out.extend_from_slice(&header);
-
-        // File content padded to 512-byte blocks
-        out.extend_from_slice(data);
-        let rem = data.len() % 512;
-        if rem != 0 {
-            out.extend(std::iter::repeat_n(0u8, 512 - rem));
-        }
+        out.extend_from_slice(&raw_header(path, data.len(), b'0'));
+        push_padded(&mut out, data);
     }
 
     // End-of-archive: two zero blocks
@@ -862,5 +869,93 @@ fn test_windows_absolute_path_treated_as_filename_on_unix() {
     assert!(
         extracted.exists(),
         "extracted file must be inside the destination"
+    );
+}
+
+// ── zip2 GHSA-66qv: Shrink (method 1) entry ─────────────────────────────────
+//
+// The `zip` crate mishandled the legacy Shrink method. exarch admits only
+// stored, deflate, bzip2 and zstd, so a Shrink entry is refused at open,
+// before anything is written.
+
+const SHRINK_METHOD: u16 = 1;
+
+#[test]
+fn test_zip2_ghsa_66qv_shrink_method_refused_before_writing() {
+    let shrunk = RawEntry {
+        method: SHRINK_METHOD,
+        ..RawEntry::stored("shrunk.bin", b"data")
+    };
+    let bytes = RawZip::new(vec![RawEntry::stored("ok.txt", b"fine"), shrunk])
+        .build()
+        .bytes;
+    let temp = TempDir::new().unwrap();
+    let archive = temp.path().join("shrink.zip");
+    std::fs::write(&archive, bytes).unwrap();
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    assert_matches!(
+        exarch_core::extract_archive(&archive, &out, &SecurityConfig::default()),
+        Err(ArchiveError::SecurityViolation { kind, .. })
+            if kind.to_string().contains("unsupported compression method")
+    );
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+}
+
+// ── cpython gh-161955: PAX record-count memory growth ───────────────────────
+//
+// `tarfile` re-scanned or re-stored every record of a PAX header, so a header
+// with a huge number of records grew memory out of proportion to its size.
+// exarch refuses a repeated key outright and meters every metadata byte read
+// against `max_tar_metadata_bytes` (4 MiB by default).
+
+fn tar_with_pax_header(records: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&raw_header(b"PaxHeaders/a", records.len(), b'x'));
+    push_padded(&mut out, records);
+    let mut member = make_raw_tar(&[(b"a.txt", b"hello")]);
+    member.truncate(member.len() - 1024);
+    out.extend_from_slice(&member);
+    out.extend(std::iter::repeat_n(0u8, 1024));
+    out
+}
+
+fn extract_tar(bytes: Vec<u8>) -> exarch_core::Result<exarch_core::ExtractionReport> {
+    let temp = TempDir::new().unwrap();
+    let archive = crate::common::tar_archive(Cursor::new(bytes), &SecurityConfig::default());
+    archive.extract(
+        temp.path(),
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    )
+}
+
+#[test]
+fn test_cpython_gh_161955_repeated_pax_key_refused() {
+    let records: Vec<u8> = (0..1000)
+        .flat_map(|_| exarch_testkit::pax::record(b"comment", b"x"))
+        .collect();
+
+    assert_matches!(
+        extract_tar(tar_with_pax_header(&records)),
+        Err(ArchiveError::TarAmbiguity(TarAmbiguity::DuplicateRecord { key }))
+            if key == "comment"
+    );
+}
+
+#[test]
+fn test_cpython_gh_161955_pax_record_flood_stops_at_the_metadata_budget() {
+    let records: Vec<u8> = (0..200_000)
+        .flat_map(|n| exarch_testkit::pax::record(format!("comment{n}").as_bytes(), b"xxxxxxxxxx"))
+        .collect();
+    assert!(records.len() > 4 * 1024 * 1024);
+
+    let result = extract_tar(tar_with_pax_header(&records));
+
+    let error = result.unwrap_err();
+    assert!(
+        error.is_security_violation() && error.context().unwrap_or_default().contains("metadata"),
+        "{error}"
     );
 }

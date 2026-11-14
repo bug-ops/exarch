@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- Creation: a source that changed between the walk and the read fails with the new `ArchiveError::SourceChanged` (`SOURCE_CHANGED`, Python `SourceChangedError`, Node `SOURCE_CHANGED`), and FIFOs, sockets and devices are skipped as the new `SkipKind::SpecialFile` (`special_file`) (#PR).
+- Creation: a source that changed between the walk and the read fails with the new `ArchiveError::SourceChanged` (`SOURCE_CHANGED`, Python `SourceChangedError`, Node `SOURCE_CHANGED`), and FIFOs, sockets and devices are skipped as the new `SkipKind::SpecialFile` (`special_file`) (#1213).
 - Core API: `DestinationOccupied.conflicts` is `Box<[OccupiedPath]>` (path plus `Option<PathOccupant>`), `Violation::ReplacesSymlink` gains `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190).
 - Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
 - Extraction: the `DestinationOccupied` text (core `Display`, FFI description, Node `message`) now reads "refusing to replace the existing <kind> at <entry>" instead of "already holds N of the paths to extract" for a single conflict (#1190).
@@ -21,10 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Creation: each source file is opened relative to its pinned parent without following links, verified against the walk, and copied for exactly its header size, for TAR and ZIP (#1213).
+- Atomic `--force` extraction removes the replaced destination's backup through the pinned parent handle with an identity check, and reports the real cause of a failed removal (#1213).
 - A directory entry written as `l/.` over a symlink to a file is refused with `EXISTING_SYMLINK` like `l/`, and a directory over a file whose host path exceeds `PATH_MAX` is `DestinationOccupied` (#1217).
 - CI: the release job creates the GitHub release only when the tag lookup returns 404 and fails on any other status (#1217).
-- Creation: each source file is opened relative to its pinned parent without following links, verified against the walk, and copied for exactly its header size, for TAR and ZIP (#PR).
-- Atomic `--force` extraction removes the replaced destination's backup through the pinned parent handle with an identity check, and reports the real cause of a failed removal (#PR).
 - Staged (`--atomic`, `--force`) extractions name the caller's destination in `DestinationOccupied` instead of the staging directory (#1190).
 - A directory entry over an archive symlink to a file is refused with `EXISTING_SYMLINK` instead of failing with "Not a directory" on Linux, and one over a symlink to a directory inside the destination is accepted on every host (#1190).
 - CLI: the existing-symlink hint no longer tells the user to remove a symlink the archive created, and the skill documents the real `--json` fields (#1190).

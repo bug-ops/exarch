@@ -41,7 +41,7 @@ fn listed(entries: &[Vec<u8>], config: &SecurityConfig) -> (TempDir, PathBuf, Li
 fn conflicts(error: &ArchiveError) -> Vec<&Path> {
     match error {
         ArchiveError::DestinationOccupied { conflicts, .. } => {
-            conflicts.iter().map(PathBuf::as_path).collect()
+            conflicts.iter().map(|c| c.path.as_path()).collect()
         }
         other => panic!("expected DestinationOccupied, got {other}"),
     }

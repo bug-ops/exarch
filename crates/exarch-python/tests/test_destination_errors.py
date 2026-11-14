@@ -131,7 +131,7 @@ def test_overwrite_over_a_directory_occupant_is_output_exists(temp_dir):
     with pytest.raises(exarch.OutputExistsError) as info:
         exarch.extract_archive(archive, destination, options=options)
 
-    assert info.value.conflicts == ["d"]
+    assert [(c.path, c.occupant) for c in info.value.conflicts] == [("d", "directory")]
     assert info.value.by == "existing"
     assert (destination / "d").is_dir()
 
@@ -150,6 +150,146 @@ def test_overwrite_over_a_symlink_occupant_is_an_existing_symlink_violation(temp
         exarch.extract_archive(archive, destination, options=options)
 
     assert info.value.sub_code == "EXISTING_SYMLINK"
+    assert info.value.by == "existing"
     assert "existing symlink at link_entry" in str(info.value)
     assert target.read_text() == "keep"
     assert (destination / "link_entry").is_symlink()
+
+
+def test_conflict_is_a_frozen_typed_value(temp_dir):
+    archive = _file_entry_archive(temp_dir, "d")
+    destination = temp_dir / "out"
+    (destination / "d").mkdir(parents=True)
+    options = exarch.ExtractionOptions().with_existing_files("overwrite")
+
+    with pytest.raises(exarch.OutputExistsError) as info:
+        exarch.extract_archive(archive, destination, options=options)
+
+    (conflict,) = info.value.conflicts
+    assert isinstance(conflict, exarch.OccupiedPath)
+    assert repr(conflict) == 'OccupiedPath(path="d", occupant="directory")'
+    with pytest.raises(AttributeError):
+        conflict.path = "other"
+
+
+def test_other_security_violations_have_no_maker(temp_dir):
+    entry = tarfile.TarInfo("../escape")
+    entry.size = 1
+    archive = temp_dir / "bad.tar"
+    with tarfile.open(archive, "w") as tar:
+        tar.addfile(entry, io.BytesIO(b"x"))
+
+    with pytest.raises(exarch.ArchiveError) as info:
+        exarch.extract_archive(archive, temp_dir / "out")
+
+    assert getattr(info.value, "by", None) is None
+
+
+def test_atomic_refusal_names_the_caller_destination(temp_dir):
+    archive = _file_entry_archive(temp_dir, "d")
+    destination = temp_dir / "out"
+    (destination / "d").mkdir(parents=True)
+    options = exarch.ExtractionOptions().with_existing_files("overwrite").with_staging("atomic")
+
+    with pytest.raises(exarch.OutputExistsError) as info:
+        exarch.extract_archive(archive, destination, options=options)
+
+    assert os.path.basename(info.value.filename) == "out"
+    assert ".exarch" not in str(info.value)
+
+
+def _directory_entry_archive(temp_dir, name):
+    path = temp_dir / "dir_entry.tar"
+    with tarfile.open(path, "w") as tar:
+        info = tarfile.TarInfo(name=name)
+        info.type = tarfile.DIRTYPE
+        tar.addfile(info)
+    return path
+
+
+@pytest.mark.parametrize("policy", ["skip", "overwrite", "refuse"])
+def test_directory_over_a_file_is_output_exists_under_every_policy(temp_dir, policy):
+    archive = _directory_entry_archive(temp_dir, "f/")
+    destination = temp_dir / "out"
+    destination.mkdir()
+    (destination / "f").write_text("keep")
+    options = exarch.ExtractionOptions().with_existing_files(policy)
+
+    with pytest.raises(exarch.OutputExistsError) as info:
+        exarch.extract_archive(archive, destination, options=options)
+
+    assert type(info.value) is exarch.OutputExistsError
+    assert [(c.path, c.occupant) for c in info.value.conflicts] == [("f", "file")]
+    assert (destination / "f").read_text() == "keep"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_directory_over_a_symlink_made_by_the_archive_names_the_archive(temp_dir):
+    archive = temp_dir / "linked.tar"
+    with tarfile.open(archive, "w") as tar:
+        target = tarfile.TarInfo("t")
+        target.size = 1
+        tar.addfile(target, io.BytesIO(b"x"))
+        link = tarfile.TarInfo("l")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "t"
+        tar.addfile(link)
+        folder = tarfile.TarInfo("l/")
+        folder.type = tarfile.DIRTYPE
+        tar.addfile(folder)
+    config = exarch.SecurityConfig().with_allow_symlinks()
+    # Only `overwrite` and `refuse` keep the run record that proves the maker.
+    options = exarch.ExtractionOptions().with_existing_files("refuse")
+
+    with pytest.raises(exarch.SecurityViolationError) as info:
+        exarch.extract_archive(archive, temp_dir / "out", config, options)
+
+    assert info.value.sub_code == "EXISTING_SYMLINK"
+    assert info.value.by == "archive"
+
+
+def test_str_names_the_entry_and_its_kind_and_keeps_the_os_error_fields(temp_dir):
+    archive = _file_entry_archive(temp_dir, "d")
+    destination = temp_dir / "out"
+    (destination / "d").mkdir(parents=True)
+    options = exarch.ExtractionOptions().with_existing_files("overwrite")
+
+    with pytest.raises(FileExistsError) as info:
+        exarch.extract_archive(archive, destination, options=options)
+
+    err = info.value
+    assert isinstance(err, exarch.OutputExistsError)
+    assert "existing directory at d" in str(err)
+    assert err.errno == errno.EEXIST
+    assert os.path.basename(err.filename) == "out"
+    revived = pickle.loads(pickle.dumps(err))
+    assert str(revived) == str(err)
+
+
+def test_str_of_a_hand_built_error_falls_back_to_oserror():
+    assert str(exarch.OutputExistsError()) == ""
+    assert str(exarch.OutputExistsError(17, "msg")) == "[Errno 17] msg"
+
+
+def test_str_counts_several_conflicts(temp_dir):
+    path = temp_dir / "two.tar"
+    with tarfile.open(path, "w") as tar:
+        for name in ("a", "b"):
+            entry = tarfile.TarInfo(name)
+            entry.size = 1
+            tar.addfile(entry, io.BytesIO(b"x"))
+    destination = temp_dir / "out"
+    destination.mkdir()
+    (destination / "a").write_text("1")
+    (destination / "b").write_text("2")
+    options = exarch.ExtractionOptions().with_existing_files("refuse")
+
+    with pytest.raises(exarch.OutputExistsError) as info:
+        exarch.extract_archive(path, destination, options=options)
+
+    message = str(info.value)
+    assert "file at a" in message or "paths to extract" in message
+    revived = pickle.loads(pickle.dumps(info.value))
+    assert [(c.path, c.occupant) for c in revived.conflicts] == [
+        (c.path, c.occupant) for c in info.value.conflicts
+    ]

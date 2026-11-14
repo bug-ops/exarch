@@ -265,7 +265,7 @@ mod tests {
 
         let occupied = ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/dest")),
-            conflicts: Box::new([PathBuf::from("a/b")]),
+            conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a/b"), None)]),
             by: crate::OccupiedBy::Existing,
         };
         assert_eq!(occupied.redacted_path().as_deref(), Some("dest"));
@@ -273,7 +273,7 @@ mod tests {
 
         let no_destination = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([PathBuf::from("a/b")]),
+            conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a/b"), None)]),
             by: crate::OccupiedBy::Existing,
         };
         assert_eq!(no_destination.redacted_path(), None);

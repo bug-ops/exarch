@@ -2121,7 +2121,7 @@ mod tests {
         assert_matches!(
             cause,
             ArchiveError::SecurityViolation {
-                kind: crate::Violation::ReplacesSymlink { rel },
+                kind: crate::Violation::ReplacesSymlink { rel, .. },
             } if &**rel == "hardlink.txt"
         );
 

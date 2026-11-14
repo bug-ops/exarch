@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::DestinationStep;
 use crate::EntrySelection;
-use crate::OccupiedBy;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SkipKind;
@@ -29,7 +28,7 @@ use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
 use crate::formats::occupant::is_run_duplicate;
 use crate::formats::occupant::refuse_unless_duplicate;
-use crate::formats::occupant::replaces_symlink;
+use crate::formats::occupant::tree_occupant_refusal;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
@@ -417,7 +416,7 @@ fn skip_duplicate_or_refuse(
         shape,
         Some(held),
         || keys.made_here(rel),
-        || occupied_without_destination(rel),
+        |found| occupied_without_destination(rel, found),
     )
     .map(|_| Disposition::Skip(SkipKind::Duplicate))
 }
@@ -835,17 +834,16 @@ fn conflicting_placement(
         Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
             skip_duplicate_or_refuse(shape, held, rel, keys)
         }
-        Some(Occupant::Directory) if shape != EntryShape::Directory => {
-            Err(occupied_without_destination(rel).occupied_by(OccupiedBy::Archive))
-        }
-        Some(Occupant::Symlink) if shape == EntryShape::Directory => Err(replaces_symlink(rel)),
-        _ => Err(place_error(PlaceError::Conflict(conflict))),
+        Some(held) => tree_occupant_refusal(shape, held, rel)
+            .map_or_else(|| Err(place_error(PlaceError::Conflict(conflict))), Err),
+        None => Err(place_error(PlaceError::Conflict(conflict))),
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use crate::OccupiedBy;
     use std::assert_matches;
     use std::collections::BTreeSet;
     use std::io::Cursor;
@@ -1784,6 +1782,48 @@ mod tests {
             let previewed = previewed.unwrap();
             assert_eq!(previewed.error_code(), refused.error_code());
             assert_eq!(occupied_by(&previewed), Some(OccupiedBy::Archive));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_list_model_names_the_occupant_kind_and_the_archive_as_maker() {
+        let dir = tar::EntryType::Directory;
+        let cases: [(TarEntries<'_>, Option<crate::PathOccupant>); 3] = [
+            (
+                &[(b"x", FILE, ""), (b"x", dir, "")],
+                Some(crate::PathOccupant::File),
+            ),
+            (
+                &[(b"x", dir, ""), (b"x", FILE, "")],
+                Some(crate::PathOccupant::Directory),
+            ),
+            (&[(b"t", FILE, ""), (b"l", SYM, "t"), (b"l", dir, "")], None),
+        ];
+        for (entries, occupant) in cases {
+            let outcome = volume_outcome(entries);
+            let refused = outcome.file_ids_refusal.unwrap();
+            match (&refused, occupant) {
+                (
+                    ArchiveError::DestinationOccupied {
+                        conflicts,
+                        destination: None,
+                        by: OccupiedBy::Archive,
+                    },
+                    Some(kind),
+                ) => assert_eq!(conflicts[0].occupant, Some(kind)),
+                (
+                    ArchiveError::SecurityViolation {
+                        kind:
+                            crate::Violation::ReplacesSymlink {
+                                by: OccupiedBy::Archive,
+                                ..
+                            },
+                    },
+                    None,
+                ) => {}
+                _ => panic!("{entries:?}: {refused:?}"),
+            }
         }
     }
 

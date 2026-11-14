@@ -35,6 +35,10 @@ pub(super) struct DestinationHold(
 /// destination.
 #[cfg(not(unix))]
 #[derive(Debug)]
+#[allow(
+    clippy::empty_enums,
+    reason = "uninhabited on purpose, stable has no `!`"
+)]
 pub(super) enum DestinationHold {}
 
 /// What is at a destination's name.

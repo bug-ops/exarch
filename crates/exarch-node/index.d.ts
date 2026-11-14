@@ -217,7 +217,8 @@ export interface ExarchSecurityViolationDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
-  by?: undefined
+  /** Who made the symlink an `'EXISTING_SYMLINK'` refusal declined to replace: `'existing'` (there before the run, or its maker is unknown) or `'archive'` (an earlier entry of the same archive); absent on every other refusal. */
+  by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -355,8 +356,8 @@ export interface ExarchOutputExistsDetail {
   path?: string
   restore?: undefined
   backupPath?: undefined
-  /** The entry names that stopped a `'refuse'` or `'overwrite'` extraction, as the archive spells them. */
-  conflicts?: Array<string>
+  /** The entries that stopped a `'refuse'` or `'overwrite'` extraction: each archive-relative path as the archive spells it, with the kind of occupant found there (absent when it vanished before the refusal probed it). */
+  conflicts?: Array<OccupiedPath>
   /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
@@ -2777,6 +2778,22 @@ export interface NameCollision {
  * destination it replaced or filled.
  */
 export type NarrowingReason = 'acl_unreadable' | 'destination_changed' | 'unmapped_id' | 'ownership_differs' | 'acl_copy_failed' | 'group_not_kept' | 'foreign_write_dropped' | 'owner_not_kept' | 'destination_vanished'
+
+/**
+ * An archive-relative path that stopped an extraction because the destination
+ * already holds something there (an element of `conflicts` of an
+ * `OUTPUT_EXISTS`).
+ */
+export interface OccupiedPath {
+  /** The archive-relative path, as the archive spells it. */
+  path: string
+  /**
+   * What occupies the path; absent when the occupant vanished before the
+   * refusal probed it. A core value this binding does not know reads as a
+   * plain string.
+   */
+  occupant?: 'file' | 'directory' | 'symlink' | (string & {})
+}
 
 /** A link target above the host's name limits. */
 export interface OversizedLinkTarget {

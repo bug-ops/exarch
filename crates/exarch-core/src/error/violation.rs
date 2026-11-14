@@ -265,6 +265,8 @@ pub enum Violation {
     ReplacesSymlink {
         /// The entry path.
         rel: Box<str>,
+        /// Who made the symlink.
+        by: super::types::OccupiedBy,
     },
     /// A device node, FIFO or socket.
     SpecialEntry {
@@ -590,7 +592,7 @@ impl fmt::Display for Violation {
                 f,
                 "refusing to create {entry} under the existing symlink at {parent}"
             ),
-            Self::ReplacesSymlink { rel } => {
+            Self::ReplacesSymlink { rel, .. } => {
                 write!(f, "refusing to replace the existing symlink at {rel}")
             }
             Self::SpecialEntry { kind, name: None } => {
@@ -778,7 +780,10 @@ mod tests {
                 None,
             ),
             (
-                Violation::ReplacesSymlink { rel: text("r") },
+                Violation::ReplacesSymlink {
+                    rel: text("r"),
+                    by: crate::OccupiedBy::Existing,
+                },
                 C::ExistingSymlink,
                 None,
             ),

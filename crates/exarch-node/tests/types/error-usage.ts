@@ -257,6 +257,24 @@ export function occupantOf(err: ExarchCoreError): string | undefined {
   return undefined
 }
 
+export function conflictsOf(err: ExarchCoreError): string[] {
+  if (err.code === 'OUTPUT_EXISTS') {
+    return (err.conflicts ?? []).map((conflict) => {
+      const occupant: 'file' | 'directory' | 'symlink' | (string & {}) | undefined = conflict.occupant
+      return `${conflict.path}:${occupant ?? 'gone'}`
+    })
+  }
+  return []
+}
+
+export function symlinkMaker(err: ExarchCoreError): string | undefined {
+  if (err.code === 'SECURITY_VIOLATION') {
+    const by: 'existing' | 'archive' | (string & {}) | undefined = err.by
+    return by
+  }
+  return undefined
+}
+
 export function dispositionOutcome(disposition: EntryDisposition): string {
   switch (disposition.action) {
     case 'skip':

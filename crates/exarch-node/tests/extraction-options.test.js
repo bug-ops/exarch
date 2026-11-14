@@ -230,7 +230,7 @@ describe('extractArchiveSync with ExtractionOptions', () => {
         (err) => {
           assert.strictEqual(err.code, 'OUTPUT_EXISTS');
           assert.strictEqual(path.basename(err.path), path.basename(outputDir));
-          assert.deepStrictEqual(err.conflicts, ['hello.txt']);
+          assert.deepStrictEqual(err.conflicts, [{ path: 'hello.txt', occupant: 'file' }]);
           return true;
         }
       );
@@ -289,7 +289,7 @@ describe('extractArchiveSync with ExtractionOptions', () => {
         () => extractArchiveSync(archivePath, outputDir, null, options),
         (err) => {
           assert.strictEqual(err.code, 'OUTPUT_EXISTS');
-          assert.deepStrictEqual(err.conflicts, ['hello.txt']);
+          assert.deepStrictEqual(err.conflicts, [{ path: 'hello.txt', occupant: 'file' }]);
           return true;
         }
       );

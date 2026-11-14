@@ -131,7 +131,7 @@ describe('InvalidArchive families', () => {
     const options = new ExtractionOptions().withExistingFiles('overwrite');
     const err = await extractFailure('dup.tar', bytes, config, options);
     assert.strictEqual(err.code, 'OUTPUT_EXISTS');
-    assert.deepStrictEqual(err.conflicts, ['h']);
+    assert.deepStrictEqual(err.conflicts, [{ path: 'h', occupant: 'file' }]);
     assert.strictEqual(err.by, 'archive');
   });
 
@@ -151,7 +151,7 @@ describe('InvalidArchive families', () => {
       (e) => e
     );
     assert.strictEqual(err.code, 'OUTPUT_EXISTS');
-    assert.deepStrictEqual(err.conflicts, ['h']);
+    assert.deepStrictEqual(err.conflicts, [{ path: 'h', occupant: 'file' }]);
     assert.strictEqual(err.by, 'existing');
   });
 

@@ -75,6 +75,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -392,6 +393,9 @@ impl From<rustix::fs::FileType> for Occupant {
 #[derive(Debug)]
 pub(crate) struct PinnedRoot {
     dest: DestDir,
+    /// The destination the caller asked for, which differs from `dest` for a
+    /// staged run.
+    destination: PathBuf,
     dir: VettedDir,
     created: Rc<RunRecord>,
     mark: Option<Rc<MarkRun>>,
@@ -406,6 +410,7 @@ impl PinnedRoot {
     pub(crate) fn open(dest: DestDir) -> Result<Self> {
         let dir = VettedDir::open_path(dest.as_path())?;
         Ok(Self {
+            destination: dest.as_path().to_path_buf(),
             dest,
             dir,
             created: Rc::default(),
@@ -443,6 +448,7 @@ impl PinnedRoot {
                 #[cfg(not(unix))]
                 let dir = VettedDir::open_path(dest.as_path())?;
                 Self {
+                    destination: staged.destination().to_path_buf(),
                     dest,
                     dir,
                     created: staged.ledger(),
@@ -480,6 +486,20 @@ impl PinnedRoot {
 
     pub(crate) const fn dest(&self) -> &DestDir {
         &self.dest
+    }
+
+    /// The refusal of the path `rel` of this run, naming the destination the
+    /// caller asked for (never a staging path) and the `occupant` found there.
+    ///
+    /// The one host constructor of [`ArchiveError::DestinationOccupied`]; the
+    /// maker defaults to [`OccupiedBy::Existing`](crate::OccupiedBy) until the
+    /// caller's decision says otherwise.
+    pub(crate) fn occupied(&self, rel: &Path, occupant: Option<Occupant>) -> ArchiveError {
+        ArchiveError::DestinationOccupied {
+            destination: Some(self.destination.clone()),
+            conflicts: Box::new([crate::OccupiedPath::at(rel, occupant)]),
+            by: crate::OccupiedBy::Existing,
+        }
     }
 
     pub(super) const fn dir(&self) -> &VettedDir {

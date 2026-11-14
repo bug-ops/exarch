@@ -23,9 +23,11 @@
 //!   message.
 //! - `restore`, `backupPath`, `leftoverPath`: what a failed `'atomic_replace'`
 //!   (or a left-behind output reservation) left on disk, redacted like paths.
-//! - `conflicts`, `by`: the entry names that stopped a `'refuse'` extraction,
-//!   or an `'overwrite'` extraction that met a directory occupant or a hardlink
-//!   over a file, and who made the occupant (`'existing'` or `'archive'`).
+//! - `conflicts`, `by`: the entries that stopped a `'refuse'` extraction, or an
+//!   `'overwrite'` extraction that met a directory occupant or a hardlink over
+//!   a file, each as `{ path, occupant? }` with the kind of occupant, and who
+//!   made the occupant (`'existing'` or `'archive'`). `by` is also set on an
+//!   `EXISTING_SYMLINK` security violation that refused to replace a symlink.
 //! - `protectedPath`, `collision`, `unmatchedPatterns`: the typed reason of the
 //!   matching `INVALID_CONFIGURATION`.
 //! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
@@ -50,6 +52,7 @@ use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiDetail;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiNameCollision;
+use exarch_core::FfiOccupiedPath;
 use exarch_core::FfiRestore;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
@@ -1077,6 +1080,30 @@ pub struct NameCollision {
     pub second: String,
 }
 
+/// An archive-relative path that stopped an extraction because the destination
+/// already holds something there (an element of `conflicts` of an
+/// `OUTPUT_EXISTS`).
+#[napi(object)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccupiedPath {
+    /// The archive-relative path, as the archive spells it.
+    pub path: String,
+    /// What occupies the path; absent when the occupant vanished before the
+    /// refusal probed it. A core value this binding does not know reads as a
+    /// plain string.
+    #[napi(ts_type = "'file' | 'directory' | 'symlink' | (string & {})")]
+    pub occupant: Option<String>,
+}
+
+impl From<FfiOccupiedPath> for OccupiedPath {
+    fn from(conflict: FfiOccupiedPath) -> Self {
+        Self {
+            path: conflict.path,
+            occupant: conflict.occupant.map(|kind| kind.as_str().to_owned()),
+        }
+    }
+}
+
 /// What the OS reported for an unreadable creation source, redacted like the
 /// rest of the message.
 #[derive(Debug)]
@@ -1314,8 +1341,14 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
 fn apply_detail(obj: &mut Object<'_>, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
+        FfiDetail::ExistingSymlink { by } => set_property(obj, "by", by.as_str()),
         FfiDetail::Occupied { conflicts, by } => {
-            set_property(obj, "conflicts", conflicts.into_vec());
+            let conflicts: Vec<OccupiedPath> = conflicts
+                .into_vec()
+                .into_iter()
+                .map(OccupiedPath::from)
+                .collect();
+            set_property(obj, "conflicts", conflicts);
             set_property(obj, "by", by.as_str());
         }
         FfiDetail::Replace(restore) => {
@@ -1537,6 +1570,24 @@ mod tests {
     use super::*;
 
     const INDEX_DTS: &str = include_str!("../index.d.ts");
+
+    fn occupied(
+        path: &str,
+        occupant: Option<exarch_core::PathOccupant>,
+    ) -> exarch_core::OccupiedPath {
+        exarch_core::OccupiedPath::new(PathBuf::from(path), occupant)
+    }
+
+    fn js_conflicts(detail: FfiDetail) -> Vec<OccupiedPath> {
+        let FfiDetail::Occupied { conflicts, .. } = detail else {
+            panic!("an occupied destination carries its conflicts");
+        };
+        conflicts
+            .into_vec()
+            .into_iter()
+            .map(OccupiedPath::from)
+            .collect()
+    }
 
     /// Values of the string-literal union declared as `export type {name} =
     /// ...` in the generated `index.d.ts`.
@@ -2402,7 +2453,8 @@ mod tests {
     fn test_destination_occupied_is_output_exists_and_redacts_the_destination() {
         let d = described(CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/app/out")),
-            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+            conflicts: vec![occupied("a.txt", Some(exarch_core::PathOccupant::File))]
+                .into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(d.props.code.as_str(), "OUTPUT_EXISTS");
@@ -2479,15 +2531,25 @@ mod tests {
     fn test_destination_occupied_lists_the_conflicting_entries() {
         let d = described(CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/internal/app/out")),
-            conflicts: vec![PathBuf::from("a.txt"), PathBuf::from("d/b.txt")].into_boxed_slice(),
+            conflicts: vec![
+                occupied("a.txt", Some(exarch_core::PathOccupant::File)),
+                occupied("d/b.txt", Some(exarch_core::PathOccupant::Directory)),
+            ]
+            .into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         });
         assert_eq!(
-            d.props.detail,
-            FfiDetail::Occupied {
-                conflicts: Box::new(["a.txt".to_owned(), "d/b.txt".to_owned()]),
-                by: exarch_core::OccupiedBy::Existing,
-            }
+            js_conflicts(d.props.detail),
+            vec![
+                OccupiedPath {
+                    path: "a.txt".to_owned(),
+                    occupant: Some("file".to_owned()),
+                },
+                OccupiedPath {
+                    path: "d/b.txt".to_owned(),
+                    occupant: Some("directory".to_owned()),
+                },
+            ]
         );
         let path = d.props.path.expect("the destination is named");
         assert!(path.ends_with("out"), "{path}");
@@ -2498,16 +2560,14 @@ mod tests {
         for &by in exarch_core::OccupiedBy::ALL {
             let d = described(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![PathBuf::from("a")].into_boxed_slice(),
+                conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
+                    .into_boxed_slice(),
                 by,
             });
             assert_eq!(d.props.path, None);
-            assert_eq!(
+            assert_matches!(
                 d.props.detail,
-                FfiDetail::Occupied {
-                    conflicts: Box::new(["a".to_owned()]),
-                    by,
-                }
+                FfiDetail::Occupied { by: got, .. } if got == by
             );
         }
     }
@@ -2583,18 +2643,101 @@ mod tests {
     fn test_partial_extraction_keeps_the_typed_destination_detail() {
         let source = CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("out")),
-            conflicts: vec![PathBuf::from("a.txt")].into_boxed_slice(),
+            conflicts: vec![occupied("a.txt", Some(exarch_core::PathOccupant::File))]
+                .into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         };
         let partial =
             exarch_core::Partial::new(source, CoreExtractionReport::new(), CorePartialWrites::Kept);
         let d = described(CoreError::PartialExtraction(partial));
         assert_eq!(
-            d.props.detail,
-            FfiDetail::Occupied {
-                conflicts: Box::new(["a.txt".to_owned()]),
+            js_conflicts(d.props.detail),
+            vec![OccupiedPath {
+                path: "a.txt".to_owned(),
+                occupant: Some("file".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_conflict_without_a_probed_occupant_has_no_kind() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: None,
+            conflicts: vec![occupied("gone", None)].into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
+        });
+        assert_eq!(
+            js_conflicts(d.props.detail),
+            vec![OccupiedPath {
+                path: "gone".to_owned(),
+                occupant: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_every_occupant_kind_reaches_the_conflict_as_its_name() {
+        for &kind in exarch_core::PathOccupant::ALL {
+            let d = described(CoreError::DestinationOccupied {
+                destination: None,
+                conflicts: vec![occupied("a", Some(kind))].into_boxed_slice(),
                 by: exarch_core::OccupiedBy::Existing,
-            }
+            });
+            assert_eq!(
+                js_conflicts(d.props.detail)[0].occupant.as_deref(),
+                Some(kind.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn test_atomic_refusal_names_the_caller_destination() {
+        let d = described(CoreError::DestinationOccupied {
+            destination: Some(PathBuf::from("/srv/internal/app/out")),
+            conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
+                .into_boxed_slice(),
+            by: exarch_core::OccupiedBy::Existing,
+        });
+        let path = d.props.path.expect("the destination is named");
+        assert!(path.ends_with("out"), "{path}");
+        assert!(!path.contains(".exarch"), "{path}");
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(!path.contains("internal"), "{path}");
+            assert!(!d.description.contains("internal"), "{}", d.description);
+        }
+    }
+
+    #[test]
+    fn test_replacing_a_symlink_carries_who_made_it() {
+        for &by in exarch_core::OccupiedBy::ALL {
+            let d = described(CoreError::from(exarch_core::Violation::ReplacesSymlink {
+                rel: "l".into(),
+                by,
+            }));
+            assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+            assert_eq!(d.props.detail, FfiDetail::ExistingSymlink { by });
+        }
+    }
+
+    #[test]
+    fn test_other_security_violations_carry_no_maker() {
+        let d = described(CoreError::from(exarch_core::Violation::SymlinkComponent {
+            walked: "w".into(),
+        }));
+        assert_eq!(d.props.detail, FfiDetail::None);
+    }
+
+    #[test]
+    fn test_occupant_union_is_the_core_names() {
+        let union: Vec<String> = exarch_core::PathOccupant::NAMES
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect();
+        let line = format!("  occupant?: {} | (string & {{}})", union.join(" | "));
+        assert!(
+            INDEX_DTS.lines().any(|l| l == line),
+            "index.d.ts out of sync with PathOccupant::NAMES, expected:\n{line}"
         );
     }
 

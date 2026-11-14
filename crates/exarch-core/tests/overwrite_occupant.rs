@@ -68,7 +68,11 @@ fn assert_directory_refused(error: ArchiveError, entry: &str) {
     let FfiDetail::Occupied { conflicts, .. } = message.detail else {
         panic!("expected the occupied paths: {message:?}");
     };
-    assert_eq!(&*conflicts, [entry.to_owned()]);
+    let seen: Vec<_> = conflicts
+        .iter()
+        .map(|c| (c.path.as_str(), c.occupant))
+        .collect();
+    assert_eq!(seen, [(entry, Some(exarch_core::PathOccupant::Directory))]);
 }
 
 /// A symlink occupant is refused as `EXISTING_SYMLINK` naming `entry`.

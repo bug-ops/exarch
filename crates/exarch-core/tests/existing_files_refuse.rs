@@ -430,7 +430,7 @@ fn assert_names_the_directory(error: &ArchiveError) {
             conflicts,
             by: exarch_core::OccupiedBy::Archive,
             ..
-        } if conflicts.as_ref() == [std::path::PathBuf::from("x")],
+        } if conflicts.iter().map(|c| c.path.as_path()).eq([std::path::Path::new("x")]),
         "{error}"
     );
 }
@@ -513,7 +513,7 @@ fn a_sink_refuses_a_hardlink_over_a_file_of_the_run_under_overwrite() {
             destination: None,
             conflicts,
             ..
-        } if conflicts.as_ref() == [Path::new("a")]
+        } if conflicts.iter().map(|c| c.path.as_path()).eq([Path::new("a")])
     );
 }
 

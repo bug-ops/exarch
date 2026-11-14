@@ -7,6 +7,7 @@ use exarch_core::FfiDetail;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
 use exarch_core::FfiNameCollision;
+use exarch_core::FfiOccupiedPath;
 use exarch_core::FfiRestore;
 use exarch_core::FfiSourceFault;
 use exarch_core::IoKind;
@@ -59,6 +60,9 @@ struct DualClass {
     builtin: fn(Python<'_>) -> Bound<'_, PyType>,
     /// Attributes an instance may lack, so the class holds `None` for them.
     optional_attrs: &'static [&'static str],
+    /// `str(err)` is the core description instead of the builtin's
+    /// `[Errno N] strerror: 'filename'`, which cannot name an entry.
+    describes_itself: bool,
     class: PyOnceLock<Py<PyType>>,
 }
 
@@ -72,8 +76,14 @@ impl DualClass {
             name,
             builtin,
             optional_attrs,
+            describes_itself: false,
             class: PyOnceLock::new(),
         }
+    }
+
+    const fn describing_itself(mut self) -> Self {
+        self.describes_itself = true;
+        self
     }
 
     fn class<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyType>> {
@@ -81,6 +91,16 @@ impl DualClass {
             .get_or_try_init(py, || {
                 let namespace = PyDict::new(py);
                 namespace.set_item("__module__", "exarch")?;
+                if self.describes_itself {
+                    namespace.set_item(
+                        "__str__",
+                        py.eval(
+                            c"lambda self: str(self.args[0]) if len(self.args) == 1 else OSError.__str__(self)",
+                            None,
+                            None,
+                        )?,
+                    )?;
+                }
                 for attr in self.optional_attrs {
                     namespace.set_item(attr, py.None())?;
                 }
@@ -107,7 +127,8 @@ static OUTPUT_EXISTS: DualClass = DualClass::new(
     "OutputExistsError",
     PyFileExistsError::type_object,
     &["conflicts", "by"],
-);
+)
+.describing_itself();
 static SOURCE_NOT_FOUND: DualClass =
     DualClass::new("SourceNotFoundError", PyFileNotFoundError::type_object, &[]);
 static SOURCE_NOT_ACCESSIBLE: DualClass =
@@ -321,6 +342,57 @@ impl PyNameCollision {
     }
 }
 
+/// An archive-relative path that stopped an extraction because the destination
+/// already holds something there.
+///
+/// # Attributes
+///
+/// * `path` - The archive-relative path, as the archive spells it
+/// * `occupant` - `"file"`, `"directory"` or `"symlink"`; `None` when the
+///   occupant vanished before the refusal probed it
+#[pyclass(name = "OccupiedPath", frozen, module = "exarch")]
+pub struct PyOccupiedPath {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    occupant: Option<String>,
+}
+
+#[pymethods]
+impl PyOccupiedPath {
+    // Exists so a pickled `OutputExistsError` (multiprocessing) revives its
+    // `conflicts`.
+    #[new]
+    #[pyo3(signature = (path, occupant=None))]
+    const fn new(path: String, occupant: Option<String>) -> Self {
+        Self { path, occupant }
+    }
+
+    fn __reduce__<'py>(&self, py: Python<'py>) -> (Bound<'py, PyType>, (String, Option<String>)) {
+        (
+            py.get_type::<Self>(),
+            (self.path.clone(), self.occupant.clone()),
+        )
+    }
+
+    fn __repr__(&self) -> String {
+        let occupant = self
+            .occupant
+            .as_ref()
+            .map_or_else(|| "None".to_owned(), |kind| format!("{kind:?}"));
+        format!("OccupiedPath(path={:?}, occupant={occupant})", self.path)
+    }
+}
+
+impl From<FfiOccupiedPath> for PyOccupiedPath {
+    fn from(conflict: FfiOccupiedPath) -> Self {
+        Self {
+            path: conflict.path,
+            occupant: conflict.occupant.map(|kind| kind.as_str().to_owned()),
+        }
+    }
+}
+
 /// Attaches the structured data of an error under the attribute names of the
 /// exception class that documents them.
 ///
@@ -329,8 +401,14 @@ impl PyNameCollision {
 fn attach_detail(err: &PyErr, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
+        FfiDetail::ExistingSymlink { by } => set_optional_str(err, "by", Some(by.as_str())),
         FfiDetail::Occupied { conflicts, by } => {
-            set_attr(err, "conflicts", Some(conflicts.into_vec()));
+            let conflicts: Vec<PyOccupiedPath> = conflicts
+                .into_vec()
+                .into_iter()
+                .map(PyOccupiedPath::from)
+                .collect();
+            set_attr(err, "conflicts", Some(conflicts));
             set_optional_str(err, "by", Some(by.as_str()));
         }
         FfiDetail::Replace(restore) => {
@@ -461,6 +539,7 @@ pub fn attach_extraction_report(exc: &Bound<'_, PyAny>, report: &ExtractionRepor
 /// Registers all exception types with the Python module.
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNameCollision>()?;
+    m.add_class::<PyOccupiedPath>()?;
     let base = m.py().get_type::<ArchiveError>();
     base.setattr("leftover_path", m.py().None())?;
     m.add("ArchiveError", base)?;
@@ -500,6 +579,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<UnknownFormatError>(),
     )?;
     security_violation.setattr("sub_code", m.py().None())?;
+    security_violation.setattr("by", m.py().None())?;
     m.add("SecurityViolationError", security_violation)?;
     let invalid_archive = m.py().get_type::<InvalidArchiveError>();
     invalid_archive.setattr("sub_code", m.py().None())?;
@@ -1457,28 +1537,79 @@ mod tests {
         }
     }
 
+    fn occupied(
+        path: &str,
+        occupant: Option<exarch_core::PathOccupant>,
+    ) -> exarch_core::OccupiedPath {
+        exarch_core::OccupiedPath::new(PathBuf::from(path), occupant)
+    }
+
     #[test]
     fn test_destination_occupied_names_its_conflicts() {
         pyo3::Python::initialize();
         let err = CoreError::DestinationOccupied {
             destination: Some(PathBuf::from("/srv/out")),
-            conflicts: vec![PathBuf::from("a/b.txt")].into_boxed_slice(),
+            conflicts: vec![
+                occupied("a/b.txt", Some(exarch_core::PathOccupant::File)),
+                occupied("gone", None),
+            ]
+            .into_boxed_slice(),
             by: exarch_core::OccupiedBy::Existing,
         };
         let py_err = convert_error(err);
         Python::attach(|py| {
             let class = OUTPUT_EXISTS.class(py).unwrap();
             assert!(py_err.matches(py, class).unwrap());
-            let conflicts: Vec<String> = py_err
-                .value(py)
-                .getattr("conflicts")
-                .unwrap()
-                .extract()
-                .unwrap();
-            assert_eq!(conflicts, vec!["a/b.txt"]);
+            let conflicts = py_err.value(py).getattr("conflicts").unwrap();
+            let seen: Vec<(String, Option<String>)> = (0..2)
+                .map(|i| {
+                    let conflict = conflicts.get_item(i).unwrap();
+                    (
+                        conflict.getattr("path").unwrap().extract().unwrap(),
+                        conflict.getattr("occupant").unwrap().extract().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    ("a/b.txt".to_owned(), Some("file".to_owned())),
+                    ("gone".to_owned(), None),
+                ]
+            );
         });
         assert_eq!(attr_str(&py_err, "code").as_deref(), Some("OUTPUT_EXISTS"));
         assert_eq!(attr_str(&py_err, "by").as_deref(), Some("existing"));
+    }
+
+    #[test]
+    fn test_every_occupant_kind_reaches_the_conflict_as_its_name() {
+        pyo3::Python::initialize();
+        for &kind in exarch_core::PathOccupant::ALL {
+            let py_err = convert_error(CoreError::DestinationOccupied {
+                destination: None,
+                conflicts: vec![occupied("a", Some(kind))].into_boxed_slice(),
+                by: exarch_core::OccupiedBy::Existing,
+            });
+            Python::attach(|py| {
+                let conflicts = py_err.value(py).getattr("conflicts").unwrap();
+                let first = conflicts.get_item(0).unwrap();
+                let name: String = first.getattr("occupant").unwrap().extract().unwrap();
+                assert_eq!(name, kind.as_str());
+            });
+        }
+    }
+
+    #[test]
+    fn test_occupied_path_repr_names_both_fields() {
+        let conflict = PyOccupiedPath {
+            path: "d".to_owned(),
+            occupant: Some("directory".to_owned()),
+        };
+        assert_eq!(
+            conflict.__repr__(),
+            "OccupiedPath(path=\"d\", occupant=\"directory\")"
+        );
     }
 
     #[test]
@@ -1489,12 +1620,41 @@ mod tests {
         for &by in OccupiedBy::ALL {
             let py_err = convert_error(CoreError::DestinationOccupied {
                 destination: None,
-                conflicts: vec![PathBuf::from("a")].into_boxed_slice(),
+                conflicts: vec![occupied("a", Some(exarch_core::PathOccupant::File))]
+                    .into_boxed_slice(),
                 by,
             });
             assert_eq!(attr_str(&py_err, "by").as_deref(), Some(by.as_str()));
             assert_eq!(attr_str(&py_err, "filename"), None);
         }
+    }
+
+    #[test]
+    fn test_replacing_a_symlink_reports_who_made_it() {
+        pyo3::Python::initialize();
+        for &by in exarch_core::OccupiedBy::ALL {
+            let py_err = convert_error(CoreError::from(exarch_core::Violation::ReplacesSymlink {
+                rel: "l".into(),
+                by,
+            }));
+            Python::attach(|py| {
+                assert!(
+                    py_err
+                        .matches(py, py.get_type::<SecurityViolationError>())
+                        .unwrap()
+                );
+            });
+            assert_eq!(attr_str(&py_err, "by").as_deref(), Some(by.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_other_security_violations_keep_by_none() {
+        pyo3::Python::initialize();
+        let py_err = convert_error(CoreError::from(exarch_core::Violation::SymlinkComponent {
+            walked: "w".into(),
+        }));
+        assert_eq!(attr_str(&py_err, "by"), None);
     }
 
     #[test]

@@ -212,7 +212,8 @@ fn catch_panic_as_py_result<T>(context: &str, f: impl FnOnce() -> PyResult<T>) -
 /// which is never enabled for published wheels.
 #[cfg(feature = "panic-injection")]
 #[pyfunction]
-fn _trigger_panic_for_testing() -> PyResult<()> {
+#[pyo3(name = "_trigger_panic_for_testing")]
+fn trigger_panic_for_testing() -> PyResult<()> {
     catch_panic_as_py_err("test operation (panic-injection)", || {
         panic!("deliberate panic from _trigger_panic_for_testing (issue #395 regression test)")
     })
@@ -828,7 +829,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     #[cfg(feature = "panic-injection")]
-    m.add_function(wrap_pyfunction!(_trigger_panic_for_testing, m)?)?;
+    m.add_function(wrap_pyfunction!(trigger_panic_for_testing, m)?)?;
 
     // Configuration classes
     m.add_class::<PySecurityConfig>()?;

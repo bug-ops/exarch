@@ -102,7 +102,8 @@ def test_destination_occupied_redacts_the_destination_but_names_the_conflicts(
         exarch.extract_archive(sample_tar_gz, destination, options=options)
 
     err = info.value
-    assert "hello.txt" in err.conflicts
+    assert [(c.path, c.occupant) for c in err.conflicts] == [("hello.txt", "file")]
+    assert "hello.txt" in str(err)
     assert os.path.basename(err.filename) == "private-destination"
     if _redaction_active(temp_dir):
         assert err.filename == "private-destination"

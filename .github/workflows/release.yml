@@ -528,7 +528,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write  # softprops/action-gh-release creates the release
+      contents: write  # gh release create/upload/edit
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -612,21 +612,36 @@ jobs:
           EOF
 
       - name: Create Release
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
-        with:
-          name: Release v${{ needs.validate.outputs.version }}
-          body_path: changelog.txt
-          draft: false
-          prerelease: false
-          files: |
-            release-artifacts/python/*.whl
-            release-artifacts/node/**/*.node
-            release-artifacts/cli/*.tar.gz
-            release-artifacts/cli/*.tar.gz.sha256
-            release-artifacts/cli/*.zip
-            release-artifacts/cli/*.zip.sha256
-            scripts/install.sh
-          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+
+          wheels=(release-artifacts/python/*.whl)
+          addons=(release-artifacts/node/**/*.node)
+          archives=(release-artifacts/cli/*.tar.gz release-artifacts/cli/*.zip)
+          checksums=(release-artifacts/cli/*.tar.gz.sha256 release-artifacts/cli/*.zip.sha256)
+          for group in wheels addons archives checksums; do
+            declare -n files="$group"
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::no $group found in release-artifacts"
+              exit 1
+            fi
+            unset -n files
+          done
+          assets=("${wheels[@]}" "${addons[@]}" "${archives[@]}" "${checksums[@]}" scripts/install.sh)
+
+          title="Release v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${assets[@]}"
+            gh release edit "$TAG" --title "$title" --notes-file changelog.txt
+          else
+            gh release create "$TAG" --verify-tag --title "$title" --notes-file changelog.txt "${assets[@]}"
+          fi
 
   # Final success check
   release-success:

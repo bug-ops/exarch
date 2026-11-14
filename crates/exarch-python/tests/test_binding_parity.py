@@ -93,7 +93,12 @@ SHARED = [
         ["setting", "unmatched_patterns", "protected_path", "collision"],
     ),
     ("InvalidArchiveError", ["ExarchInvalidArchiveDetail"], ["sub_code", "non_utf8_entry_path"]),
-    ("SecurityViolationError", ["ExarchSecurityViolationDetail"], ["sub_code", "relaxable_by"]),
+    (
+        "SecurityViolationError",
+        ["ExarchSecurityViolationDetail"],
+        ["sub_code", "relaxable_by", "by"],
+    ),
+    ("OccupiedPath", ["OccupiedPath"], ["path", "occupant"]),
     (
         "_IOErrorAttributes",
         ["ExarchIoDetail", "ExarchErrorBase"],

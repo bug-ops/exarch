@@ -217,7 +217,8 @@ export interface ExarchSecurityViolationDetail {
   restore?: undefined
   backupPath?: undefined
   conflicts?: undefined
-  by?: undefined
+  /** Who made the symlink an `'EXISTING_SYMLINK'` refusal declined to replace: `'existing'` (there before the run, or its maker is unknown) or `'archive'` (an earlier entry of the same archive); absent on every other refusal. */
+  by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -355,8 +356,8 @@ export interface ExarchOutputExistsDetail {
   path?: string
   restore?: undefined
   backupPath?: undefined
-  /** The entry names that stopped a `'refuse'` or `'overwrite'` extraction, as the archive spells them. */
-  conflicts?: Array<string>
+  /** The entries that stopped a `'refuse'` or `'overwrite'` extraction: each archive-relative path as the archive spells it, with the kind of occupant found there (absent when it vanished before the refusal probed it). */
+  conflicts?: Array<OccupiedPath>
   /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
   protectedPath?: undefined

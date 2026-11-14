@@ -636,12 +636,22 @@ jobs:
           assets=("${wheels[@]}" "${addons[@]}" "${archives[@]}" "${checksums[@]}" scripts/install.sh)
 
           title="Release v$VERSION"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "${assets[@]}"
-            gh release edit "$TAG" --title "$title" --notes-file changelog.txt
-          else
-            gh release create "$TAG" --verify-tag --title "$title" --notes-file changelog.txt "${assets[@]}"
-          fi
+          lookup_err=$(mktemp)
+          status=$(gh api --include "repos/$GH_REPO/releases/tags/$TAG" 2>"$lookup_err" | awk 'NR == 1 { print $2 }') || true
+          case "$status" in
+            200)
+              gh release upload "$TAG" --clobber "${assets[@]}"
+              gh release edit "$TAG" --title "$title" --notes-file changelog.txt
+              ;;
+            404)
+              gh release create "$TAG" --verify-tag --title "$title" --notes-file changelog.txt "${assets[@]}"
+              ;;
+            *)
+              echo "::error::release lookup for $TAG failed (HTTP status: ${status:-none}); not creating or editing"
+              cat "$lookup_err" >&2
+              exit 1
+              ;;
+          esac
 
   # Final success check
   release-success:

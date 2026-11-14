@@ -5,10 +5,19 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+use std::assert_matches;
+use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
+use exarch_core::ExistingFiles;
+use exarch_core::ExtractRequest;
+use exarch_core::ExtractionOptions;
 use exarch_core::IssueCategory;
+use exarch_core::IssueSeverity;
+use exarch_core::OccupiedBy;
+use exarch_core::PathOccupant;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::verify_archive;
@@ -34,7 +43,7 @@ fn file(name: &str) -> Vec<u8> {
     tar_entry(name, tar::EntryType::Regular, b"x", None)
 }
 
-fn dir(name: &str) -> Vec<u8> {
+fn dir_entry(name: &str) -> Vec<u8> {
     tar_entry(name, tar::EntryType::Directory, b"", None)
 }
 
@@ -55,33 +64,49 @@ fn config() -> SecurityConfig {
     SecurityConfig::default().with_allow_symlinks(true)
 }
 
+struct Verified {
+    category: IssueCategory,
+    severity: IssueSeverity,
+    message: String,
+}
+
+fn verified(entries: &[Vec<u8>], text: &str) -> Verified {
+    let dir = TempDir::new().unwrap();
+    let archive = write_tar(&dir, entries);
+    let report = verify_archive(&archive, &config()).unwrap();
+    let issue = report
+        .issues()
+        .iter()
+        .find(|issue| issue.message().contains(text))
+        .unwrap_or_else(|| panic!("no blocked-parent issue: {:?}", report.issues()));
+    Verified {
+        category: issue.category(),
+        severity: issue.severity(),
+        message: issue.message(),
+    }
+}
+
+#[cfg(unix)]
 struct Outcome {
     extract_code: ErrorCode,
     extract_message: String,
-    verify_category: IssueCategory,
-    verify_message: String,
+    verify: Verified,
 }
 
+#[cfg(unix)]
 fn run(entries: &[Vec<u8>]) -> Outcome {
     let dir = TempDir::new().unwrap();
     let archive = write_tar(&dir, entries);
     let out = TempDir::new().unwrap();
     let error = extract_archive(&archive, out.path(), &config()).unwrap_err();
-
-    let report = verify_archive(&archive, &config()).unwrap();
-    let issue = report
-        .issues()
-        .iter()
-        .find(|issue| issue.message().contains("refusing to create"))
-        .unwrap_or_else(|| panic!("no blocked-parent issue: {:?}", report.issues()));
     Outcome {
         extract_code: error.error_code(),
         extract_message: error.to_string(),
-        verify_category: issue.category(),
-        verify_message: issue.message(),
+        verify: verified(entries, "refusing to create"),
     }
 }
 
+#[cfg(unix)]
 fn assert_refusal(outcome: &Outcome, text: &str) {
     assert!(
         outcome.extract_message.replace('\\', "/").contains(text),
@@ -89,57 +114,137 @@ fn assert_refusal(outcome: &Outcome, text: &str) {
         outcome.extract_message
     );
     assert!(
-        outcome.verify_message.replace('\\', "/").contains(text),
+        outcome.verify.message.replace('\\', "/").contains(text),
         "{}",
-        outcome.verify_message
+        outcome.verify.message
     );
 }
 
-#[test]
-fn file_parent_of_a_directory_entry() {
-    let outcome = run(&[file("x"), dir("x/y/")]);
+fn extract_refusing(archive: &Path, out: &Path) -> ArchiveError {
+    ExtractRequest::new(&config())
+        .with_options(ExtractionOptions::default().with_existing_files(ExistingFiles::Refuse))
+        .extract(archive, out)
+        .unwrap_err()
+}
 
-    assert_refusal(
-        &outcome,
-        "refusing to create x/y under the existing file at x",
+const FILE_PARENT_REFUSAL: &str = "refusing to replace the existing file at x";
+
+fn assert_file_parent_refusal(error: &ArchiveError, expected_by: OccupiedBy) {
+    let error = match error {
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
+        other => other,
+    };
+    assert_matches!(
+        error,
+        ArchiveError::DestinationOccupied { destination: Some(_), by, conflicts }
+            if *by == expected_by
+                && matches!(
+                    &conflicts[..],
+                    [conflict] if conflict.path == Path::new("x")
+                        && conflict.occupant == Some(PathOccupant::File)
+                ),
+        "{error}"
     );
-    assert_eq!(outcome.extract_code, ErrorCode::IoError);
-    assert_eq!(outcome.verify_category, IssueCategory::InvalidArchive);
+    assert_eq!(error.error_code(), ErrorCode::OutputExists);
 }
 
 #[test]
-fn file_parent_of_a_file_entry_below_a_missing_directory() {
-    let outcome = run(&[file("x"), file("x/a/b.txt")]);
+fn a_file_parent_is_the_typed_occupant_refusal_in_extract_and_verify() {
+    for entries in [
+        [file("x"), dir_entry("x/y/")],
+        [file("x"), file("x/a/b.txt")],
+        [file("x"), file("x/a")],
+    ] {
+        let dir = TempDir::new().unwrap();
+        let archive = write_tar(&dir, &entries);
+        let out = TempDir::new().unwrap();
 
-    assert_refusal(
-        &outcome,
-        "refusing to create x/a/b.txt under the existing file at x",
-    );
-    assert_eq!(outcome.extract_code, ErrorCode::IoError);
-    assert_eq!(outcome.verify_category, IssueCategory::InvalidArchive);
+        let error = extract_refusing(&archive, out.path());
+        let verify = verified(&entries, FILE_PARENT_REFUSAL);
+
+        assert_file_parent_refusal(&error, OccupiedBy::Archive);
+        assert!(verify.message.contains(FILE_PARENT_REFUSAL));
+        assert_eq!(verify.category, IssueCategory::InvalidArchive);
+        assert_eq!(verify.severity, IssueSeverity::High);
+    }
+}
+
+#[test]
+fn a_hardlink_target_below_a_file_is_not_an_occupied_destination() {
+    let config = config().with_allow_hardlinks(true);
+    for existing_files in [ExistingFiles::Refuse, ExistingFiles::Overwrite] {
+        let dir = TempDir::new().unwrap();
+        let archive = write_tar(
+            &dir,
+            &[
+                file("x"),
+                tar_entry("h", tar::EntryType::Link, b"", Some("x/a")),
+            ],
+        );
+        let out = TempDir::new().unwrap();
+
+        let error = ExtractRequest::new(&config)
+            .with_options(ExtractionOptions::default().with_existing_files(existing_files))
+            .extract(&archive, out.path())
+            .unwrap_err();
+
+        let error = match &error {
+            ArchiveError::PartialExtraction(partial) => partial.cause(),
+            other => other,
+        };
+        assert_matches!(
+            error,
+            ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::NotADirectory,
+            "{existing_files:?}: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_entry_over_a_link_to_a_file_is_refused_alike_in_every_spelling() {
+    for spelling in ["l", "l/", "l/.", "l/./", "l/.//"] {
+        let work = TempDir::new().unwrap();
+        let archive = write_tar(&work, &[file("t"), symlink("l", "t"), dir_entry(spelling)]);
+        let out = TempDir::new().unwrap();
+
+        let error = extract_archive(&archive, out.path(), &config()).unwrap_err();
+
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::SecurityViolation,
+            "{spelling}: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace the existing symlink at l"),
+            "{spelling}: {error}"
+        );
+    }
 }
 
 #[cfg(unix)]
 #[test]
 fn dangling_symlink_parent() {
-    for entry in [dir("x/sub/"), file("x/f.txt"), file("x/a/f.txt")] {
+    for entry in [dir_entry("x/sub/"), file("x/f.txt"), file("x/a/f.txt")] {
         let outcome = run(&[symlink("x", "t"), entry]);
 
         assert_refusal(&outcome, "under the existing symlink at x");
         assert_eq!(outcome.extract_code, ErrorCode::SecurityViolation);
-        assert_eq!(outcome.verify_category, IssueCategory::SecurityPolicy);
+        assert_eq!(outcome.verify.category, IssueCategory::SecurityPolicy);
     }
 }
 
 #[cfg(unix)]
 #[test]
 fn symlink_to_a_file_parent() {
-    for entry in [dir("x/sub/"), file("x/f.txt"), file("x/a/f.txt")] {
+    for entry in [dir_entry("x/sub/"), file("x/f.txt"), file("x/a/f.txt")] {
         let outcome = run(&[file("t"), symlink("x", "t"), entry]);
 
         assert_refusal(&outcome, "under the existing symlink at x");
         assert_eq!(outcome.extract_code, ErrorCode::SecurityViolation);
-        assert_eq!(outcome.verify_category, IssueCategory::SecurityPolicy);
+        assert_eq!(outcome.verify.category, IssueCategory::SecurityPolicy);
     }
 }
 
@@ -150,7 +255,7 @@ fn looping_symlink_parent() {
 
     assert_refusal(&outcome, "under the existing symlink at x");
     assert_eq!(outcome.extract_code, ErrorCode::SecurityViolation);
-    assert_eq!(outcome.verify_category, IssueCategory::SecurityPolicy);
+    assert_eq!(outcome.verify.category, IssueCategory::SecurityPolicy);
 }
 
 #[cfg(unix)]
@@ -195,7 +300,7 @@ fn destination_symlink_to_a_file_is_refused_with_a_category() {
 }
 
 #[test]
-fn destination_file_parent_names_the_entry() {
+fn destination_file_parent_is_the_typed_occupant_refusal() {
     let work = TempDir::new().unwrap();
     let archive = write_tar(&work, &[file("x/f")]);
     let out = TempDir::new().unwrap();
@@ -203,14 +308,7 @@ fn destination_file_parent_names_the_entry() {
 
     let error = extract_archive(&archive, out.path(), &config()).unwrap_err();
 
-    assert_eq!(error.error_code(), ErrorCode::IoError);
-    assert!(
-        error
-            .to_string()
-            .replace('\\', "/")
-            .contains("refusing to create x/f under the existing file at x"),
-        "{error}"
-    );
+    assert_file_parent_refusal(&error, OccupiedBy::Existing);
     assert_eq!(std::fs::read(out.path().join("x")).unwrap(), b"keep");
 }
 

@@ -10,8 +10,10 @@ use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::ModelRoot as _;
+use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
+use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::fs_view::paths_start_with;
 use crate::selection::Rewritten;
 use std::borrow::Cow;
@@ -369,7 +371,11 @@ impl<P: ParentCheck> SafePath<P> {
                         path: path.to_path_buf(),
                     });
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound || defers_to_walker::<P>(&e) => {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || defers_to_walker::<P>(&e)
+                        || file_parent_left_to_walker::<P, _>(view, root, &final_path) =>
+                {
                     if !paths_start_with(&resolved, dest) {
                         return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
@@ -443,6 +449,23 @@ impl<P: ParentCheck> SafePath<P> {
 /// handle-relative walk decides instead.
 fn defers_to_walker<P: ParentCheck>(err: &std::io::Error) -> bool {
     P::VETTING == ParentVetting::Walker && err.kind() == std::io::ErrorKind::InvalidFilename
+}
+
+/// Whether a file among the parents of `rel` is the reason a canonicalize
+/// failed and the walker decides it.
+///
+/// The walker's handle-relative walk refuses every file parent itself, with
+/// the destination and who made the file, which a path probe cannot know.
+fn file_parent_left_to_walker<P: ParentCheck, V: FsView>(
+    view: &V,
+    root: &V::Root,
+    rel: &Path,
+) -> bool {
+    P::VETTING == ParentVetting::Walker
+        && matches!(
+            first_blocking_ancestor(view, root, rel),
+            Some((_, ParentBlocker::File))
+        )
 }
 
 /// Why a path component is hazardous on Windows.
@@ -633,19 +656,21 @@ pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
 
 /// The path to canonicalize for the full containment check of `final_path`.
 ///
-/// A trailing separator makes a host resolve the entry as a directory, so a
-/// link to a file would fail with `NotADirectory` caused by the entry's own
-/// last component. The check judges the link the entry names instead:
-/// `dest.join(final_path)` rebuilt from its components, which drop the
-/// separator. Built from `final_path`, never the raw entry, so a leading root
-/// stripped earlier cannot make `join` discard `dest`.
+/// A trailing separator or a trailing `.` component makes a host resolve the
+/// entry as a directory, so a link to a file would fail with `NotADirectory`
+/// caused by the entry's own last component. The check judges the link the
+/// entry names instead: `dest.join(final_path)` rebuilt from its components,
+/// which drop both. Built from `final_path`, never the raw entry, so a leading
+/// root stripped earlier cannot make `join` discard `dest`.
 fn canonical_target<'a>(dest: &Path, final_path: &Path, resolved: &'a Path) -> Cow<'a, Path> {
-    let ends_with_separator = final_path
-        .as_os_str()
-        .as_encoded_bytes()
-        .last()
-        .is_some_and(|byte| std::path::is_separator(char::from(*byte)));
-    if ends_with_separator {
+    let bytes = final_path.as_os_str().as_encoded_bytes();
+    let is_separator = |byte: u8| std::path::is_separator(char::from(byte));
+    let names_a_directory = match bytes {
+        [.., last] if is_separator(*last) => true,
+        [.., before, b'.'] => is_separator(*before),
+        _ => false,
+    };
+    if names_a_directory {
         Cow::Owned(dest.join(final_path.components().collect::<PathBuf>()))
     } else {
         Cow::Borrowed(resolved)
@@ -1972,5 +1997,78 @@ mod tests {
             ValidationContext::<NameTooLongFs>::new(true).with_walker(root.backs_parent_probe());
         SafePath::validate_with_context_in(path, &dest, &config, &walked, &view)
             .expect("the walker decides a name past the host limit");
+    }
+
+    /// A host that, like Linux, cannot resolve a path that ends in a separator
+    /// or in a `.` component once its last named component is a file or a link
+    /// to one.
+    #[cfg(unix)]
+    struct DirectoryNameFs;
+
+    #[cfg(unix)]
+    impl crate::security::fs_view::FsView for DirectoryNameFs {
+        type Root = DestDir;
+
+        fn path_model(&self) -> crate::security::fs_view::PathModel {
+            HostFs.path_model()
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            HostFs.exists(path)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            HostFs.is_dir(path)
+        }
+
+        fn is_symlink(&self, path: &Path) -> std::io::Result<bool> {
+            HostFs.is_symlink(path)
+        }
+
+        fn canonicalize(
+            &self,
+            path: &Path,
+            root: &DestDir,
+        ) -> std::io::Result<crate::security::fs_view::Containment> {
+            let bytes = path.as_os_str().as_encoded_bytes();
+            if bytes.ends_with(b"/") || bytes.ends_with(b"/.") {
+                return Err(std::io::ErrorKind::NotADirectory.into());
+            }
+            HostFs.canonicalize(path, root)
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_spelling_of_a_link_is_judged_as_the_link() {
+        let (temp, dest) = create_test_dest();
+        std::fs::write(temp.path().join("t"), b"x").expect("setup");
+        std::os::unix::fs::symlink("t", temp.path().join("l")).expect("setup");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+
+        for spelling in ["l", "l/", "l/.", "l/./", "l/.//"] {
+            let outcome = SafePath::<Resolved>::validate_in(
+                Path::new(spelling),
+                &dest,
+                &config,
+                &DirectoryNameFs,
+            );
+
+            assert_matches!(outcome, Ok(_), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_merely_ends_in_a_dot_is_not_a_directory_spelling() {
+        let dest = Path::new("/dest");
+
+        for (final_path, directory) in [("a/.", true), ("a/", true), ("a.", false), ("a/b.", false)]
+        {
+            let resolved = dest.join(final_path);
+
+            let target = canonical_target(dest, Path::new(final_path), &resolved);
+
+            assert_eq!(matches!(target, Cow::Owned(_)), directory, "{final_path}");
+        }
     }
 }

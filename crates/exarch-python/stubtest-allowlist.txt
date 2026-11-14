@@ -11,6 +11,10 @@ exarch.exarch
 # regression test (#395) and published wheels never do.
 exarch._trigger_panic_for_testing
 
+# Private functions that rebuild a pickled warning; `__reduce__` returns them
+# by name, they are not API.
+exarch\._revive_.*
+
 # PyO3 base classes of the typed hierarchies are disjoint bases at runtime;
 # @disjoint_base needs typing_extensions in a stub that has no runtime
 # dependencies. Subclassing them from Python is not supported.

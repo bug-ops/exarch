@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, `Violation::SymlinkParent` and `SymlinkComponent` gain `by`, and `EntryType` no longer implements `PartialEq` (#PR).
-- Extraction: a file or link landing on an existing symlink is refused with one typed kind (`EXISTING_SYMLINK`, `by` set) in every format, 7z included (#PR).
+- Extraction: a file or link landing on an existing symlink is refused with one typed kind in every format, 7z included: `EXISTING_SYMLINK` (`by` set) under `--force`, and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` under the default refuse mode, where it used to be a security violation (#PR).
 - `verify`: a directory entry over an earlier file entry is a Medium `InvalidArchive` finding, so the status is WARNING (exit 0, exit 3 with `--strict`) instead of FAIL (exit 1) (#PR).
 - Python: `Skip`, `Skipped` and `NameCollision` have public constructors, and the stub declares `step` (#PR).
 - Under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards, so a run's memory stays flat (#PR).
@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Extraction: a destination below a file, a destination name that is too long under `--atomic` and a plain extraction into a destination without search permission are typed `DestinationNotAccessible` errors that name the destination, with `errno` and `filename` set in Python (#PR).
 - Node: a committed loader requires only bundled addons, and the release workflow checks the packed package layout (#PR).
 - Python: errors pickle and the stubtest gate passes (#PR).
 - CLI: occupied-destination refusals name the occupant kind and its maker, and `--json` carries the destination step (#PR).

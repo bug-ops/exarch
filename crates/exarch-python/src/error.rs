@@ -574,6 +574,7 @@ pub fn attach_extraction_report(exc: &Bound<'_, PyAny>, report: &ExtractionRepor
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNameCollision>()?;
     m.add_class::<PyOccupiedPath>()?;
+    crate::warning::register_revivers(m)?;
     let base = m.py().get_type::<ArchiveError>();
     base.setattr("leftover_path", m.py().None())?;
     m.add("ArchiveError", base)?;

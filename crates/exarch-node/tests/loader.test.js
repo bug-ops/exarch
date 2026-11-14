@@ -5,8 +5,9 @@
  */
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
@@ -75,7 +76,54 @@ describe('npm loader (#1200)', () => {
     assert.match(pkg.scripts['build:debug'], /--no-js\b/);
   });
 
-  it('the package gate script exists', () => {
-    assert.ok(fs.existsSync(path.join(root, 'scripts', 'check-package.mjs')));
+  it('assigns every export explicitly so ESM named imports resolve', () => {
+    const source = fs.readFileSync(loaderPath, 'utf8');
+    const names = [...source.matchAll(/^module\.exports\.(\w+) =\s+addon\.\1;$/gm)].map(
+      (m) => m[1]
+    );
+    assert.ok(names.length > 0);
+    assert.strictEqual(new Set(names).size, names.length, 'duplicate export assignment');
+
+    const declarations = fs.readFileSync(path.join(root, 'index.d.ts'), 'utf8');
+    for (const name of names) {
+      assert.match(declarations, new RegExp(`(?:function|class|type|interface) ${name}\\b`));
+    }
+
+    const addonFile = fs.readdirSync(root).find((file) => /^exarch-rs\..+\.node$/.test(file));
+    if (addonFile !== undefined) {
+      const actual = Object.keys(require(path.join(root, addonFile))).sort();
+      assert.deepStrictEqual([...names].sort(), actual, 'loader exports differ from the addon');
+      const imported = `import { ${names.join(', ')} } from ${JSON.stringify(loaderPath)};`;
+      execFileSync(process.execPath, ['--input-type=module', '-e', imported], { cwd: root });
+    }
+  });
+
+  it('the package gate accepts a full addon set and rejects a missing one', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-pack-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'scripts'));
+      fs.copyFileSync(path.join(root, 'package.json'), path.join(dir, 'package.json'));
+      fs.copyFileSync(loaderPath, path.join(dir, 'index.js'));
+      fs.copyFileSync(
+        path.join(root, 'scripts', 'check-package.mjs'),
+        path.join(dir, 'scripts', 'check-package.mjs')
+      );
+      const addons = fs
+        .readFileSync(loaderPath, 'utf8')
+        .match(/\.\/exarch-rs\.[\w.-]+\.node/g)
+        .map((file) => path.join(dir, file));
+      const gate = () =>
+        spawnSync(process.execPath, ['scripts/check-package.mjs'], { cwd: dir, encoding: 'utf8' });
+      for (const addon of addons) {
+        fs.writeFileSync(addon, '');
+      }
+      assert.strictEqual(gate().status, 0);
+      fs.rmSync(addons[0]);
+      const failed = gate();
+      assert.notStrictEqual(failed.status, 0);
+      assert.match(failed.stderr, /\.node/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

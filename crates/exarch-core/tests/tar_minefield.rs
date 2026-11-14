@@ -17,8 +17,11 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use exarch_core::ArchiveError;
+use exarch_core::ExistingFiles;
+use exarch_core::ExtractRequest;
+use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive;
+use exarch_core::Staging;
 use tempfile::TempDir;
 
 const CASE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -135,11 +138,29 @@ fn case_archives() -> Vec<(String, PathBuf)> {
     cases
 }
 
+fn refusal_cause(error: &ArchiveError) -> &ArchiveError {
+    match error {
+        ArchiveError::PartialExtraction(partial) => partial.cause(),
+        other => other,
+    }
+}
+
+/// Whether the case was stopped by the symlink or hardlink policy itself.
+fn refused_by_link_policy(result: &Result<(), ArchiveError>) -> bool {
+    result.as_ref().err().is_some_and(|error| {
+        let error = refusal_cause(error);
+        error.is_security_violation()
+            && matches!(
+                error.context().as_deref(),
+                Some("symlinks not allowed" | "hardlinks not allowed")
+            )
+    })
+}
+
 fn classify(result: &Result<(), ArchiveError>) -> Outcome {
     let error = match result {
         Ok(()) => return Extracted,
-        Err(ArchiveError::PartialExtraction(partial)) => partial.cause(),
-        Err(other) => other,
+        Err(error) => refusal_cause(error),
     };
     match error {
         ArchiveError::InvalidArchive(_) => Malformed,
@@ -150,9 +171,51 @@ fn classify(result: &Result<(), ArchiveError>) -> Outcome {
     }
 }
 
+/// A way of extracting a case. `Default` is the pinned policy; the others lift
+/// the link policy so the link-escape cases get past it and containment is
+/// exercised on the paths that reach the filesystem.
+#[derive(Debug, Clone, Copy)]
+enum Policy {
+    Default,
+    LinksAllowed,
+    LinksAllowedOverwrite,
+    LinksAllowedAtomic,
+}
+
+impl Policy {
+    const ALL: [Self; 4] = [
+        Self::Default,
+        Self::LinksAllowed,
+        Self::LinksAllowedOverwrite,
+        Self::LinksAllowedAtomic,
+    ];
+
+    fn config(self) -> SecurityConfig {
+        match self {
+            Self::Default => SecurityConfig::default(),
+            _ => SecurityConfig::default()
+                .with_allow_symlinks(true)
+                .with_allow_hardlinks(true),
+        }
+    }
+
+    fn options(self) -> ExtractionOptions {
+        let mut options = ExtractionOptions::default();
+        match self {
+            Self::LinksAllowedOverwrite => options.existing_files = ExistingFiles::Overwrite,
+            Self::LinksAllowedAtomic => options.staging = Staging::Atomic,
+            Self::Default | Self::LinksAllowed => {}
+        }
+        options
+    }
+}
+
 /// Extracts one case three directories deep in its own sandbox, on a thread so
 /// that a panic or a hang is reported against the case.
-fn extract_in_sandbox(archive: &Path) -> (TempDir, PathBuf, Result<(), ArchiveError>) {
+fn extract_in_sandbox(
+    archive: &Path,
+    policy: Policy,
+) -> (TempDir, PathBuf, Result<(), ArchiveError>) {
     let sandbox = TempDir::new().unwrap();
     let dest = sandbox.path().join("a").join("b").join("dest");
     std::fs::create_dir_all(&dest).unwrap();
@@ -161,7 +224,11 @@ fn extract_in_sandbox(archive: &Path) -> (TempDir, PathBuf, Result<(), ArchiveEr
     let archive = archive.to_path_buf();
     let thread_dest = dest.clone();
     let worker = std::thread::spawn(move || {
-        let result = extract_archive(&archive, &thread_dest, &SecurityConfig::default()).map(drop);
+        let config = policy.config();
+        let result = ExtractRequest::new(&config)
+            .with_options(policy.options())
+            .extract(&archive, &thread_dest)
+            .map(drop);
         let _ = sender.send(result);
     });
     let result = match receiver.recv_timeout(CASE_TIMEOUT) {
@@ -215,9 +282,14 @@ fn the_corpus_is_vendored_in_full() {
 #[test]
 fn no_case_writes_outside_the_destination_or_hangs_or_panics() {
     for (id, archive) in case_archives() {
-        let (sandbox, dest, _result) = extract_in_sandbox(&archive);
-        let outside = paths_outside(sandbox.path(), &dest);
-        assert!(outside.is_empty(), "{id} wrote outside: {outside:?}");
+        for policy in Policy::ALL {
+            let (sandbox, dest, _result) = extract_in_sandbox(&archive, policy);
+            let outside = paths_outside(sandbox.path(), &dest);
+            assert!(
+                outside.is_empty(),
+                "{id} under {policy:?} wrote outside: {outside:?}"
+            );
+        }
     }
 }
 
@@ -229,7 +301,7 @@ fn every_case_has_its_pinned_outcome() {
     assert_eq!(pinned_ids, vendored_ids, "the table and the corpus differ");
 
     for (id, archive) in &vendored {
-        let (_sandbox, _dest, result) = extract_in_sandbox(archive);
+        let (_sandbox, _dest, result) = extract_in_sandbox(archive, Policy::Default);
         let expected = PINNED.iter().find(|(pinned, _)| pinned == id).unwrap().1;
         assert_eq!(
             classify(&result),
@@ -237,5 +309,39 @@ fn every_case_has_its_pinned_outcome() {
             "{id}: {:?}",
             result.as_ref().err().map(ToString::to_string)
         );
+    }
+}
+
+/// Cases that the default policy stops at the link policy, so only a sweep
+/// with links allowed puts their containment to the test.
+const STOPPED_BY_LINK_POLICY: &[&str] = &[
+    "S06-hardlink-to-symlink",
+    "S10-tree-symlink-then-file",
+    "S11-tree-through-symlink",
+    "S14-tree-symlink-then-dir",
+    "S15-tree-file-then-hardlink",
+    "S16-hardlink-target-spelled-differently",
+    "S17-hardlink-then-file-again",
+];
+
+#[test]
+fn the_links_allowed_sweep_gets_past_the_link_policy() {
+    for (id, archive) in case_archives() {
+        if !STOPPED_BY_LINK_POLICY.contains(&id.as_str()) {
+            continue;
+        }
+        let (_sandbox, _dest, default) = extract_in_sandbox(&archive, Policy::Default);
+        assert!(refused_by_link_policy(&default), "{id}: {default:?}");
+        for policy in [
+            Policy::LinksAllowed,
+            Policy::LinksAllowedOverwrite,
+            Policy::LinksAllowedAtomic,
+        ] {
+            let (_sandbox, _dest, result) = extract_in_sandbox(&archive, policy);
+            assert!(
+                !refused_by_link_policy(&result),
+                "{id} under {policy:?} still stops at the link policy: {result:?}"
+            );
+        }
     }
 }

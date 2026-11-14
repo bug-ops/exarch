@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use crate::buffer::parse_one;
 use crate::warning::creation_warnings;
 use crate::warning::extraction_warnings;
+use crate::warning::known_name;
 
 /// One entry an operation left out.
 ///
@@ -62,15 +63,7 @@ impl PySkip {
     #[new]
     #[pyo3(signature = (kind, path, io_kind=None))]
     fn new(kind: &str, path: PathBuf, io_kind: Option<&str>) -> PyResult<Self> {
-        let io_kind = io_kind
-            .map(|name| {
-                IoKind::NAMES
-                    .iter()
-                    .copied()
-                    .find(|known| *known == name)
-                    .ok_or_else(|| PyValueError::new_err(format!("unknown io_kind {name:?}")))
-            })
-            .transpose()?;
+        let io_kind = io_kind.map(known_name::<IoKind>).transpose()?;
         Ok(Self {
             kind: parse_one(ConfigSetting::SkipKind, kind)?,
             path,
@@ -142,10 +135,31 @@ impl PySkips {
     // Exists so a pickled exception revives its `skipped`.
     #[new]
     fn new(counts: BTreeMap<String, usize>, sample: Vec<PySkip>) -> PyResult<Self> {
-        let counts = counts
+        let counts: BTreeMap<SkipKind, usize> = counts
             .into_iter()
             .map(|(kind, count)| Ok((parse_one(ConfigSetting::SkipKind, &kind)?, count)))
             .collect::<PyResult<_>>()?;
+        if counts.values().any(|count| *count == 0) {
+            return Err(PyValueError::new_err("a count must be positive"));
+        }
+        if sample.len() > CoreSkips::SAMPLE_CAP {
+            return Err(PyValueError::new_err(format!(
+                "the sample holds at most {} entries",
+                CoreSkips::SAMPLE_CAP
+            )));
+        }
+        let mut sampled: BTreeMap<SkipKind, usize> = BTreeMap::new();
+        for skip in &sample {
+            *sampled.entry(skip.kind).or_default() += 1;
+        }
+        if sampled
+            .iter()
+            .any(|(kind, seen)| counts.get(kind).is_none_or(|count| count < seen))
+        {
+            return Err(PyValueError::new_err(
+                "the sample holds more entries of a kind than its count",
+            ));
+        }
         Ok(Self { counts, sample })
     }
 

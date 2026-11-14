@@ -367,8 +367,8 @@ impl<'p> StagingDir<'p> {
         Err(failure(io::Error::from(io::ErrorKind::AlreadyExists)))
     }
 
-    /// The ledger of a new staging directory. Only a rollback that sweeps
-    /// reads it, so only macOS pays for recording every entry.
+    /// The ledger of a new staging directory: a full record on every OS, since
+    /// the rollback that sweeps reads it whatever `ExistingFiles` says.
     fn new_ledger() -> Rc<RunRecord> {
         Rc::new(RunRecord::new(RecordBudget::Full))
     }

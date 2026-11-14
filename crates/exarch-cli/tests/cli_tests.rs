@@ -6803,6 +6803,31 @@ fn test_extract_directory_over_file_names_the_entry() {
         .code(3);
 }
 
+/// Without `--force`, a file over an existing symlink is refused with the exact
+/// hint: `--force` never replaces a symlink, so the path is named, not guessed.
+#[cfg(unix)]
+#[test]
+fn test_extract_file_over_an_existing_symlink_hints_the_exact_path() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("x.tar");
+    tar_entries_archive(&archive, &[("x", tar::EntryType::Regular, "")]);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("destination");
+    std::fs::write(out.join("t"), "old").expect("target");
+    std::os::unix::fs::symlink("t", out.join("x")).expect("symlink");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("--force does not replace x; remove it")
+                .and(predicate::str::contains("may not replace").not()),
+        );
+}
+
 /// #1196: a refusal of the run's own entries (`by` archive) never claims the
 /// destination held the path and never offers `--force`, in the text of a
 /// partial in-place run, for TAR and ZIP alike.

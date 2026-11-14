@@ -41,14 +41,19 @@ use exarch_core::ListRequest;
 use exarch_core::ListedArchive;
 use exarch_core::ListedExtractOptions;
 use exarch_core::MarkPropagation;
+use exarch_core::OccupiedPath;
+use exarch_core::OccupiedPaths;
 use exarch_core::PathComponentName;
+use exarch_core::PathOccupant;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::Staging as CoreStaging;
 use exarch_core::StoredTargets;
+use exarch_core::Violation;
 use exarch_core::detect_format;
 use std::env;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Parses the `--allowed-extensions` items into [`Extension`]s: blank items
 /// are dropped and the rest are parsed by the core constructor.
@@ -276,13 +281,20 @@ impl WriteMode {
 
 /// The advice for a refused run without `--force`, from the re-check that asks
 /// whether `--force` would replace what the run met: an error other than an
-/// occupied destination leaves the unreplaced subset unknown.
+/// occupied destination or an existing symlink leaves the unreplaced subset
+/// unknown. A symlink is never replaced in place, so it is named exactly.
 fn advice_after_recheck(recheck: std::result::Result<(), ArchiveError>) -> ConflictAdvice {
     match recheck {
         Ok(()) => ConflictAdvice::UseForce,
         Err(ArchiveError::DestinationOccupied { conflicts, .. }) => {
             ConflictAdvice::ForceCannotReplace(Unreplaced::Only(conflicts))
         }
+        Err(ArchiveError::SecurityViolation {
+            kind: Violation::ReplacesSymlink { rel, .. },
+            ..
+        }) => ConflictAdvice::ForceCannotReplace(Unreplaced::Only(OccupiedPaths::one(
+            OccupiedPath::new(PathBuf::from(&*rel), Some(PathOccupant::Symlink)),
+        ))),
         Err(_) => ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown),
     }
 }

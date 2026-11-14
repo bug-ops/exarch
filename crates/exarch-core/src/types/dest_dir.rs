@@ -144,7 +144,8 @@ impl DestDir {
             use std::ffi::CString;
             use std::os::unix::ffi::OsStrExt;
 
-            // access() checks effective write and search permissions
+            // access() checks write and search permission for the real uid and
+            // gid
             let path_cstring = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| {
                 ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

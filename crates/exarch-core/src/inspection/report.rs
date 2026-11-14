@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::closed_enum::closed_enum;
 use crate::error::ArchiveError;
 use crate::error::FfiKind;
+use crate::error::OccupiedBy;
 use crate::error::TarTrailerRefusal;
 use crate::error::ZipInconsistency;
 use crate::formats::detect::ArchiveType;
@@ -1112,7 +1113,11 @@ impl VerificationIssue {
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
-            ArchiveError::UnmatchedInclude { .. } => high_invalid_archive(error.to_string()),
+            ArchiveError::UnmatchedInclude { .. }
+            | ArchiveError::DestinationOccupied {
+                by: OccupiedBy::Archive,
+                ..
+            } => high_invalid_archive(error.to_string()),
             ArchiveError::Cancelled => medium_invalid_archive("Operation cancelled".to_owned()),
             ArchiveError::DestinationOccupied { .. } => medium_invalid_archive(error.to_string()),
             ArchiveError::OutputReservationLeft { path, .. } => high_invalid_archive(format!(
@@ -1286,6 +1291,24 @@ mod tests {
     use std::io;
 
     use crate::inspection::manifest::ManifestEntryKind;
+
+    #[test]
+    fn an_occupant_the_archive_made_is_high_one_that_was_there_is_medium() {
+        let occupied = |by| ArchiveError::DestinationOccupied {
+            destination: None,
+            conflicts: Box::new([crate::OccupiedPath::at(
+                Path::new("x"),
+                Some(crate::PathOccupant::File),
+            )]),
+            by,
+        };
+
+        let by_archive = VerificationIssue::from_error(&occupied(OccupiedBy::Archive), None);
+        let existing = VerificationIssue::from_error(&occupied(OccupiedBy::Existing), None);
+
+        assert_eq!(by_archive.severity(), IssueSeverity::High);
+        assert_eq!(existing.severity(), IssueSeverity::Medium);
+    }
 
     #[test]
     fn test_unverified_counts_saturate_instead_of_wrapping_to_zero() {

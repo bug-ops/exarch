@@ -64,8 +64,9 @@ use crate::security::fs_view::HostFs;
 #[cfg(unix)]
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
-use crate::security::fs_view::blocked_parent_error;
+use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
@@ -778,7 +779,8 @@ pub(crate) fn create_directory<P: ParentCheck>(
 /// the category `verify` reports for it). `maker` says who made that occupant.
 ///
 /// The path-based `lstat` here only chooses the error message; the fd-relative
-/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again. A name
+/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again, and
+/// alone names a file parent, since only it can tell who made that file. A name
 /// the host cannot look up by path (too long, or invalid on Windows) is left to
 /// that walk, as a missing one is.
 pub(crate) fn check_directory_occupant(
@@ -799,7 +801,11 @@ pub(crate) fn check_directory_occupant(
             return Ok(());
         }
         Err(e) => {
-            return Err(blocked_parent_error(&HostFs, dest, rel).unwrap_or_else(|| e.into()));
+            return match first_blocking_ancestor(&HostFs, dest, rel) {
+                Some((_, ParentBlocker::File)) => Ok(()),
+                Some((parent, blocker)) => Err(blocker.error(rel, &parent)),
+                None => Err(e.into()),
+            };
         }
     };
     if file_type.is_dir() {

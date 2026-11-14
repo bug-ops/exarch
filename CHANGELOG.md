@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
 - Extraction: the `DestinationOccupied` text (core `Display`, FFI description, Node `message`) now reads "refusing to replace the existing <kind> at <entry>" instead of "already holds N of the paths to extract" for a single conflict (#1190).
 - Core API: `PathOccupant` is `#[non_exhaustive]` and `verify` reports a directory entry over a non-directory as a Medium `InvalidArchive` finding with the typed refusal text (#1190).
+- Extraction: an entry below a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError` (Python `NotADirectoryError`), and `verify` reports it as a High `InvalidArchive` finding when the archive made the file (#1217).
 - CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects and `EXISTING_SYMLINK` errors carry `error.by` (#1190).
 - Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
 - Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
 
 ### Fixed
 
+- A directory entry written as `l/.` over a symlink to a file is refused with `EXISTING_SYMLINK` like `l/`, and a directory over a file whose host path exceeds `PATH_MAX` is `DestinationOccupied` (#1217).
+- CI: the release job creates the GitHub release only when the tag lookup returns 404 and fails on any other status (#1217).
 - Staged (`--atomic`, `--force`) extractions name the caller's destination in `DestinationOccupied` instead of the staging directory (#1190).
 - A directory entry over an archive symlink to a file is refused with `EXISTING_SYMLINK` instead of failing with "Not a directory" on Linux, and one over a symlink to a directory inside the destination is accepted on every host (#1190).
 - CLI: the existing-symlink hint no longer tells the user to remove a symlink the archive created, and the skill documents the real `--json` fields (#1190).

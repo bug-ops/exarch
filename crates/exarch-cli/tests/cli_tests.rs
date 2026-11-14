@@ -3728,10 +3728,10 @@ fn gzipped_tar(payload: &[u8]) -> Vec<u8> {
     gz.finish().expect("finish gzip")
 }
 
-/// An entry under a file from the same archive names the entry and the file
-/// in `extract` and in `verify` alike (#804).
+/// An entry under a file from the same archive is refused as an occupied path
+/// in `extract` and in `verify` alike (#804, #1191).
 #[test]
-fn test_extract_and_verify_name_an_entry_under_a_file() {
+fn test_extract_and_verify_refuse_an_entry_under_a_file_as_an_occupied_path() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let mut builder = tar::Builder::new(Vec::new());
     for (name, kind) in [
@@ -3748,7 +3748,7 @@ fn test_extract_and_verify_name_an_entry_under_a_file() {
     }
     let archive = temp.path().join("blocked.tar");
     std::fs::write(&archive, builder.into_inner().expect("finish tar")).expect("write archive");
-    let text = "refusing to create x/y under the existing file at x";
+    let verify_text = "refusing to replace the existing file at x";
 
     exarch_cmd()
         .arg("extract")
@@ -3756,16 +3756,16 @@ fn test_extract_and_verify_name_an_entry_under_a_file() {
         .arg(temp.path().join("out"))
         .assert()
         .failure()
-        .stderr(predicate::function(|stderr: &str| {
-            stderr.replace('\\', "/").contains(text)
-        }));
+        .stderr(predicate::str::contains(
+            "1 destination file already exists",
+        ));
     let verify = exarch_cmd().arg("verify").arg(&archive).assert().failure();
     let output = verify.get_output();
     let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
     assert!(
         String::from_utf8_lossy_owned(combined)
             .replace('\\', "/")
-            .contains(text)
+            .contains(verify_text)
     );
 }
 

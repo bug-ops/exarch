@@ -56,6 +56,7 @@ use crate::QuotaResource;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::closed_enum::closed_enum;
+use crate::formats::common::occupied_without_destination;
 use crate::formats::handle_resolution::LinkCursor;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::types::DestDir;
@@ -448,6 +449,12 @@ pub(crate) trait FsView {
     /// resolved.
     fn canonicalize(&self, path: &Path, root: &Self::Root) -> io::Result<Containment>;
 
+    /// Who made an occupant this view reports: the archive for a view that
+    /// holds only what the archive delivered, an earlier entry otherwise.
+    fn occupant_maker(&self) -> crate::OccupiedBy {
+        crate::OccupiedBy::Existing
+    }
+
     /// Resolves the target of the link at `link` (relative to `root`) through
     /// the links this view already holds, and returns where it lands.
     ///
@@ -729,22 +736,32 @@ pub(crate) enum ParentBlocker {
 }
 
 impl ParentBlocker {
+    /// The plain I/O error for creating `entry` under the file `parent`, which
+    /// a read-only walk reports instead of the typed [`Self::error`]: that one
+    /// would end a conflict listing at its first entry and suggest `--force`
+    /// for a hardlink target.
+    pub(crate) fn file_io_error(entry: &Path, parent: &Path) -> ArchiveError {
+        ArchiveError::Io(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!(
+                "refusing to create {} under the existing file at {}",
+                normalized_display(entry),
+                normalized_display(parent)
+            ),
+        ))
+    }
+
     /// The error for creating `entry` under the blocking component `parent`;
     /// the single source of text and category for extraction and `verify`.
+    ///
+    /// A file parent is the typed occupant refusal of that file,
+    /// destination-less and made by
+    /// [`OccupiedBy::Existing`](crate::OccupiedBy); a host run that knows its
+    /// destination and the maker restates both.
     pub(crate) fn error(self, entry: &Path, parent: &Path) -> ArchiveError {
         let parent: PathBuf = parent.components().collect();
-        let refusal = |noun: &str| {
-            format!(
-                "refusing to create {} under the existing {noun} at {}",
-                normalized_display(entry),
-                normalized_display(&parent)
-            )
-        };
         match self {
-            Self::File => ArchiveError::Io(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                refusal(Occupant::File.as_str()),
-            )),
+            Self::File => occupied_without_destination(&parent, Some(Occupant::File)),
             Self::Symlink => ArchiveError::from(Violation::SymlinkParent {
                 entry: normalized_display(entry).into(),
                 parent: normalized_display(&parent).into(),
@@ -763,8 +780,12 @@ pub(crate) struct BlockedParent {
 }
 
 impl BlockedParent {
+    /// [`ParentBlocker::error`] for a parent the in-memory tree holds, so the
+    /// archive made any file occupant.
     pub(crate) fn error(&self) -> ArchiveError {
-        self.blocker.error(&self.entry, &self.parent)
+        self.blocker
+            .error(&self.entry, &self.parent)
+            .occupied_by(crate::OccupiedBy::Archive)
     }
 }
 
@@ -827,7 +848,11 @@ pub(crate) fn blocked_parent_error<V: FsView>(
     root: &V::Root,
     rel: &Path,
 ) -> Option<ArchiveError> {
-    first_blocking_ancestor(view, root, rel).map(|(parent, blocker)| blocker.error(rel, &parent))
+    first_blocking_ancestor(view, root, rel).map(|(parent, blocker)| {
+        blocker
+            .error(rel, &parent)
+            .occupied_by(view.occupant_maker())
+    })
 }
 
 /// Whether a projected landing is held to the model's name limits.
@@ -1822,6 +1847,10 @@ impl FsView for VirtualTree {
         self.model
     }
 
+    fn occupant_maker(&self) -> crate::OccupiedBy {
+        crate::OccupiedBy::Archive
+    }
+
     fn exists(&self, path: &Path) -> bool {
         matches!(self.resolve(path), Ok(Resolved::Inside { .. }))
     }
@@ -1939,6 +1968,8 @@ fn upper_lower_upper(chars: impl Iterator<Item = char>) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::OccupiedBy;
+    use crate::OccupiedPath;
     use std::assert_matches;
 
     fn tree() -> VirtualTree {
@@ -3034,11 +3065,13 @@ mod tests {
         let entry = Path::new("x/./y/z");
         let parent = Path::new("x");
 
-        let (kind, text) = classified(ParentBlocker::File.error(entry, parent));
-        assert_eq!(kind, "io");
-        assert!(
-            text.replace('\\', "/")
-                .ends_with("refusing to create x/y/z under the existing file at x")
+        assert_matches!(
+            ParentBlocker::File.error(entry, parent),
+            ArchiveError::DestinationOccupied { destination: None, conflicts, by: OccupiedBy::Existing }
+                if matches!(
+                    &*conflicts,
+                    [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("x")
+                )
         );
         let (kind, text) = classified(ParentBlocker::Symlink.error(entry, parent));
         assert_eq!(kind, "violation");
@@ -3066,11 +3099,13 @@ mod tests {
         let conflict = blocked_conflict(&mut t, "x/a/f");
 
         assert_eq!(conflict.occupant, None);
-        let (kind, text) = classified(conflict.into_archive_error());
-        assert_eq!(kind, "io");
-        assert!(
-            text.replace('\\', "/")
-                .ends_with("refusing to create x/a/f under the existing file at x")
+        assert_matches!(
+            conflict.into_archive_error(),
+            ArchiveError::DestinationOccupied { destination: None, conflicts, by: OccupiedBy::Archive }
+                if matches!(
+                    &*conflicts,
+                    [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("x")
+                )
         );
     }
 

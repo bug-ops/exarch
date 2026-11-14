@@ -29,6 +29,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::formats::handle_resolution::LinkCursor;
+use crate::formats::occupant::occupied_by;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
@@ -364,7 +365,9 @@ impl DirWalker {
         }
         match parent.probe(leaf) {
             Ok(Some(Occupant::Symlink)) => self.follow(root, site, walked, entry, links),
-            Ok(Some(Occupant::File)) => Err(ParentBlocker::File.error(entry, walked)),
+            Ok(Some(Occupant::File)) => {
+                Err(file_parent(root, missing, (parent, leaf), walked, entry))
+            }
             Ok(Some(Occupant::Directory) | None) | Err(_) => Err(err.into()),
         }
     }
@@ -407,6 +410,30 @@ impl DirWalker {
                 })
             }
         }
+    }
+}
+
+/// The refusal of a file where a directory is needed.
+///
+/// A walk that creates gives the typed, destination-naming
+/// `DestinationOccupied`, which says who made the file. A read-only walk (the
+/// destination pre-check, a hardlink target) keeps the plain I/O error: the
+/// typed one would end the pre-check at its first conflict and would tell a
+/// hardlink target under a file that `--force` could help.
+fn file_parent(
+    root: &PinnedRoot,
+    missing: Missing,
+    (parent, leaf): (&VettedDir, Leaf<'_>),
+    walked: &Path,
+    entry: &Path,
+) -> ArchiveError {
+    match missing {
+        Missing::Create => root
+            .occupied(walked, Some(Occupant::File))
+            .occupied_by(occupied_by(Some(Occupant::File), || {
+                root.created().created_here(parent, leaf, walked)
+            })),
+        Missing::Fail => ParentBlocker::file_io_error(entry, walked),
     }
 }
 
@@ -456,6 +483,8 @@ impl Followed {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::OccupiedBy;
+    use crate::OccupiedPath;
     use crate::PolicySetting;
     use crate::security::fs_view::MAX_PATH_LEN;
     use crate::types::DestDir;
@@ -948,7 +977,28 @@ mod tests {
 
         let err = walker(false).ensure_dir(&dest, &sp("f/x")).unwrap_err();
 
-        assert_matches!(err, ArchiveError::Io(_), "{err}");
+        assert_matches!(
+            err,
+            ArchiveError::DestinationOccupied { destination: Some(_), by: OccupiedBy::Existing, conflicts }
+                if matches!(
+                    &*conflicts,
+                    [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("f")
+                ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_walk_keeps_the_plain_error_for_a_file_component() {
+        let (_root, dest, _) = dest_with_outside();
+        fs::write(dest.dest().as_path().join("f"), b"x").unwrap();
+
+        let rel = sp("f/x");
+        let opened = walker(false).open_parent(&dest, rel.as_path());
+        let vetted = walker(false).vet_dir(&dest, Path::new("f/x"));
+
+        assert_matches!(opened, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);
+        assert_matches!(vetted, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);
     }
 
     #[test]

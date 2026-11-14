@@ -6803,6 +6803,55 @@ fn test_extract_directory_over_file_names_the_entry() {
         .code(3);
 }
 
+/// #1196: a refusal of the run's own entries (`by` archive) never claims the
+/// destination held the path and never offers `--force`, in the text of a
+/// partial in-place run, for TAR and ZIP alike.
+#[test]
+fn test_extract_text_of_a_conflict_between_archive_entries_claims_no_existing_path() {
+    use std::io::Write;
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tar = temp.path().join("d.tar");
+    tar_entries_archive(
+        &tar,
+        &[
+            ("ok", tar::EntryType::Regular, ""),
+            ("d/", tar::EntryType::Directory, ""),
+            ("d", tar::EntryType::Regular, ""),
+        ],
+    );
+    let zip = temp.path().join("d.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).expect("create"));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("ok", options).expect("file");
+    writer.write_all(b"x").expect("write");
+    writer.add_directory("d/", options).expect("dir");
+    writer.start_file("d", options).expect("file");
+    writer.finish().expect("finish");
+
+    for (index, archive) in [tar, zip].iter().enumerate() {
+        let output = exarch_cmd()
+            .arg("extract")
+            .arg(archive)
+            .arg(temp.path().join(format!("out_{index}")))
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(
+            text.contains(
+                "1 entry of the archive conflicts with an earlier entry:\n  d (directory)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("already exist"), "{text}");
+        assert!(!text.contains("Use --force"), "{text}");
+        assert!(!text.contains("does not replace"), "{text}");
+    }
+}
+
 /// Regression test for #802: the occupant may be a file the destination
 /// already held. The pre-check names it, since a non-directory at the landing
 /// of a directory entry is a conflict (#933).

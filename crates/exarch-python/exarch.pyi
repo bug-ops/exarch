@@ -51,6 +51,7 @@ _MarkState = Literal[
 ]
 _OccupiedBy = Literal["existing", "archive"]
 _PathOccupant = Literal["file", "directory", "symlink"]
+_DestinationStep = Literal["resolve", "create", "open", "list", "write_access", "stage"]
 _Restore = Literal["not_needed", "restored", "failed"]
 _ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
@@ -2435,7 +2436,8 @@ class _IOErrorAttributes(Protocol):
     subclasses, so type checkers see only ``OSError``. Read the attributes with
     ``getattr``; ``code``, ``io_kind``, ``restore``, ``backup_path``,
     ``leftover_path`` and ``filename`` are always set (``None`` when they do not
-    apply), ``writes`` only after an extraction recorded progress.
+    apply), ``writes`` only after an extraction recorded progress and ``step``
+    only on a destination failure.
 
     An error that names a path is the exact builtin called as
     ``cls(errno, strerror, filename)``: ``errno`` is the OS error number
@@ -2463,6 +2465,10 @@ class _IOErrorAttributes(Protocol):
             destination.
         writes: As on ``ArchiveError``, when extraction failed after recording
             progress.
+        step: Only when the destination could not be reached, created or
+            used: the step that failed (``"resolve"``, ``"create"``,
+            ``"open"``, ``"list"``, ``"write_access"`` or ``"stage"``), the
+            same tokens as the Node ``step`` and the CLI ``error.step``.
     """
 
     code: Literal["IO_ERROR"]
@@ -2472,6 +2478,7 @@ class _IOErrorAttributes(Protocol):
     leftover_path: str | None
     filename: str | None
     writes: _PartialWrites
+    step: _DestinationStep
 
 class ArchiveError(Exception):
     """

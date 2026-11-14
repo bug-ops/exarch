@@ -1848,6 +1848,11 @@ mod tests {
         let pyi = include_str!("../exarch.pyi");
         let expected = [
             literal_line(
+                "_DestinationStep",
+                exarch_core::DestinationStep::ALL,
+                exarch_core::DestinationStep::as_str,
+            ),
+            literal_line(
                 "_ExistingFiles",
                 exarch_core::ExistingFiles::ALL,
                 exarch_core::ExistingFiles::as_str,

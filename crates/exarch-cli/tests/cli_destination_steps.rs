@@ -132,12 +132,13 @@ fn test_verify_directory_over_an_earlier_file_is_the_typed_medium_refusal() {
         .args(["verify", "--json"])
         .arg(&archive)
         .assert()
-        .failure()
+        .success()
         .get_output()
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
 
+    assert_eq!(json["data"]["status"], "WARNING", "{json}");
     let issues = json["data"]["issues"].as_array().expect("issues");
     let issue = issues
         .iter()
@@ -155,4 +156,10 @@ fn test_verify_directory_over_an_earlier_file_is_the_typed_medium_refusal() {
         "{issue}"
     );
     assert!(!text.contains("I/O error"), "{issue}");
+
+    assert_cmd::cargo::cargo_bin_cmd!("exarch")
+        .args(["verify", "--json", "--strict"])
+        .arg(&archive)
+        .assert()
+        .code(3);
 }

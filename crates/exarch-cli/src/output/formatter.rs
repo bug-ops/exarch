@@ -7,6 +7,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
 use exarch_core::CreationWarning;
+use exarch_core::DestinationStep;
 use exarch_core::Disposition;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionReport;
@@ -14,6 +15,7 @@ use exarch_core::ExtractionWarning;
 use exarch_core::FfiKind;
 use exarch_core::IoKind;
 use exarch_core::MarkOutcome;
+use exarch_core::OccupancyDetail;
 use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
 use exarch_core::PathOccupant;
@@ -23,7 +25,6 @@ use exarch_core::SkipKind;
 use exarch_core::Skips;
 use exarch_core::SubCode;
 use exarch_core::VerificationReport;
-use exarch_core::Violation;
 use exarch_core::VolumeIdentity;
 use exarch_core::path_text;
 use serde::Serialize;
@@ -151,6 +152,7 @@ mod sealed {
     impl Sealed for exarch_core::IoKind {}
     impl Sealed for exarch_core::OccupiedBy {}
     impl Sealed for exarch_core::PathOccupant {}
+    impl Sealed for exarch_core::DestinationStep {}
 }
 
 /// A closed core enum whose `Display` is its stable identifier (`as_str`).
@@ -165,6 +167,7 @@ impl StableId for exarch_core::ConfigSetting {}
 impl StableId for exarch_core::IoKind {}
 impl StableId for exarch_core::OccupiedBy {}
 impl StableId for exarch_core::PathOccupant {}
+impl StableId for exarch_core::DestinationStep {}
 
 /// Serializes a closed core enum as its stable identifier.
 #[derive(Debug, Clone, Copy)]
@@ -574,6 +577,10 @@ pub struct JsonError {
     /// existing-symlink refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by: Option<JsonId<OccupiedBy>>,
+    /// The step that made the destination unreachable, for a
+    /// `DestinationNotAccessible` error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<JsonId<DestinationStep>>,
     /// A staging directory or reservation file the failed run left behind;
     /// what the user must clean up.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -599,6 +606,7 @@ impl JsonError {
             partial_report: None,
             conflicts: None,
             by: None,
+            step: None,
             leftover_path: None,
             discriminants: None,
         }
@@ -610,8 +618,8 @@ impl JsonError {
     /// error leaves the object unchanged.
     #[must_use]
     pub fn with_occupancy(mut self, error: &ArchiveError) -> Self {
-        match error {
-            ArchiveError::DestinationOccupied { conflicts, by, .. } => {
+        match error.occupancy() {
+            Some(OccupancyDetail::Occupied { conflicts, by }) => {
                 self.conflicts = Some(
                     conflicts
                         .iter()
@@ -621,16 +629,20 @@ impl JsonError {
                         })
                         .collect(),
                 );
-                self.by = Some(JsonId(*by));
+                self.by = Some(JsonId(by));
             }
-            ArchiveError::SecurityViolation {
-                kind: Violation::ReplacesSymlink { by, .. },
-                ..
-            } => self.by = Some(JsonId(*by)),
-            ArchiveError::PartialExtraction(partial) => {
-                return self.with_occupancy(partial.cause());
-            }
-            _ => {}
+            Some(OccupancyDetail::ExistingSymlink { by }) => self.by = Some(JsonId(by)),
+            None => {}
+        }
+        self
+    }
+
+    /// Records the step of a `DestinationNotAccessible` error. Any other
+    /// error leaves the object unchanged.
+    #[must_use]
+    pub fn with_destination_step(mut self, error: &ArchiveError) -> Self {
+        if let ArchiveError::DestinationNotAccessible { step, .. } = error {
+            self.step = Some(JsonId(*step));
         }
         self
     }
@@ -671,6 +683,7 @@ mod tests {
     use super::*;
     use exarch_core::ExtractionWarningKind;
     use exarch_core::MarkState;
+    use exarch_core::Violation;
     use std::path::PathBuf;
 
     fn mark_outcome_of(state: MarkState) -> MarkOutcome {
@@ -773,6 +786,47 @@ mod tests {
         )
         .unwrap();
         assert!(json.get("by").is_none());
+    }
+
+    #[test]
+    fn existing_symlink_refusals_of_every_shape_report_by() {
+        for violation in [
+            Violation::SymlinkParent {
+                entry: "d/e".into(),
+                parent: "d".into(),
+                by: OccupiedBy::Archive,
+            },
+            Violation::SymlinkComponent {
+                walked: "d".into(),
+                by: OccupiedBy::Archive,
+            },
+        ] {
+            let error = ArchiveError::from(violation);
+            let json =
+                serde_json::to_value(JsonError::new(JsonKind::Generic, "m").with_occupancy(&error))
+                    .unwrap();
+            assert_eq!(json["by"], "archive", "{error}");
+        }
+    }
+
+    #[test]
+    fn the_destination_step_is_reported_only_for_a_destination_failure() {
+        let unreachable = ArchiveError::DestinationNotAccessible {
+            path: PathBuf::from("d"),
+            step: DestinationStep::WriteAccess,
+            error: std::io::Error::from_raw_os_error(13),
+        };
+        let json = serde_json::to_value(
+            JsonError::new(JsonKind::Generic, "m").with_destination_step(&unreachable),
+        )
+        .unwrap();
+        assert_eq!(json["step"], "write_access");
+
+        let json = serde_json::to_value(
+            JsonError::new(JsonKind::Generic, "m").with_destination_step(&ArchiveError::Cancelled),
+        )
+        .unwrap();
+        assert!(json.get("step").is_none());
     }
 
     #[test]

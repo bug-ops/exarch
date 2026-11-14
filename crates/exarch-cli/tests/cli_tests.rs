@@ -2016,14 +2016,9 @@ fn test_conflict_precheck_follows_the_landing_of_every_entry_kind() {
             .arg(&archive)
             .arg(&out);
         if conflicts {
-            let expected = if occupant == "f" {
-                "refusing to replace the existing symlink"
-            } else {
-                "already exist"
-            };
             cmd.assert()
                 .code(1)
-                .stderr(predicates::str::contains(expected));
+                .stderr(predicates::str::contains("already exist"));
         } else {
             cmd.assert().success();
         }
@@ -3757,7 +3752,7 @@ fn test_extract_and_verify_refuse_an_entry_under_a_file_as_an_occupied_path() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "1 destination file already exists",
+            "1 entry of the archive conflicts with an earlier entry:\n  x (file)",
         ));
     let verify = exarch_cmd().arg("verify").arg(&archive).assert().failure();
     let output = verify.get_output();
@@ -6487,8 +6482,10 @@ fn test_extract_force_file_over_directory_names_the_entry() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("1 destination file already exists:\n  d")
-                .and(predicate::str::contains("os error").not()),
+            predicate::str::contains(
+                "1 entry of the archive conflicts with an earlier entry:\n  d (directory)",
+            )
+            .and(predicate::str::contains("os error").not()),
         );
 }
 
@@ -6549,8 +6546,10 @@ fn test_extract_force_symlink_over_directory_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("1 destination file already exists:\n  d")
-                    .and(predicate::str::contains("os error").not()),
+                predicate::str::contains(
+                    "1 entry of the archive conflicts with an earlier entry:\n  d (directory)",
+                )
+                .and(predicate::str::contains("os error").not()),
             );
     }
 }
@@ -6782,9 +6781,9 @@ fn test_extract_directory_over_file_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("1 destination file already exists")
+                predicate::str::contains("1 entry of the archive conflicts with an earlier entry")
                     .and(predicate::str::contains("os error").not())
-                    .and(predicate::str::is_match(r"(?m)^\s+x/?$").unwrap()),
+                    .and(predicate::str::is_match(r"(?m)^\s+x/? \(file\)$").unwrap()),
             );
     }
 
@@ -6792,10 +6791,16 @@ fn test_extract_directory_over_file_names_the_entry() {
         .arg("verify")
         .arg(&archive)
         .assert()
-        .code(1)
+        .code(0)
         .stdout(predicate::str::contains(
-            "refusing to replace the existing file at x",
+            "[MEDIUM] x/: refusing to replace the existing file at x",
         ));
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strict")
+        .arg(&archive)
+        .assert()
+        .code(3);
 }
 
 /// Regression test for #802: the occupant may be a file the destination

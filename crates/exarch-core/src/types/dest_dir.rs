@@ -5,9 +5,6 @@ use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::DestinationStep;
 use crate::Result;
-use crate::security::fs_view::Containment;
-use crate::security::fs_view::FsView as _;
-use crate::security::fs_view::HostFs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -147,7 +144,7 @@ impl DestDir {
             use std::ffi::CString;
             use std::os::unix::ffi::OsStrExt;
 
-            // Use access() syscall to check effective write permissions
+            // access() checks effective write and search permissions
             let path_cstring = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| {
                 ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -159,7 +156,7 @@ impl DestDir {
             // The pointer is valid for the duration of the call.
             // access() does not modify the string and returns immediately.
             #[allow(unsafe_code)]
-            let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK) };
+            let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK | libc::X_OK) };
 
             if result != 0 {
                 return Err(ArchiveError::destination_not_accessible(
@@ -289,15 +286,6 @@ impl ProbePath {
     /// symlinks.
     pub(crate) fn exists(&self) -> bool {
         self.0.exists()
-    }
-
-    /// Returns whether the path resolves, through symlinks, to a directory
-    /// inside `dest`.
-    pub(crate) fn lands_in_dir(&self, dest: &DestDir) -> bool {
-        matches!(
-            HostFs.canonicalize(&self.0, dest),
-            Ok(Containment::Within(resolved)) if resolved.is_dir()
-        )
     }
 }
 
@@ -639,24 +627,5 @@ mod tests {
             dest.probe(Path::new("missing")).lstat(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn probe_reports_whether_a_symlink_lands_in_a_destination_directory() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let base = temp.path().canonicalize().expect("setup");
-        fs::create_dir(base.join("dest")).expect("setup");
-        fs::create_dir(base.join("dest/real")).expect("setup");
-        fs::create_dir(base.join("outside")).expect("setup");
-        symlink("real", base.join("dest/inside")).expect("setup");
-        symlink(base.join("outside"), base.join("dest/escape")).expect("setup");
-        let dest = DestDir::new(base.join("dest")).expect("dest");
-
-        assert!(dest.probe(Path::new("inside")).lands_in_dir(&dest));
-        assert!(!dest.probe(Path::new("escape")).lands_in_dir(&dest));
-        assert!(!dest.probe(Path::new("real/missing")).lands_in_dir(&dest));
     }
 }

@@ -112,15 +112,9 @@ fn dir_over_a_symlink_to_a_file_is_refused_on_host_sink_and_list() {
         let context = format!("{policy:?}");
         let dest = TempDir::new().unwrap();
 
-        // Skip keeps no run record, so the maker of the link is unknown.
-        let maker = if policy == ExistingFiles::Skip {
-            OccupiedBy::Existing
-        } else {
-            OccupiedBy::Archive
-        };
         assert_existing_symlink(
             host(link_then_directory(false), dest.path(), policy),
-            maker,
+            OccupiedBy::Archive,
             &format!("host {context}"),
         );
         assert_existing_symlink(

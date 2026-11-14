@@ -136,7 +136,8 @@ pub(super) fn locate(output_dir: &Path) -> Result<Option<(PathBuf, LeafBuf)>> {
 /// directory only means there is nothing to replace.
 ///
 /// Pinning the parent needs search permission on it, even when the destination
-/// does not exist yet.
+/// does not exist yet. A parent that is a file, or a name too long to exist,
+/// likewise leaves nothing to replace.
 ///
 /// # Errors
 ///
@@ -165,13 +166,29 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
             ));
         }
     };
-    let pin = VettedDir::open_path(&parent).map_err(|e| {
-        ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
-    })?;
+    let pin = match VettedDir::open_path(&parent) {
+        Ok(pin) => pin,
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(None),
+        Err(e) => {
+            return Err(ArchiveError::destination_not_accessible(
+                output_dir,
+                DestinationStep::Open,
+                e,
+            ));
+        }
+    };
     let path = parent.join(&name);
-    let found = Destination::open(&pin, name.as_leaf()).map_err(|e| {
-        ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
-    })?;
+    let found = match Destination::open(&pin, name.as_leaf()) {
+        Ok(found) => found,
+        Err(e) if e.kind() == io::ErrorKind::InvalidFilename => return Ok(None),
+        Err(e) => {
+            return Err(ArchiveError::destination_not_accessible(
+                output_dir,
+                DestinationStep::Open,
+                e,
+            ));
+        }
+    };
     let (status, hold) = match found {
         Destination::Absent => return Ok(None),
         Destination::Other(status) => (status, None),

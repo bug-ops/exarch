@@ -274,7 +274,6 @@ mod tests {
     use super::remove_group;
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::pinned_dir::VettedDir;
-    use crate::formats::run_record::Recording;
 
     const DENY_DELETE: &str = "everyone deny delete,file_inherit,directory_inherit";
 
@@ -338,7 +337,7 @@ mod tests {
     }
 
     fn ledger_of(path: &std::path::Path) -> RunRecord {
-        let ledger = RunRecord::new(Recording::Ledger);
+        let ledger = RunRecord::default();
         ledger.insert_identity_for_test(FileIdentity::Known(key_of(path)));
         ledger
     }

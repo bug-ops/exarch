@@ -1054,6 +1054,33 @@ pub enum RestoreOutcome {
     Failed,
 }
 
+/// The step of reaching an extraction destination that failed (the `step`
+/// property of an `IO_ERROR` raised for a destination that cannot be reached).
+// Generates the TypeScript union only; the runtime token is core's
+// `DestinationStep::as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationStep {
+    /// Resolving the path to its canonical form.
+    #[napi(value = "resolve")]
+    Resolve,
+    /// Creating the destination directory or its parents.
+    #[napi(value = "create")]
+    Create,
+    /// Opening the destination directory.
+    #[napi(value = "open")]
+    Open,
+    /// Listing the entries of the destination directory.
+    #[napi(value = "list")]
+    List,
+    /// Checking that the destination directory is writable and searchable.
+    #[napi(value = "write_access")]
+    WriteAccess,
+    /// Reserving a staging directory beside the destination.
+    #[napi(value = "stage")]
+    Stage,
+}
+
 /// What makes a destination too important to replace as a whole (the
 /// `protectedPath` property of an `INVALID_CONFIGURATION`).
 // Values must equal `exarch_core::ProtectedPath::as_str`.
@@ -2784,6 +2811,12 @@ mod tests {
             .map(|path| path.as_str().to_owned())
             .collect();
         assert_eq!(dts_union("ProtectedPath"), protected);
+
+        let steps: BTreeSet<String> = exarch_core::DestinationStep::NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(dts_union("DestinationStep"), steps);
     }
 
     #[test]

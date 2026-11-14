@@ -570,13 +570,9 @@ impl ExtractTarget for HostTarget<'_> {
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
-        self.root.created().note_file(
-            tally.options.existing_files,
-            &link_file,
-            &link_dir,
-            link_leaf,
-            link.as_path(),
-        );
+        self.root
+            .created()
+            .note_file(&link_file, &link_dir, link_leaf, link.as_path());
         let cleanup_guard = TempFileGuard::new(&link_dir, link_leaf);
 
         // Every hardlink copies the target's real bytes to a new inode, so it

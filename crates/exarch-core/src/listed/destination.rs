@@ -287,6 +287,39 @@ impl<'a> Arrival<'a> {
     }
 }
 
+/// The state of one pre-check walk over the landings.
+struct Visit<'r> {
+    walker: DirWalker,
+    root: &'r PinnedRoot,
+    parents: ParentCache<'r>,
+    check: DestinationCheck,
+    conflicts: Vec<OccupiedPath>,
+}
+
+impl Visit<'_> {
+    /// Inspects one landing; `entry` is the entry whose extraction creates it.
+    fn landing(&mut self, landing: &Landing<'_>, entry: &Path) -> Result<()> {
+        let rel = landing.path().as_path();
+        match inspect(
+            self.walker,
+            self.root,
+            &mut self.parents,
+            landing,
+            entry,
+            self.check,
+        ) {
+            Ok(Occupancy::Free) => {}
+            Ok(Occupancy::Conflict(occupant)) => {
+                self.conflicts.push(OccupiedPath::at(rel, Some(occupant)));
+            }
+            Err(ArchiveError::Io(error))
+                if is_below_a_conflict(&error, !self.conflicts.is_empty()) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+}
+
 /// Refuses, before anything is written, a destination the write phase would
 /// refuse.
 ///
@@ -305,23 +338,35 @@ pub(super) fn check(
     let Some(root) = open_destination(dest)? else {
         return Ok(());
     };
-    let walker = DirWalker::new(config);
-    let mut parents = ParentCache::new();
-    let mut conflicts: Vec<OccupiedPath> = Vec::new();
+    let mut visit = Visit {
+        walker: DirWalker::new(config),
+        root: &root,
+        parents: ParentCache::new(),
+        check,
+        conflicts: Vec::new(),
+    };
+    // `landings()` emits an entry's new parents just before the entry, so an
+    // implied parent is vetted for the entry that follows it.
+    let mut implied: Vec<Landing<'_>> = Vec::new();
     for landing in manifest.landings(config) {
-        let rel = landing.path().as_path();
-        if rel.is_empty() {
+        if landing.path().as_path().is_empty() {
             continue;
         }
-        match inspect(walker, &root, &mut parents, &landing, check) {
-            Ok(Occupancy::Free) => {}
-            Ok(Occupancy::Conflict(occupant)) => {
-                conflicts.push(OccupiedPath::at(rel, Some(occupant)));
-            }
-            Err(ArchiveError::Io(error)) if is_below_a_conflict(&error, !conflicts.is_empty()) => {}
-            Err(error) => return Err(error),
+        if matches!(landing.kind(), LandingKind::ImplicitParent) {
+            implied.push(landing);
+            continue;
         }
+        let entry = landing.path().as_path();
+        for parent in &implied {
+            visit.landing(parent, entry)?;
+        }
+        implied.clear();
+        visit.landing(&landing, entry)?;
     }
+    for parent in implied {
+        visit.landing(&parent, parent.path().as_path())?;
+    }
+    let mut conflicts = visit.conflicts;
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     conflicts.dedup_by(|a, b| a.path == b.path);
     OccupiedPaths::from_vec(conflicts).map_or(Ok(()), |conflicts| {
@@ -349,6 +394,7 @@ fn inspect<'r>(
     root: &'r PinnedRoot,
     parents: &mut ParentCache<'r>,
     landing: &Landing<'_>,
+    entry: &Path,
     check: DestinationCheck,
 ) -> Result<Occupancy> {
     let rel = landing.path().as_path();
@@ -361,7 +407,9 @@ fn inspect<'r>(
     let replaceable = check == DestinationCheck::Replaceable;
     match (&arrival, occupant) {
         (Arrival::Directory, Occupant::Directory) => Ok(Occupancy::Free),
-        (Arrival::Directory, Occupant::Symlink) => vet_symlinked_directory(walker, root, landing),
+        (Arrival::Directory, Occupant::Symlink) => {
+            vet_symlinked_directory(walker, root, landing, entry)
+        }
         (Arrival::File | Arrival::Symlink(_), Occupant::File) if replaceable => Ok(Occupancy::Free),
         (_, held @ (Occupant::Directory | Occupant::File)) => Ok(Occupancy::Conflict(held)),
         (Arrival::Symlink(target), Occupant::Symlink) if replaceable => match target {
@@ -370,22 +418,25 @@ fn inspect<'r>(
             }
             _ => refuse_symlink(),
         },
-        (_, Occupant::Symlink) => refuse_symlink(),
+        (_, Occupant::Symlink) if replaceable => refuse_symlink(),
+        (_, Occupant::Symlink) => Ok(Occupancy::Conflict(Occupant::Symlink)),
     }
 }
 
 /// The write phase's verdict on a symlink at a directory landing: an entry
-/// goes through the occupant check, an implied parent through the walk.
+/// goes through the occupant check, an implied parent through the walk, which
+/// names `entry`, the entry that creates it.
 fn vet_symlinked_directory(
     walker: DirWalker,
     root: &PinnedRoot,
     landing: &Landing<'_>,
+    entry: &Path,
 ) -> Result<Occupancy> {
     let rel = landing.path().as_path();
     if matches!(landing.kind(), LandingKind::Entry(_)) {
-        check_directory_occupant(root, rel, |_| OccupiedBy::Existing)?;
+        check_directory_occupant(root, walker, rel, |_| OccupiedBy::Existing)?;
     }
-    walker.vet_dir(root, rel)?;
+    walker.vet_dir(root, rel, entry)?;
     Ok(Occupancy::Free)
 }
 

@@ -1,18 +1,17 @@
 //! Which landings the current run created itself.
 //!
-//! Under [`ExistingFiles::Refuse`] an occupied landing is refused, except when
-//! the run made the occupant and it is a file or a symlink: a second archive
-//! entry for the same path is a duplicate and is skipped, as under
-//! [`ExistingFiles::Skip`]. A directory the run made is never a duplicate, but
-//! the record keeps it too, so a refusal can say that the archive itself made
-//! the occupant. The record tells an entry the run made from one it did not. It
-//! is kept per run, by the pinned destination; files are recorded under
-//! `Refuse` and `Overwrite`, never under `Skip`, directories always.
+//! Under [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) an occupied
+//! landing is refused, except when the run made the occupant and it is a file
+//! or a symlink: a second archive entry for the same path is a duplicate and is
+//! skipped, as under [`ExistingFiles::Skip`](crate::ExistingFiles::Skip). A
+//! directory the run made is never a duplicate, but the record keeps it too, so
+//! a refusal can say that the archive itself made the occupant. The record
+//! tells an entry the run made from one it did not. It is kept per run, by the
+//! pinned destination, and every entry the run creates is recorded whatever
+//! `ExistingFiles` says.
 //!
-//! A staged run keeps a [`Recording::Ledger`] instead: every entry the run
-//! creates is recorded whatever `ExistingFiles` says, and the ledger outlives
-//! the extraction, so a rollback can tell what the run made from what it did
-//! not make.
+//! A staged run's record outlives the extraction, so a rollback can tell what
+//! the run made from what it did not make.
 //!
 //! A landing is keyed by file identity (device and file index of the entry
 //! itself, never of a symlink's target), which is exact on a case-insensitive
@@ -54,7 +53,6 @@ use super::file_identity::FileIdentity;
 use super::file_identity::IdentityKey;
 use super::pinned_dir::Leaf;
 use super::pinned_dir::VettedDir;
-use crate::ExistingFiles;
 
 /// The most landings a run records (4 Mi keys).
 const RECORD_CAP: usize = 4 * 1024 * 1024;
@@ -123,64 +121,25 @@ struct Created {
     saturated: bool,
 }
 
-/// What a [`RunRecord`] keeps.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Recording {
-    /// Files created under `ExistingFiles::Refuse` (the duplicate check) and
-    /// `Overwrite` (the maker named by a refused hardlink), never under `Skip`.
-    #[default]
-    Duplicates,
-    /// Every entry the run creates, under any `ExistingFiles`.
-    Ledger,
-}
-
-impl Recording {
-    const fn records(self, existing_files: ExistingFiles) -> bool {
-        match self {
-            Self::Ledger => true,
-            Self::Duplicates => !matches!(existing_files, ExistingFiles::Skip),
-        }
-    }
-}
-
 /// The landings a run created, consulted when one is found occupied.
 #[derive(Debug, Default)]
 pub(crate) struct RunRecord {
-    recording: Recording,
     created: RefCell<Created>,
 }
 
 impl RunRecord {
-    /// An empty record that keeps what `recording` says.
-    pub(crate) fn new(recording: Recording) -> Self {
-        Self {
-            recording,
-            created: RefCell::default(),
-        }
-    }
-
-    /// Records that the run just created `leaf` in `dir`, if `existing_files`
-    /// needs the record.
+    /// Records that the run just created `leaf` in `dir`.
     ///
     /// A key that cannot be read is not recorded, so a later duplicate is
     /// refused.
-    pub(crate) fn note(
-        &self,
-        existing_files: ExistingFiles,
-        dir: &VettedDir,
-        leaf: Leaf<'_>,
-        rel: &Path,
-    ) {
-        if self.recording.records(existing_files) {
-            self.insert(key_of(dir, leaf, rel));
-        }
+    pub(crate) fn note(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        self.insert(key_of(dir, leaf, rel));
     }
 
     /// Records that the run just created the directory `leaf` in `dir`.
     ///
     /// A duplicate check never skips a directory, but a refusal asks whether
-    /// the run made the occupant, so directories are recorded under every
-    /// [`Recording`].
+    /// the run made the occupant.
     pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
         self.insert(key_of(dir, leaf, rel));
     }
@@ -188,17 +147,7 @@ impl RunRecord {
     /// Like [`note`](Self::note) for the file `leaf` the run just created and
     /// still holds open: keyed by its handle, so no lookup by name unless the
     /// handle gives no identity, which the lookup by name then classifies.
-    pub(crate) fn note_file(
-        &self,
-        existing_files: ExistingFiles,
-        file: &File,
-        dir: &VettedDir,
-        leaf: Leaf<'_>,
-        rel: &Path,
-    ) {
-        if !self.recording.records(existing_files) {
-            return;
-        }
+    pub(crate) fn note_file(&self, file: &File, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
         match FileIdentity::of_file(file) {
             FileIdentity::Unknown => self.insert(key_of(dir, leaf, rel)),
             known @ FileIdentity::Known(_) => self.insert(Some(key_for(known, rel))),
@@ -285,60 +234,34 @@ mod key_tests {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::RunRecord;
-    use crate::ExistingFiles;
     use crate::formats::pinned_dir::support::leaf;
     use crate::formats::pinned_dir::support::pinned_at;
 
     #[test]
-    fn skip_records_nothing_and_only_what_it_recorded_counts_as_created() {
+    fn only_what_was_noted_counts_as_created() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         std::fs::write(temp.path().join("foreign"), b"y").unwrap();
         let record = RunRecord::default();
 
-        record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+        record.note(&dir, leaf("made"), "made".as_ref());
 
-        let overwriting = RunRecord::default();
-        overwriting.note(
-            ExistingFiles::Overwrite,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
-        assert!(overwriting.created_here(&dir, leaf("made"), "made".as_ref()));
-
-        record.note(ExistingFiles::Refuse, &dir, leaf("made"), "made".as_ref());
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
         assert!(!record.created_here(&dir, leaf("absent"), "absent".as_ref()));
     }
 
     #[test]
-    fn a_file_noted_by_its_handle_counts_as_created_except_under_skip() {
+    fn a_file_noted_by_its_handle_counts_as_created() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         let made = std::fs::File::create(temp.path().join("made")).unwrap();
         std::fs::write(temp.path().join("foreign"), b"y").unwrap();
         let record = RunRecord::default();
 
-        record.note_file(
-            ExistingFiles::Skip,
-            &made,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
-        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+        record.note_file(&made, &dir, leaf("made"), "made".as_ref());
 
-        record.note_file(
-            ExistingFiles::Refuse,
-            &made,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
     }
@@ -349,7 +272,7 @@ mod tests {
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         let record = RunRecord::default();
-        record.note(ExistingFiles::Refuse, &dir, leaf("made"), "made".as_ref());
+        record.note(&dir, leaf("made"), "made".as_ref());
 
         record.saturate();
 
@@ -363,14 +286,14 @@ mod tests {
         std::fs::write(temp.path().join("target"), b"x").unwrap();
         std::os::unix::fs::symlink("target", temp.path().join("link")).unwrap();
         let record = RunRecord::default();
-        record.note(ExistingFiles::Refuse, &dir, leaf("link"), "link".as_ref());
+        record.note(&dir, leaf("link"), "link".as_ref());
 
         assert!(record.created_here(&dir, leaf("link"), "link".as_ref()));
         assert!(!record.created_here(&dir, leaf("target"), "target".as_ref()));
     }
 
     #[test]
-    fn a_ledger_records_whatever_existing_files_says_and_a_duplicate_record_never_skip() {
+    fn files_and_directories_are_both_recorded_by_identity() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
@@ -379,33 +302,28 @@ mod tests {
             let stat = rustix::fs::stat(temp.path().join(name)).unwrap();
             crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap()
         };
-        let duplicates = RunRecord::default();
-        let ledger = RunRecord::new(super::Recording::Ledger);
+        let record = RunRecord::default();
 
-        for record in [&duplicates, &ledger] {
-            record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-            record.note_directory(&dir, leaf("sub"), "sub".as_ref());
-        }
+        record.note(&dir, leaf("made"), "made".as_ref());
+        record.note_directory(&dir, leaf("sub"), "sub".as_ref());
 
-        assert!(!duplicates.created_with(key("made")));
-        assert!(duplicates.created_with(key("sub")));
-        assert!(ledger.created_with(key("made")));
-        assert!(ledger.created_with(key("sub")));
+        assert!(record.created_with(key("made")));
+        assert!(record.created_with(key("sub")));
     }
 
     #[test]
-    fn a_saturated_ledger_vouches_for_nothing() {
+    fn a_saturated_record_vouches_for_no_identity() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         let stat = rustix::fs::stat(temp.path().join("made")).unwrap();
         let key = crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap();
-        let ledger = RunRecord::new(super::Recording::Ledger);
-        ledger.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-        assert!(ledger.created_with(key));
+        let record = RunRecord::default();
+        record.note(&dir, leaf("made"), "made".as_ref());
+        assert!(record.created_with(key));
 
-        ledger.saturate();
+        record.saturate();
 
-        assert!(!ledger.created_with(key));
+        assert!(!record.created_with(key));
     }
 }

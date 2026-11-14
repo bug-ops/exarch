@@ -5,15 +5,19 @@
 //! extraction target (the host directory, a sink, a listing) drives it and
 //! receives one proof token per entry kind from [`crate::security::admitted`].
 
+use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::OccupiedBy;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SkipKind;
 use crate::Violation;
 use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::is_extension_allowed;
+use crate::formats::occupant::replaces_symlink;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
 use crate::security::admitted::ValidatedFile;
@@ -22,6 +26,8 @@ use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::ModelRoot as _;
+use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::RawMode;
@@ -49,6 +55,47 @@ fn check_name_limits<V: FsView, P: ParentCheck>(
 ) -> Result<()> {
     check_entry_name_limits(view.path_model(), path.as_path(), regular_file, config)
         .map_err(ArchiveError::Io)
+}
+
+/// The refusal of a directory entry over a symlink that existed before the run
+/// and leaves the destination: [`replaces_symlink`], as every front end gives
+/// it, instead of the `PathTraversal` that canonicalizing the landing reports.
+///
+/// Only a `PathTraversal` of a directory entry on a view that holds what the
+/// destination held is reclassified, and only when every ancestor is a
+/// directory the destination holds and a no-follow probe finds a symlink at the
+/// landing. Any other input keeps `error`, so the result is always an error.
+fn directory_over_existing_symlink<V: FsView>(
+    error: ArchiveError,
+    path: &Path,
+    kind: NodeKind,
+    root: &V::Root,
+    view: &V,
+) -> ArchiveError {
+    let maker = view.occupant_maker();
+    if kind != NodeKind::Directory
+        || maker != OccupiedBy::Existing
+        || !matches!(error, ArchiveError::PathTraversal { .. })
+    {
+        return error;
+    }
+    let mut landing = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => landing.push(name),
+            Component::CurDir => {}
+            _ => return error,
+        }
+    }
+    let ancestors_are_directories = first_blocking_ancestor(view, root, &landing).is_none();
+    let is_symlink = view
+        .is_symlink(&root.as_path().join(&landing))
+        .is_ok_and(|found| found);
+    if ancestors_are_directories && is_symlink {
+        replaces_symlink(&landing, maker)
+    } else {
+        error
+    }
 }
 
 /// Whether an archive entry is a directory, as the root-entry rule sees it.
@@ -476,6 +523,7 @@ impl<'a> ValidatorCore<'a> {
             EntryPath::Root(path) => validate(path).map(EntryPath::Root),
             EntryPath::Child(path) => validate(path).map(EntryPath::Child),
         }
+        .map_err(|error| directory_over_existing_symlink(error, path, kind, root, view))
     }
 
     /// Charges an entry the extraction skips after validation, such as a

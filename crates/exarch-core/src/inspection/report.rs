@@ -1034,6 +1034,17 @@ impl VerificationIssue {
         }
     }
 
+    /// The Medium `InvalidArchive` issue of the typed refusal `error`, which
+    /// carries its own text.
+    #[must_use]
+    pub(crate) fn medium_refusal(error: &ArchiveError, entry_path: Option<PathBuf>) -> Self {
+        Self {
+            severity: IssueSeverity::Medium,
+            entry_path,
+            finding: Finding::refusal(IssueCategory::InvalidArchive, error, error.to_string()),
+        }
+    }
+
     /// Creates a verification issue from an extraction error.
     #[must_use]
     pub fn from_error(error: &ArchiveError, entry_path: Option<PathBuf>) -> Self {

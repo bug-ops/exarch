@@ -281,7 +281,8 @@ impl AtomicDestination {
             setting: ConfigSetting::OutputPath,
             problem,
         };
-        let (parent, name) = if output_dir.exists() {
+        let destination_exists = output_dir.exists();
+        let (parent, name) = if destination_exists {
             let canonical = output_dir.canonicalize().map_err(|e| {
                 ArchiveError::destination_not_accessible(output_dir, DestinationStep::Resolve, e)
             })?;
@@ -309,7 +310,11 @@ impl AtomicDestination {
             let name = LeafBuf::of(output_dir).ok_or_else(|| refuse(ConfigProblem::NoParent))?;
             let parent = parent_or_cwd(output_dir);
             std::fs::create_dir_all(parent).map_err(|e| {
-                ArchiveError::destination_not_accessible(output_dir, DestinationStep::Create, e)
+                ArchiveError::destination_not_accessible(
+                    output_dir,
+                    DestinationStep::Create,
+                    not_a_directory_cause(parent, e),
+                )
             })?;
             let parent = parent.canonicalize().map_err(|e| {
                 ArchiveError::destination_not_accessible(output_dir, DestinationStep::Resolve, e)
@@ -319,7 +324,25 @@ impl AtomicDestination {
         let pin = VettedDir::open_path(&parent).map_err(|e| {
             ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
         })?;
+        if !destination_exists {
+            pin.status(name.as_leaf()).map_err(|e| {
+                ArchiveError::destination_not_accessible(output_dir, DestinationStep::Create, e)
+            })?;
+        }
         Ok(Self { name, parent, pin })
+    }
+}
+
+/// The error `create_dir_all` should report for `parent`: it answers
+/// `AlreadyExists` for a regular file, which hides the `ENOTDIR` that plain
+/// extraction reports for the same destination.
+fn not_a_directory_cause(parent: &Path, error: io::Error) -> io::Error {
+    if error.kind() != io::ErrorKind::AlreadyExists {
+        return error;
+    }
+    match parent.join(".").metadata() {
+        Err(probe) if probe.kind() == io::ErrorKind::NotADirectory => probe,
+        Ok(_) | Err(_) => error,
     }
 }
 

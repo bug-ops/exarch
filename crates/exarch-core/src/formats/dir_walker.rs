@@ -209,10 +209,11 @@ impl DirWalker {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::ensure_dir`]; a missing component is an I/O error of
-    /// kind `NotFound`.
-    pub(crate) fn vet_dir(self, root: &PinnedRoot, rel: &Path) -> Result<()> {
-        self.descend(root, rel, rel, Missing::Fail, Links::Policy)
+    /// Same as [`Self::ensure_dir`], with a blocking component reported against
+    /// `entry`, the entry that needs `rel`; a missing component is an I/O error
+    /// of kind `NotFound`.
+    pub(crate) fn vet_dir(self, root: &PinnedRoot, rel: &Path, entry: &Path) -> Result<()> {
+        self.descend(root, rel, entry, Missing::Fail, Links::Policy)
             .map(drop)
     }
 
@@ -1005,7 +1006,7 @@ mod tests {
 
         let rel = sp("f/x");
         let opened = walker(false).open_parent(&dest, rel.as_path());
-        let vetted = walker(false).vet_dir(&dest, Path::new("f/x"));
+        let vetted = walker(false).vet_dir(&dest, Path::new("f/x"), Path::new("f/x"));
 
         assert_matches!(opened, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);
         assert_matches!(vetted, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);

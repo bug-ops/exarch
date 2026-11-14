@@ -653,23 +653,26 @@ impl ArchiveManifest {
         &'a self,
         config: &SecurityConfig,
     ) -> impl Iterator<Item = Landing<'a>> + use<'a> {
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut out = Vec::new();
         for (entry, landing) in self.landing_paths(config) {
-            let ancestors: Vec<_> = landing
+            // `seen` is closed under ancestors (a path is inserted only after
+            // its parents), so the first ancestor already in it ends the walk
+            // and only new parents allocate.
+            let fresh: Vec<PathBuf> = landing
                 .as_path()
                 .ancestors()
                 .skip(1)
                 .filter(|p| !p.is_empty())
+                .take_while(|p| !seen.contains(*p))
                 .map(Path::to_path_buf)
                 .collect();
-            for parent in ancestors.into_iter().rev() {
-                if seen.insert(parent.clone()) {
-                    out.push(Landing {
-                        path: LandingPath(parent),
-                        kind: LandingKind::ImplicitParent,
-                    });
-                }
+            for parent in fresh.into_iter().rev() {
+                seen.insert(parent.clone());
+                out.push(Landing {
+                    path: LandingPath(parent),
+                    kind: LandingKind::ImplicitParent,
+                });
             }
             seen.insert(landing.as_path().to_path_buf());
             out.push(Landing {
@@ -1069,6 +1072,41 @@ mod tests {
         let manifest = list_archive(&archive, &config).unwrap();
         let strict = SecurityConfig::default();
         assert_eq!(manifest.landing_paths(&strict).count(), 0);
+    }
+
+    /// #1202: entries of different directories interleave; each parent is
+    /// still reported once, right before the first entry that needs it.
+    #[test]
+    fn implicit_parents_are_reported_once_for_unsorted_entries() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"a/x", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"b/y", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"a/z", tar::EntryType::Regular, "");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let shape: Vec<_> = manifest
+            .landings(&config)
+            .map(|l| {
+                (
+                    l.path().as_path().to_path_buf(),
+                    matches!(l.kind(), LandingKind::ImplicitParent),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (PathBuf::from("a"), true),
+                (PathBuf::from("a/x"), false),
+                (PathBuf::from("b"), true),
+                (PathBuf::from("b/y"), false),
+                (PathBuf::from("a/z"), false),
+            ]
+        );
     }
 
     #[test]

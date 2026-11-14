@@ -85,11 +85,9 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
                 guard.progress_mut(),
                 &mut buffer,
             )?,
-            EntryType::Directory => {
+            EntryType::Directory { metadata } => {
                 let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                let metadata =
-                    std::fs::metadata(&entry.path).map_err(|e| source_error(&entry.path, e))?;
-                let dir_options = options_with_mode(&options, config, &metadata);
+                let dir_options = options_with_mode(&options, config, metadata);
                 zip.add_directory(&dir_path, dir_options).map_err(|e| {
                     std::io::Error::other(IoContext::new(
                         "failed to add directory to zip archive",

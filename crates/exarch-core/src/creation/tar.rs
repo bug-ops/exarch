@@ -16,7 +16,6 @@ use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::source::FaultSlotReader;
 use crate::creation::source::copy_outcome;
-use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
@@ -87,9 +86,9 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                 &mut report,
                 guard.progress_mut(),
             )?,
-            EntryType::Directory => add_directory_to_tar(
+            EntryType::Directory { metadata } => add_directory_to_tar(
                 &mut builder,
-                &entry.path,
+                metadata,
                 &entry.archive_path,
                 config,
                 &mut report,
@@ -128,7 +127,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
 /// Adds a directory entry to the TAR archive.
 fn add_directory_to_tar<W: Write>(
     builder: &mut Builder<W>,
-    dir_path: &Path,
+    metadata: &std::fs::Metadata,
     archive_path: &Path,
     config: &CreationConfig,
     report: &mut CreationReport,
@@ -138,8 +137,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_size(0);
 
     if config.permissions.preserves() {
-        let metadata = std::fs::metadata(dir_path).map_err(|e| source_error(dir_path, e))?;
-        set_permissions(&mut header, &metadata);
+        set_permissions(&mut header, metadata);
     } else {
         // Deterministic, traversable default (mirrors tar-rs's
         // `HeaderMode::Deterministic` and the `zip` crate's directory
@@ -508,6 +506,41 @@ mod tests {
             "directory entries without preserve_permissions must use a traversable \
              deterministic default, not mode 0"
         );
+    }
+
+    /// #1214: a directory reached through a followed symlink keeps the mode of
+    /// the directory the walk saw.
+    #[test]
+    #[cfg(unix)]
+    fn test_create_tar_followed_directory_keeps_walked_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let outside = TempDir::new().unwrap();
+        let real = outside.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("f.txt"), b"x").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let source_dir = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(&real, source_dir.path().join("linked")).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.tar");
+        let config = CreationConfig::default()
+            .with_follow_symlinks(true)
+            .with_preserve_permissions(true);
+        create_archive(&output, &[source_dir.path()], &config).unwrap();
+
+        let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
+        let mut mode = None;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().unwrap().as_ref() == Path::new("linked/") {
+                mode = Some(entry.header().mode().unwrap());
+            }
+        }
+        let mode = mode.unwrap();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     /// Regression test for #632: headers carry permission bits only, so

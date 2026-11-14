@@ -2143,12 +2143,13 @@ fn a_ledger_holds_every_entry_a_run_creates_whatever_existing_files_says() {
     use std::rc::Rc;
 
     use crate::formats::output_root::StagedOutput;
+    use crate::formats::run_record::RecordBudget;
     use crate::formats::run_record::RunRecord;
 
     let fx = Fixture::new();
     let stage = fx.parent.join("stage");
     std::fs::create_dir(&stage).unwrap();
-    let ledger = Rc::new(RunRecord::default());
+    let ledger = Rc::new(RunRecord::new(RecordBudget::Full));
     let output = StagedOutput::new(
         stage.clone(),
         fx.parent.clone(),

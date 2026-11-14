@@ -83,6 +83,7 @@ use std::sync::atomic::Ordering;
 use super::file_identity::FileIdentity;
 use super::output_root::OutputRoot;
 use super::output_root::Place;
+use super::run_record::RecordBudget;
 use super::run_record::RunRecord;
 use crate::ArchiveError;
 use crate::DestinationStep;
@@ -408,12 +409,17 @@ impl PinnedRoot {
     ///
     /// Returns an I/O error if the directory cannot be opened.
     pub(crate) fn open(dest: DestDir) -> Result<Self> {
+        Self::open_with(dest, RecordBudget::Full)
+    }
+
+    /// [`open`](Self::open) with a run record that saturates at `budget`.
+    fn open_with(dest: DestDir, budget: RecordBudget) -> Result<Self> {
         let dir = VettedDir::open_path(dest.as_path())?;
         Ok(Self {
             destination: dest.as_path().to_path_buf(),
             dest,
             dir,
-            created: Rc::default(),
+            created: Rc::new(RunRecord::new(budget)),
             mark: None,
         })
     }
@@ -429,7 +435,10 @@ impl PinnedRoot {
     pub(crate) fn open_output(output: OutputRoot<'_>) -> Result<Self> {
         let mark = output.mark();
         let root = match output.place() {
-            Place::Path(path) => Self::open(DestDir::new_or_create(path.to_path_buf())?)?,
+            Place::Path(path) => Self::open_with(
+                DestDir::new_or_create(path.to_path_buf())?,
+                output.record_budget(),
+            )?,
             Place::Staged(staged) => {
                 // The stage path is internal; the user's destination is named
                 // instead.

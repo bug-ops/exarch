@@ -250,6 +250,7 @@ fn open_leaf(dir: &File, name: &OsStr) -> rustix::io::Result<File> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use crate::formats::run_record::RecordBudget;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -337,7 +338,7 @@ mod tests {
     }
 
     fn ledger_of(path: &std::path::Path) -> RunRecord {
-        let ledger = RunRecord::default();
+        let ledger = RunRecord::new(RecordBudget::Full);
         ledger.insert_identity_for_test(FileIdentity::Known(key_of(path)));
         ledger
     }

@@ -447,7 +447,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        let mut target = HostTarget::create(output.into(), &config)?;
+        let output = output
+            .into()
+            .with_record_budget(options.existing_files.record_budget());
+        let mut target = HostTarget::create(output, &config)?;
         self.extract_into(
             &mut target,
             &config,

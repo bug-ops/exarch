@@ -10,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use super::run_record::RecordBudget;
 use super::run_record::RunRecord;
 use crate::mark::MarkRun;
 
@@ -94,11 +95,26 @@ pub(super) enum Place<'a> {
 pub(crate) struct OutputRoot<'a> {
     place: Place<'a>,
     mark: Option<&'a Rc<MarkRun>>,
+    budget: RecordBudget,
 }
 
 impl<'a> OutputRoot<'a> {
     const fn at(place: Place<'a>) -> Self {
-        Self { place, mark: None }
+        Self {
+            place,
+            mark: None,
+            budget: RecordBudget::Full,
+        }
+    }
+
+    /// The same directory, whose run record keeps `budget`. A staged run keeps
+    /// the ledger the staging layer made, whatever the budget.
+    pub(crate) const fn with_record_budget(self, budget: RecordBudget) -> Self {
+        Self { budget, ..self }
+    }
+
+    pub(super) const fn record_budget(&self) -> RecordBudget {
+        self.budget
     }
 
     /// The same directory, whose files carry the mark of `mark`; `None` marks

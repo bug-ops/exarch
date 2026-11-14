@@ -36,6 +36,7 @@ use crate::formats::file_identity::IdentityCheck;
 use crate::formats::output_root::StagedOutput;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::run_record::RecordBudget;
 use crate::formats::run_record::RunRecord;
 
 const CREATE_ATTEMPTS: usize = 16;
@@ -369,7 +370,7 @@ impl<'p> StagingDir<'p> {
     /// The ledger of a new staging directory. Only a rollback that sweeps
     /// reads it, so only macOS pays for recording every entry.
     fn new_ledger() -> Rc<RunRecord> {
-        Rc::default()
+        Rc::new(RunRecord::new(RecordBudget::Full))
     }
 
     /// Takes the identity of the directory just made as `name` from one

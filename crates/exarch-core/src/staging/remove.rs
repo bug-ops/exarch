@@ -90,6 +90,7 @@ pub(super) enum Outcome {
     Kept,
 }
 
+#[cfg(target_os = "macos")]
 impl Outcome {
     /// `Removed` when `removed` holds.
     pub(super) const fn of(removed: bool) -> Self {

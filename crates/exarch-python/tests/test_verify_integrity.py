@@ -46,7 +46,7 @@ def test_non_positive_budget_is_rejected(budget):
         exarch.VerificationOptions().with_integrity_check(budget)
 
 
-SOLID_7Z = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "solid.7z"
+SOLID_7Z = Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures" / "solid.7z"
 
 
 def test_integrity_gaps_are_none_unless_requested():

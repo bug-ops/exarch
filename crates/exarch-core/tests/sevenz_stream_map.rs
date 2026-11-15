@@ -22,8 +22,7 @@ use exarch_core::verify_archive;
 use tempfile::TempDir;
 
 fn vector() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/streams-without-files-info.7z")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/streams-without-files-info.7z")
 }
 
 fn assert_invalid_archive(result: &Result<impl std::fmt::Debug, ArchiveError>) {

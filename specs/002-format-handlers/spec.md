@@ -34,7 +34,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `~9.4`, locked 9.4.1; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.25.0 (minimum, #1024), `lzma-rust2` 0.25, `globset` 0.4 (create excludes, see [[023-entry-selection-glob-patterns/spec]])
 > **Source**: extracted from [[001-exarch-system/spec]]
 

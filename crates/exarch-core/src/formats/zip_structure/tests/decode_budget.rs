@@ -263,6 +263,7 @@ fn findings_of_ignoring_streams(built: &BuiltZip) -> Vec<ZipInconsistency> {
         crate::Limit::Unbounded,
         ZstdWindowLog::LIBZSTD_DEFAULT,
         crate::formats::zip_reuse::ReusePlan::OFF,
+        &crate::encryption::Credentials::NONE,
     )
     .unwrap()
     .1

@@ -64,7 +64,7 @@ impl ProgressCallback for Events {
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("tests/fixtures")
         .join(name);
     std::fs::read(path).unwrap()
 }

@@ -8,7 +8,7 @@ tags:
   - config
   - rust
 created: 2026-05-20
-updated: 2026-11-14
+updated: 2026-11-15
 status: implemented
 related:
   - "[[constitution]]"
@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / config, creation
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 > [!note] Batch #981 amendments
@@ -210,6 +210,9 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-068 | `SecurityConfig::selection: EntrySelection` (default: every entry, paths kept) SHALL be read by `extract`, `list`, `verify` and every sink; `with_selection` replaces it and `with_path_rewrite(PathRewrite)` replaces its rewrite; an entry is validated under its archive path, then selected, then stripped, and the stripped path is validated again, so a selection never admits a name plain extraction refuses ([[022-extract-entry-selection/spec]], [[023-entry-selection-glob-patterns/spec]]) | must |
 | FR-071 | `DecodeReuse::from_parts(kind: DecodeReuseKind, limit: Option<ReuseLimit>) -> Result<DecodeReuse>` SHALL own the decode-reuse validation for every front end: a limit given with `Off` is refused as `InvalidConfiguration { DecodeReuseLimit, NotSupported }` and a missing limit falls back to `ReuseLimit::DEFAULT`; Python and Node only map their types into it (#1053) | must |
 | FR-072 | The invalid-level message SHALL be owned by core: `invalid compression level: must be 1-9, got {level}` (`{level}` is the integer or fractional value as given, for example `10` or `1.5`, `a non-finite number` for NaN or an infinity, and `an out-of-range integer` for an integer beyond `i64`), used verbatim by the CLI, the Python and Node errors (the FFI arm is the error's `to_string()`); `CompressionLevel: TryFrom<RequestedLevel>` SHALL turn what a caller asked for into a level or `InvalidCompressionLevel`, and the CLI and Python route through it instead of re-validating (#1134) | must |
+| FR-073 | `SecurityConfig` SHALL expose `repeated_paths: RepeatedPaths` (`KeepFirst` default, `Refuse`; `#[non_exhaustive]`, builder `with_repeated_paths`) read by extract, list, verify and the sinks, as specified in [[030-duplicate-entry-repeated-paths/spec]] (#1201) | must |
+| FR-074 | `SecurityConfig` SHALL expose `max_kdf_work` (`NonZeroU64`, default 2^27; a Rust, Python and Node setting, with no CLI flag), and the extract, list, verify and sink requests SHALL take an optional `Password` per request, never stored in the `Clone` and `Debug` `SecurityConfig`, as specified in [[024-encrypted-archive-support/spec]] FR-001 and FR-032 (#1023); the `Password` type sits behind the core `encryption` feature | must |
+| FR-075 | `CreationConfig` SHALL expose `parallelism: Parallelism` (`Sequential` default, `Threads(NonZeroUsize)`; `#[non_exhaustive]`, builder `with_parallelism`) as specified in [[027-zip-parallel-compression/spec]] (#1027) | must |
 
 ## 4. Non-Functional Requirements
 

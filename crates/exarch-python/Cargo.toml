@@ -17,7 +17,7 @@ name = "exarch_pylib"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-exarch-core.workspace = true
+exarch-core = { workspace = true, features = ["encryption"] }
 pyo3.workspace = true
 
 [features]

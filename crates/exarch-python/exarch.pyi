@@ -38,10 +38,11 @@ _ManifestEntryType = Literal["File", "Directory", "Symlink", "Hardlink"]
 _VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
 _CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
 _IntegrityStatus = Literal["OK", "FAILED", "INCOMPLETE", "SKIPPED"]
-_UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "size_ceiling", "uncovered_block_crc", "not_decodable", "no_end_marker", "path_too_long", "descriptor_tail"]  # noqa: E501  # fmt: skip
+_UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "size_ceiling", "uncovered_block_crc", "not_decodable", "no_end_marker", "path_too_long", "encrypted", "descriptor_tail"]  # noqa: E501  # fmt: skip
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_RepeatedPaths = Literal["keep_first", "refuse"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
 _Staging = Literal["in_place", "atomic", "atomic_replace"]
@@ -121,7 +122,7 @@ _QuotaSubCode = Literal[
     "HEADER_ENTRY_COUNT",
 ]
 _ZipBombSubCode = Literal["ENTRY", "SOLID_BLOCK", "SKIPPED_ENTRIES"]
-_SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
+_SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH", "REPEATED_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
@@ -171,6 +172,7 @@ _ConfigSetting = Literal[
     "max_solid_block_memory",
     "max_tar_metadata_bytes",
     "max_decoder_memory",
+    "max_kdf_work",
     "compressed_member_allowance",
     "decompression_budget",
     "allowed_extension",
@@ -185,6 +187,7 @@ _ConfigSetting = Literal[
     "parallel_decode_memory",
     "exclude_pattern",
     "zip_consistency",
+    "repeated_paths",
     "path_model",
     "archive_format",
     "decode_reuse",
@@ -200,7 +203,7 @@ _ConfigSetting = Literal[
     "stored_targets",
     "mark_propagation",
 ]
-_PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
+_PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes", "repeated_paths"]  # noqa: E501  # fmt: skip
 
 @final
 class SecurityConfig:
@@ -340,6 +343,28 @@ class SecurityConfig:
         local and central headers disagree, that repeat a name, overlap entries or hide
         records. ``"ignore"`` keeps the central directory interpretation without
         structural findings. Raises ``ValueError`` for any other string.
+        """
+        ...
+
+    def with_max_kdf_work(self, rounds: int) -> SecurityConfig:
+        """
+        Sets the most SHA-256 rounds of key derivation one operation may spend
+        (default: 2**27).
+
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is ``"max_kdf_work"``.
+        """
+        ...
+
+    def with_repeated_paths(self, policy: _RepeatedPaths) -> SecurityConfig:
+        """
+        Sets how an archive that names one landing twice is handled.
+
+        ``"keep_first"`` (the default, also for ``permissive()``) keeps the first copy
+        and lets the existing-files policy decide every repeat. ``"refuse"`` rejects the
+        archive instead, under every existing-files mode; combine it with
+        ``staging="atomic"`` to leave nothing behind. Raises ``ValueError`` for any
+        other string.
         """
         ...
 
@@ -621,6 +646,20 @@ class SecurityConfig:
 
     @zip_consistency.setter
     def zip_consistency(self, value: _ZipConsistency) -> None: ...
+    @property
+    def max_kdf_work(self) -> int:
+        """Most SHA-256 rounds of key derivation one operation may spend (default: 2**27)."""
+        ...
+
+    @max_kdf_work.setter
+    def max_kdf_work(self, value: int) -> None: ...
+    @property
+    def repeated_paths(self) -> _RepeatedPaths:
+        """How an archive that names one landing twice is handled (default: ``"keep_first"``)."""
+        ...
+
+    @repeated_paths.setter
+    def repeated_paths(self, value: _RepeatedPaths) -> None: ...
     @property
     def allow_solid_archives(self) -> bool:
         """Whether solid 7z archives are allowed (default: False)."""
@@ -1777,6 +1816,7 @@ def extract_archive(
     output_dir: str | Path,
     config: SecurityConfig | None = None,
     options: ExtractionOptions | None = None,
+    password: bytearray | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory.
@@ -1790,6 +1830,15 @@ def extract_archive(
         archive_path: Path to the archive file (str or pathlib.Path)
         output_dir: Directory where files will be extracted (str or pathlib.Path)
         config: Optional SecurityConfig (uses secure defaults if None)
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ExtractionReport with extraction statistics
@@ -1836,6 +1885,7 @@ def extract_archive_with_progress(
     config: SecurityConfig | None = None,
     options: ExtractionOptions | None = None,
     progress: ProgressCallbackFn | None = None,
+    password: bytearray | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory with progress reporting.
@@ -1846,6 +1896,15 @@ def extract_archive_with_progress(
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional ExtractionOptions, as in extract_archive
         progress: Optional callback function for progress updates
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ExtractionReport with extraction statistics
@@ -2001,6 +2060,7 @@ def list_archive(
     config: SecurityConfig | None = None,
     options: ListOptions | None = None,
     destination: str | Path | None = None,
+    password: bytearray | None = None,
 ) -> ArchiveManifest:
     """
     List archive contents without extracting.
@@ -2013,6 +2073,15 @@ def list_archive(
         destination: Optional directory extraction would write to; its volume
             decides whether a repeated name is listed as a duplicate skip or
             as refused in ``ArchiveManifest.dispositions``. Nothing is created
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ArchiveManifest with entry metadata
@@ -2028,6 +2097,7 @@ def verify_archive(
     archive_path: str | Path,
     config: SecurityConfig | None = None,
     options: VerificationOptions | None = None,
+    password: bytearray | None = None,
 ) -> VerificationReport:
     """
     Verify archive security, optionally checking payload integrity.
@@ -2038,6 +2108,15 @@ def verify_archive(
         options: Optional VerificationOptions; pass
             ``VerificationOptions().with_integrity_check()`` to decode the
             payload and verify checksums
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         VerificationReport with validation results
@@ -2804,6 +2883,13 @@ class SecurityViolationError(ArchiveError):
         sub_code: The family of the refusal, set on every violation raised by the
             core (``"PATH_NAME"``, ``"LINK_TARGET"``, ``"ENCRYPTED"``,
             ``"TAR_TRAILER"``, ...); ``None`` only on the class itself.
+        reason: With ``sub_code == "ENCRYPTED"``, why the encrypted archive or
+            entry was refused: ``"password_required"``, ``"wrong_password"``,
+            ``"authentication_failed"`` (tampered or damaged data),
+            ``"wrong_password_or_corrupt"`` (7z has no verifier),
+            ``"weak_encryption_refused"`` (ZipCrypto, 7z raw key) or
+            ``"kdf_cost_exceeded"``; a future core value reads as a plain
+            ``str``; ``None`` for every other violation.
         by: With ``sub_code == "EXISTING_SYMLINK"`` when an entry refused to
             replace a symlink, who made it: ``"existing"`` (there before the run,
             or its maker is unknown) or ``"archive"`` (an earlier entry of the
@@ -2818,6 +2904,7 @@ class SecurityViolationError(ArchiveError):
     warnings: list[AnyExtractionWarning]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None
+    reason: str | None
     by: _OccupiedBy | str | None
 
 class UnsupportedFormatError(ArchiveError):

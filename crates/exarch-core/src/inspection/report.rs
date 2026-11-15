@@ -414,6 +414,10 @@ closed_enum! {
         /// host limits.
         PathTooLong => "path_too_long",
 
+        /// The entry is encrypted and no password was supplied, so its
+        /// content was not decrypted.
+        Encrypted => "encrypted",
+
         /// The data-descriptor tail of a ZIP entry was not searched.
         DescriptorTail => "descriptor_tail",
     }
@@ -432,6 +436,7 @@ impl UnverifiedReason {
             Self::NotDecodable => "not decodable",
             Self::NoEndMarker => "no end-of-archive marker",
             Self::PathTooLong => "path too long for the host",
+            Self::Encrypted => "encrypted, no password supplied",
             Self::DescriptorTail => {
                 "data-descriptor tail not searched (budget, or raw decode disagrees with the zip crate)"
             }
@@ -1522,7 +1527,10 @@ mod tests {
         assert_eq!(issue.ffi_kind(), Some(&quota.ffi_kind()));
         assert_matches!(issue.finding(), Finding::Refusal { .. });
 
-        let policy = ArchiveError::from(Violation::EncryptedArchive);
+        let policy = ArchiveError::from(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         let issue = VerificationIssue::from_error(&policy, None);
         assert_eq!(
             issue.ffi_kind().map(FfiKind::code),
@@ -1550,7 +1558,13 @@ mod tests {
     }
 
     fn issue_of_other_kind() -> VerificationIssue {
-        VerificationIssue::from_error(&ArchiveError::from(Violation::EncryptedArchive), None)
+        VerificationIssue::from_error(
+            &ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None,
+            }),
+            None,
+        )
     }
 
     #[test]
@@ -1824,7 +1838,10 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_security_violation() {
-        let error = ArchiveError::from(Violation::EncryptedArchive);
+        let error = ArchiveError::from(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity(), IssueSeverity::High);
         assert_eq!(issue.category(), IssueCategory::SecurityPolicy);

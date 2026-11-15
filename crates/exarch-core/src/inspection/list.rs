@@ -17,12 +17,12 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::StoredTargets;
 use crate::Violation;
+use crate::encryption::Credentials;
 #[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::common::check_entry_name_limits;
-use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::common::open_archive;
@@ -43,7 +43,7 @@ use crate::formats::sevenz::SevenZKind;
 use crate::formats::sevenz::StoredLinkTarget;
 use crate::formats::sevenz::deliver_undecoded_links;
 use crate::formats::sevenz::is_decode_announced;
-use crate::formats::sevenz::read_sevenz_header;
+use crate::formats::sevenz::open_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
@@ -62,7 +62,8 @@ use crate::formats::tar_metadata_limit::budgeted_reader_with;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::AdmittedZip;
 use crate::formats::zip::ZipEntryKind;
-use crate::formats::zip::is_password_required;
+use crate::formats::zip::encryption_refusal;
+use crate::formats::zip::open_entry;
 use crate::formats::zip::parse_zip_entry_name;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
@@ -108,6 +109,7 @@ pub(crate) fn list_archive<P: AsRef<Path>>(
         config,
         ListOptions::default(),
         &mut NoopProgress,
+        Credentials::NONE,
     )
 }
 
@@ -133,12 +135,15 @@ pub(crate) fn list_archive_with_progress<P: AsRef<Path>>(
     config: &SecurityConfig,
     options: ListOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: Credentials,
 ) -> Result<ArchiveManifest> {
     let config = config.clone();
     let manifest = list_validated(
         archive_path.as_ref(),
         &config,
-        &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
+        &mut ListPass::strict_with(options.stored_targets)
+            .with_credentials(credentials)
+            .with_progress(progress),
     )?;
     progress.on_complete();
     Ok(manifest)
@@ -217,6 +222,7 @@ impl Progress<'_> {
 pub(crate) struct ListPass<'a, 'c> {
     mode: PassMode<'a, 'c>,
     progress: Progress<'a>,
+    credentials: Credentials,
 }
 
 impl<'a, 'c> ListPass<'a, 'c> {
@@ -232,6 +238,7 @@ impl<'a, 'c> ListPass<'a, 'c> {
         Self {
             mode: PassMode::Strict(targets),
             progress: Progress::noop(),
+            credentials: Credentials::NONE,
         }
     }
 
@@ -240,7 +247,20 @@ impl<'a, 'c> ListPass<'a, 'c> {
         Self {
             mode: PassMode::VerifyPreflight(pass),
             progress: Progress::noop(),
+            credentials: Credentials::NONE,
         }
+    }
+
+    /// Opens the archive with `credentials`, so an encrypted entry is
+    /// decrypted instead of refused.
+    pub(crate) fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// The password the archive is opened with.
+    pub(crate) const fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Reports every entry to `callback`.
@@ -496,6 +516,7 @@ fn list_tar_entries<R: std::io::Read>(
             let ListPass {
                 mode: pass_mode,
                 progress,
+                ..
             } = &mut *listing;
             let in_flight = progress.begin(&archive_entry.path)?;
             if let Some(pass) = pass_mode.integrity() {
@@ -583,7 +604,7 @@ fn list_zip(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let file = open_archive(archive_path)?;
-    ZipArchive::new(file, config)?.list_with(config, listing)
+    ZipArchive::open(file, config, listing.credentials().clone())?.list_with(config, listing)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.
@@ -632,18 +653,31 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     let mut manifest = ArchiveManifest::with_selection(ArchiveType::Zip, config.selection.clone());
     let mut quota = QuotaTracker::new();
     let reported = archive.structure().findings().to_vec();
+    let credentials = archive.credentials().clone();
     let archive = archive.reader_mut();
     listing.progress.set_total(archive.len());
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| {
-            if is_password_required(&e) {
-                return encrypted_archive_error();
-            }
-            ArchiveError::from(Malformation::ZipListedEntryUnreadable {
-                detail: e.to_string().into(),
+        let listed_failure = |e: &::zip::result::ZipError| {
+            encryption_refusal(e, &credentials).unwrap_or_else(|| {
+                ArchiveError::from(Malformation::ZipListedEntryUnreadable {
+                    detail: e.to_string().into(),
+                })
             })
-        })?;
+        };
+        // Without a password an encrypted entry is listed from its header and
+        // its content stays unread.
+        let sealed = !credentials.is_supplied()
+            && archive
+                .by_index_raw(i)
+                .map_err(|e| listed_failure(&e))?
+                .encrypted();
+        let mut entry = if sealed {
+            archive.by_index_raw(i)
+        } else {
+            open_entry(archive, i, &credentials)
+        }
+        .map_err(|e| listed_failure(&e))?;
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -696,6 +730,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let ListPass {
             mode: pass_mode,
             progress,
+            ..
         } = &mut *listing;
         let in_flight = progress.begin(&path)?;
         let mut tracked = pass_mode.integrity().map(|pass| {
@@ -706,7 +741,11 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let has_payload = entry_type != ManifestEntryType::Symlink
             && (entry_type != ManifestEntryType::Directory || size > 0);
         let mut descriptor_tail = None;
-        if has_payload && let Some((pass, slot)) = tracked.as_mut() {
+        if sealed {
+            if let Some((pass, _)) = tracked.as_mut() {
+                pass.mark_unverified(UnverifiedReason::Encrypted, &path);
+            }
+        } else if has_payload && let Some((pass, slot)) = tracked.as_mut() {
             let outcome = pass.decode(*slot, &mut entry, size, Charge::Declared, ReadFamily::Zip);
             if matches!(outcome, DecodeOutcome::Verified) {
                 descriptor_tail = DescriptorTail::of(&entry);
@@ -722,11 +761,15 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             tail.check(archive, i, pass, *slot, &path, &reported)?;
         }
 
-        let target = if entry_type == ManifestEntryType::Symlink {
-            let mut sym_entry = archive.by_index(i).map_err(|e| {
-                ArchiveError::from(Malformation::ZipEntryRereadFailed {
-                    index: i,
-                    detail: e.to_string().into(),
+        let target = if sealed {
+            LinkTarget::Missing
+        } else if entry_type == ManifestEntryType::Symlink {
+            let mut sym_entry = open_entry(archive, i, &credentials).map_err(|e| {
+                encryption_refusal(&e, &credentials).unwrap_or_else(|| {
+                    ArchiveError::from(Malformation::ZipEntryRereadFailed {
+                        index: i,
+                        detail: e.to_string().into(),
+                    })
                 })
             })?;
             let declared = sym_entry.size();
@@ -772,7 +815,11 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     config: &SecurityConfig,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let header = read_sevenz_header(&mut source, HeaderLimit::from_config(config))?;
+    let header = open_sevenz_header(
+        &mut source,
+        HeaderLimit::from_config(config),
+        listing.credentials(),
+    )?;
     list_sevenz_parsed(&header, source, config, listing)
 }
 
@@ -795,6 +842,7 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
     let ListPass {
         mode: pass_mode,
         progress,
+        ..
     } = listing;
     let targets = SevenZTargets::of(pass_mode, config.allowed.symlinks.is_allowed());
     let settle_header_targets = |manifest: &mut ArchiveManifest| {
@@ -977,6 +1025,7 @@ fn list_sevenz_archive(
         let ListPass {
             mode: pass_mode,
             progress,
+            ..
         } = &mut *listing;
         let slot = pass_mode
             .integrity()
@@ -1592,13 +1641,9 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { kind }) => {
-                let reason = kind.to_string();
-                assert!(
-                    reason.contains("password-protected"),
-                    "expected 'password-protected' in reason: {reason}"
-                );
-            }
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted { reason, .. },
+            }) => assert_eq!(reason, crate::test_utils::legacy_cipher_refusal()),
             other => panic!("expected SecurityViolation, got: {other:?}"),
         }
     }
@@ -2000,7 +2045,7 @@ mod tests {
         // Cover the encrypted entry check at list.rs line 260
         // (entry.encrypted() == true). ZipCrypto entries succeed at
         // by_index() time but are flagged as encrypted by the entry
-        // metadata, triggering SecurityViolation::EncryptedArchive.
+        // metadata, triggering the `PasswordRequired` refusal.
         use std::io::Write;
         use zip::ZipWriter;
         use zip::unstable::write::FileOptionsExt;
@@ -2065,7 +2110,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_simple() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2079,7 +2124,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_empty() {
-        let path = std::path::Path::new("../../tests/fixtures/empty.7z");
+        let path = std::path::Path::new("tests/fixtures/empty.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert_eq!(
@@ -2096,7 +2141,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_nested_dirs() {
-        let path = std::path::Path::new("../../tests/fixtures/nested-dirs.7z");
+        let path = std::path::Path::new("tests/fixtures/nested-dirs.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(manifest.total_entries() > 0);
@@ -2109,7 +2154,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_encrypted_rejected() {
-        let path = std::path::Path::new("../../tests/fixtures/encrypted.7z");
+        let path = std::path::Path::new("tests/fixtures/encrypted.7z");
         let config = SecurityConfig::default();
         let result = list_archive(path, &config);
         assert!(result.is_err(), "encrypted archive should return an error");
@@ -2124,7 +2169,7 @@ mod tests {
     fn test_list_sevenz_solid() {
         // Solid archives are safe to list (no decompression needed for
         // metadata).
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(manifest.total_entries() > 0, "solid.7z should have entries");
@@ -2132,7 +2177,7 @@ mod tests {
 
     #[test]
     fn test_verify_sevenz_simple() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(
@@ -2144,7 +2189,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_format_field() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert_eq!(
@@ -2238,7 +2283,7 @@ mod tests {
     #[test]
     fn test_list_sevenz_hardlink_reported_as_file() {
         // 7z has no hardlink concept — entries appear as regular files.
-        let path = std::path::Path::new("../../tests/fixtures/hardlink.7z");
+        let path = std::path::Path::new("tests/fixtures/hardlink.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2259,7 +2304,7 @@ mod tests {
         // Entries in solid archives should not have compressed_size=Some(0)
         // with size>0. That combination would trigger a false positive
         // in zip bomb detection.
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         for entry in manifest.entries() {
@@ -2369,7 +2414,7 @@ mod tests {
     fn test_list_sevenz_regular_mode_entry_reported_as_file() {
         // The fixture's link.txt has a regular-file Unix mode, so it is
         // reported as ManifestEntryType::File.
-        let path = std::path::Path::new("../../tests/fixtures/symlink-unix.7z");
+        let path = std::path::Path::new("tests/fixtures/symlink-unix.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2392,7 +2437,7 @@ mod tests {
     fn test_verify_sevenz_solid_no_false_positive() {
         use crate::inspection::report::IssueSeverity;
 
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default().with_allow_solid_archives(true);
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(

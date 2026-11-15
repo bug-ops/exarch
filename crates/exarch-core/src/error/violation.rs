@@ -11,6 +11,8 @@ use std::fmt;
 
 use super::messages::SecurityViolationSubCode;
 use super::types::PolicySetting;
+use crate::closed_enum::closed_enum;
+use crate::inspection::ManifestEntryType;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::PathModel;
 
@@ -126,6 +128,68 @@ impl KindSource {
         match self {
             Self::UnixMode => "Unix mode",
             Self::WindowsAttribute => "Windows attributes",
+        }
+    }
+}
+
+closed_enum! {
+    /// Why an encrypted archive or entry was refused.
+    ///
+    /// Distinguishing a wrong password from tampered data is deliberate:
+    /// whoever holds the archive can guess passwords offline anyway, so a
+    /// caller may retry on [`WrongPassword`](Self::WrongPassword) and
+    /// quarantine on [`AuthenticationFailed`](Self::AuthenticationFailed).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EncryptionRefusal;
+    ///
+    /// assert_eq!(EncryptionRefusal::PasswordRequired.as_str(), "password_required");
+    /// assert!(EncryptionRefusal::ALL.contains(&EncryptionRefusal::KdfCostExceeded));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum EncryptionRefusal {
+        /// The archive or entry is encrypted and no password was supplied.
+        PasswordRequired => "password_required",
+        /// The `WinZip` AES password verifier did not match.
+        WrongPassword => "wrong_password",
+        /// The authentication code did not match: the data was altered, or a
+        /// wrong password passed the short verifier.
+        AuthenticationFailed => "authentication_failed",
+        /// A 7z archive has no verifier: the supplied password plus a CRC or
+        /// decoder failure means a wrong password or corrupt data.
+        WrongPasswordOrCorrupt => "wrong_password_or_corrupt",
+        /// `ZipCrypto`, or the 7z raw-key mode, which exarch refuses as too
+        /// weak.
+        WeakEncryptionRefused => "weak_encryption_refused",
+        /// Deriving the keys would exceed `SecurityConfig::max_kdf_work`.
+        KdfCostExceeded => "kdf_cost_exceeded",
+    }
+}
+
+impl EncryptionRefusal {
+    /// The fixed sentence that states this refusal.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::PasswordRequired => {
+                "the archive is encrypted (password-protected) and no password was supplied"
+            }
+            Self::WrongPassword => "the password is wrong",
+            Self::AuthenticationFailed => {
+                "encrypted data failed authentication: it was altered, or the password is wrong"
+            }
+            Self::WrongPasswordOrCorrupt => {
+                "the password is wrong or the encrypted data is corrupt"
+            }
+            Self::WeakEncryptionRefused => {
+                "the encryption is too weak to accept (ZipCrypto or raw-key 7z)"
+            }
+            Self::KdfCostExceeded => {
+                "key derivation would exceed the max_kdf_work budget of this operation"
+            }
         }
     }
 }
@@ -304,12 +368,12 @@ pub enum Violation {
     RootEntryNotDirectory,
     /// A ZIP root entry that is neither a directory nor an empty file.
     RootEntryNotDirectoryOrEmptyFile,
-    /// The whole archive is password-protected.
-    EncryptedArchive,
-    /// One ZIP entry is encrypted.
-    EncryptedEntry {
-        /// The entry name.
-        name: Box<str>,
+    /// An encrypted archive or entry that exarch refuses.
+    Encrypted {
+        /// Why it was refused.
+        reason: EncryptionRefusal,
+        /// The entry, or `None` when the whole archive is the subject.
+        name: Option<Box<str>>,
     },
     /// A ZIP compression method exarch does not read.
     UnsupportedCompressionMethod {
@@ -387,6 +451,16 @@ pub enum Violation {
         /// The root directory.
         root: Box<str>,
     },
+    /// A landing named by more than one entry while repeated paths are
+    /// refused.
+    RepeatedPath {
+        /// The landing, as displayed.
+        path: Box<str>,
+        /// The kind of the copy that came first.
+        earlier: ManifestEntryType,
+        /// The kind of the entry that arrived later.
+        later: ManifestEntryType,
+    },
 }
 
 impl Violation {
@@ -408,6 +482,7 @@ impl Violation {
             Self::LinksNotAllowed(LinkKind::Hardlink) => Some(PolicySetting::Hardlinks),
             Self::SolidArchive => Some(PolicySetting::SolidArchives),
             Self::TarMetadataBudget { .. } => Some(PolicySetting::MaxTarMetadataBytes),
+            Self::RepeatedPath { .. } => Some(PolicySetting::RepeatedPaths),
             Self::EmptyPath
             | Self::NulInPath { .. }
             | Self::NulInPathArgument
@@ -430,8 +505,7 @@ impl Violation {
             | Self::KindContradiction { .. }
             | Self::RootEntryNotDirectory
             | Self::RootEntryNotDirectoryOrEmptyFile
-            | Self::EncryptedArchive
-            | Self::EncryptedEntry { .. }
+            | Self::Encrypted { .. }
             | Self::UnsupportedCompressionMethod { .. }
             | Self::DeclaredSizeExceeded { .. }
             | Self::DeclaredSizeMismatch { .. }
@@ -482,7 +556,7 @@ impl Violation {
             | Self::UndefinedUnixType { .. }
             | Self::KindContradiction { .. } => C::EntryType,
             Self::RootEntryNotDirectory | Self::RootEntryNotDirectoryOrEmptyFile => C::RootEntry,
-            Self::EncryptedArchive | Self::EncryptedEntry { .. } => C::Encrypted,
+            Self::Encrypted { .. } => C::Encrypted,
             Self::UnsupportedCompressionMethod { .. } => C::CompressionMethod,
             Self::SolidArchive => C::SolidArchive,
             Self::DeclaredSizeExceeded { .. } | Self::DeclaredSizeMismatch { .. } => {
@@ -493,6 +567,7 @@ impl Violation {
             Self::SymlinksUnsupported => C::Platform,
             Self::ConflictUnlessSkipped { .. } | Self::ConflictFails { .. } => C::OutputConflict,
             Self::SourceOutsideRoot { .. } => C::SourcePath,
+            Self::RepeatedPath { .. } => C::RepeatedPath,
         }
     }
 }
@@ -617,11 +692,11 @@ impl fmt::Display for Violation {
             Self::RootEntryNotDirectoryOrEmptyFile => {
                 f.write_str("archive root entry '.' must be a directory or an empty regular file")
             }
-            Self::EncryptedArchive => f.write_str(
-                "archive is encrypted (password-protected). Encrypted archives are not \
-                 supported; decrypt the archive externally and try again.",
-            ),
-            Self::EncryptedEntry { name } => write!(f, "encrypted entry detected: {name}"),
+            Self::Encrypted { reason, name: None } => f.write_str(reason.message()),
+            Self::Encrypted {
+                reason,
+                name: Some(name),
+            } => write!(f, "{}: {name}", reason.message()),
             Self::UnsupportedCompressionMethod { method } => {
                 write!(f, "unsupported compression method: {method}")
             }
@@ -667,6 +742,14 @@ impl fmt::Display for Violation {
             Self::SourceOutsideRoot { path, root } => {
                 write!(f, "path {path} is not under root directory: {root}")
             }
+            Self::RepeatedPath {
+                path,
+                earlier,
+                later,
+            } => write!(
+                f,
+                "path {path} is named twice: a {earlier} entry, then a {later} entry"
+            ),
         }
     }
 }
@@ -831,9 +914,19 @@ mod tests {
                 C::RootEntry,
                 None,
             ),
-            (Violation::EncryptedArchive, C::Encrypted, None),
             (
-                Violation::EncryptedEntry { name: text("n") },
+                Violation::Encrypted {
+                    reason: EncryptionRefusal::PasswordRequired,
+                    name: None,
+                },
+                C::Encrypted,
+                None,
+            ),
+            (
+                Violation::Encrypted {
+                    reason: EncryptionRefusal::WrongPassword,
+                    name: Some(text("n")),
+                },
                 C::Encrypted,
                 None,
             ),
@@ -921,6 +1014,15 @@ mod tests {
                 C::SourcePath,
                 None,
             ),
+            (
+                Violation::RepeatedPath {
+                    path: text("p"),
+                    earlier: ManifestEntryType::File,
+                    later: ManifestEntryType::Symlink,
+                },
+                C::RepeatedPath,
+                Some(PolicySetting::RepeatedPaths),
+            ),
         ]
     }
 
@@ -936,7 +1038,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 47] = [
+    const EXPECTED_TEXT: [&str; 48] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -967,8 +1069,8 @@ mod tests {
         "7z entry is a file but its Unix mode says directory: n",
         "archive root entry '.' must be a directory",
         "archive root entry '.' must be a directory or an empty regular file",
-        "archive is encrypted (password-protected). Encrypted archives are not supported; decrypt the archive externally and try again.",
-        "encrypted entry detected: n",
+        "the archive is encrypted (password-protected) and no password was supplied",
+        "the password is wrong: n",
         "unsupported compression method: m",
         "solid 7z archives are not allowed (enable allow_solid_archives)",
         "decompressed size exceeded the declared uncompressed size of 1 bytes",
@@ -984,6 +1086,7 @@ mod tests {
         "hardlink l points at t, which several entries map to",
         "flattening refuses symlink entries: n",
         "path p is not under root directory: r",
+        "path p is named twice: a File entry, then a Symlink entry",
     ];
 
     #[test]

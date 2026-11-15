@@ -7,7 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/exarch)](https://pypi.org/project/exarch)
 [![npm](https://img.shields.io/npm/v/exarch-rs)](https://www.npmjs.com/package/exarch-rs)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
-[![MSRV](https://img.shields.io/badge/MSRV-1.99.1-blue)](https://github.com/bug-ops/exarch)
+[![MSRV](https://img.shields.io/badge/MSRV-1.100-blue)](https://github.com/bug-ops/exarch)
 
 Memory-safe archive extraction and creation library with Python and Node.js bindings.
 
@@ -37,7 +37,7 @@ exarch-core = "0.10"
 ```
 
 > [!IMPORTANT]
-> Requires Rust 1.99.1 or later (Edition 2024).
+> Requires Rust 1.100 or later (Edition 2024).
 
 ### Python
 
@@ -199,7 +199,7 @@ let config = SecurityConfig::default()
 > ZIP-family formats share the ZIP container but add extra structure - signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) - which exarch doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can state `CreatableFormat::Zip` with `OutputFile::with_format`.
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.
+> 7z creation is not yet supported. Solid 7z archives are rejected for security reasons. Password-protected ZIP (WinZip AES) and 7z (AES-256) archives are read when a password is supplied; ZipCrypto is refused as too weak, and the password is never taken from argv or the environment. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.
 
 ## Project Structure
 
@@ -239,7 +239,7 @@ exarch uses optimized I/O with atomic permission setting to outperform native ar
 
 ### Requirements
 
-- Rust 1.99.1 or later (Edition 2024)
+- Rust 1.100 or later (Edition 2024)
 - Python 3.11+ (for Python bindings)
 - Node.js 20+ (for Node.js bindings)
 

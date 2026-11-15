@@ -1,7 +1,7 @@
 //! Integration tests for ZIP-family formats (JAR, APK, WHL, EPUB, VSIX).
 //!
 //! These exercise real fixture files built by
-//! `tests/fixtures/generate_zip_family_fixtures.sh` at the workspace root.
+//! `tests/fixtures/generate_zip_family_fixtures.sh`.
 //! Each format shares the ZIP container but has its own shape quirks - the
 //! tests below pick the bits that are actually load-bearing for extraction.
 #![allow(clippy::disallowed_methods)]
@@ -29,12 +29,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn fixture(name: &str) -> PathBuf {
-    // Fixtures live at the workspace root, same as the 7z fixtures.
+    // Fixtures ship inside the package, same as the 7z fixtures.
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
         .join("tests/fixtures/zip-family")
         .join(name)
 }

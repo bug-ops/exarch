@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::DestinationStep;
 use crate::EntrySelection;
+use crate::ExistingFiles;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SkipKind;
@@ -25,10 +27,12 @@ use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::is_run_duplicate;
 use crate::formats::occupant::refuse_unless_duplicate;
 use crate::formats::occupant::tree_occupant_refusal;
+use crate::formats::run_record::Maker;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
@@ -403,15 +407,26 @@ impl RunKeys {
             Self::Spelling(spelled) => spelled.contains(rel),
         }
     }
+
+    fn maker(&self, rel: &Path) -> Maker {
+        if self.made_here(rel) {
+            Maker::Run
+        } else {
+            Maker::Unknown
+        }
+    }
 }
 
-/// Skips a repeat of an entry the run made, refuses an occupant it did not.
+/// Refuses a repeat when `repeats` says so, skips a repeat of an entry the run
+/// made, refuses an occupant it did not.
 fn skip_duplicate_or_refuse(
     shape: EntryShape,
     held: Occupant,
     rel: &Path,
     keys: &RunKeys,
+    repeats: RepeatedPaths,
 ) -> Result<Disposition> {
+    refuse_tree_repeat(shape, held, rel, keys, repeats)?;
     refuse_unless_duplicate(
         shape,
         rel,
@@ -420,6 +435,24 @@ fn skip_duplicate_or_refuse(
         OccupiedSite::Detached,
     )
     .map(|_| Disposition::Skip(SkipKind::Duplicate))
+}
+
+/// Refuses `shape` over `held` as extraction does when repeated paths are
+/// refused; a listing holds only what earlier entries delivered.
+fn refuse_tree_repeat(
+    shape: EntryShape,
+    held: Occupant,
+    rel: &Path,
+    keys: &RunKeys,
+    repeats: RepeatedPaths,
+) -> Result<()> {
+    OccupantPolicy::new(ExistingFiles::Skip, repeats).refuse_repeat(
+        shape,
+        rel,
+        held,
+        || keys.maker(rel),
+        OccupiedSite::Detached,
+    )
 }
 
 impl ArchiveManifest {
@@ -804,7 +837,13 @@ fn land(
     };
     match tree.project_landing_found(safe, node.clone(), LandingLimits::Enforced) {
         Ok(Placement::Held { occupant, .. }) if shape != EntryShape::Directory => {
-            skip_duplicate_or_refuse(shape, occupant, safe.as_path(), &state.keys)
+            skip_duplicate_or_refuse(
+                shape,
+                occupant,
+                safe.as_path(),
+                &state.keys,
+                config.repeated_paths,
+            )
         }
         Ok(placement) => {
             if matches!(placement, Placement::New(_)) {
@@ -814,9 +853,14 @@ fn land(
                 placement.into_landing().into_path_buf(),
             )))
         }
-        Err(PlaceError::Conflict(conflict)) => {
-            conflicting_placement(shape, &node, safe.as_path(), conflict, &state.keys)
-        }
+        Err(PlaceError::Conflict(conflict)) => conflicting_placement(
+            shape,
+            &node,
+            safe.as_path(),
+            conflict,
+            &state.keys,
+            config.repeated_paths,
+        ),
         Err(other) => Err(place_error(other)),
     }
 }
@@ -832,11 +876,15 @@ fn conflicting_placement(
     rel: &Path,
     conflict: Conflict,
     keys: &RunKeys,
+    repeats: RepeatedPaths,
 ) -> Result<Disposition> {
     let occupant = conflict.occupant.filter(|_| conflict.blocked.is_none());
+    if let Some(held) = occupant {
+        refuse_tree_repeat(shape, held, rel, keys, repeats)?;
+    }
     match occupant {
         Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
-            skip_duplicate_or_refuse(shape, held, rel, keys)
+            skip_duplicate_or_refuse(shape, held, rel, keys, repeats)
         }
         Some(held) => tree_occupant_refusal(shape, held, rel)
             .map_or_else(|| Err(place_error(PlaceError::Conflict(conflict))), Err),

@@ -33,7 +33,7 @@ const KIB: u64 = 1024;
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("tests/fixtures")
         .join(name);
     std::fs::read(path).unwrap()
 }

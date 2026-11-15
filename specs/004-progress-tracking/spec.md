@@ -28,7 +28,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / report, io
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 > [!note] Batch #981 amendments

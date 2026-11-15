@@ -48,7 +48,7 @@
 //! - **Symlink escape detection** (symlinks must point within extraction
 //!   directory)
 //! - **Permission sanitization** (strips setuid/setgid bits)
-//! - **Encryption rejection** (password-protected archives not supported)
+//! - **Encryption policy** (`WinZip` AES with a password; `ZipCrypto` refused)
 //! - **Structural consistency** (local headers, duplicate names, overlapping
 //!   entries, records and headers the central directory does not account for;
 //!   see [`ZipConsistencyPolicy`] and `zip_structure`)
@@ -72,16 +72,20 @@
 //!
 //! # Password-Protected Archives
 //!
-//! **Security Policy:** Password-protected ZIP archives are **rejected**.
+//! **Security Policy:** with the `encryption` feature, entries encrypted with
+//! `WinZip` AES are decrypted when a password is supplied, then decompressed
+//! and validated like any other entry. `ZipCrypto` (weak cipher, 1-in-256
+//! verifier false accepts) is always refused as `WeakEncryptionRefused`.
 //!
-//! **Rationale:**
-//! - No crypto dependencies (smaller attack surface)
-//! - Clear security boundary (no decryption attempted)
-//! - User must decrypt separately if needed
-//!
-//! Detection:
-//! - Archive-level check in constructor
-//! - Per-entry encryption flag check during extraction
+//! - Opening refuses `ZipCrypto` entries; AES entries pass admission, and a
+//!   listing without a password marks them unverified.
+//! - Extraction without a password fails `PasswordRequired`, and with a wrong
+//!   one `WrongPassword`, before it writes anything.
+//! - An entry is always read to its end, so the AES authentication code is
+//!   checked (`AuthenticationFailed` on mismatch) before the entry is
+//!   published.
+//! - The census cannot see inside an encrypted entry: it neither decodes it nor
+//!   searches its data for hidden records.
 //!
 //! # Examples
 //!
@@ -120,21 +124,27 @@ use crate::EntryTotal;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::Malformation;
+use crate::ManifestEntryType;
 use crate::MemorySink;
 use crate::ProgressCallback;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::VerificationIssue;
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::ZipConsistencyPolicy;
+use crate::ZipInconsistency;
+use crate::encryption::Credentials;
 use crate::security::Compressed;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
 use crate::sink::SinkReuse;
 
 use crate::copy::declared_size_exceeded;
+use crate::formats::occupant::repeated_path_between;
 use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
@@ -149,6 +159,7 @@ use crate::types::safe_path::stream_separator_error;
 use super::common;
 use super::common::EntryCompleteGuard;
 use super::io_marker::IoMarker as _;
+use super::occupant::OccupantPolicy;
 use super::output_root::OutputRoot;
 use super::source_fault::DeclaredSizeCeiling;
 use super::source_fault::ReadFamily;
@@ -374,17 +385,50 @@ fn strip_root(raw: &str) -> &str {
     rest
 }
 
-/// Whether opening a ZIP entry failed because it is encrypted.
+/// Why opening a ZIP entry failed for encryption, or `None` when the failure
+/// has another cause.
 ///
 /// Matches the typed upstream variants so an upstream message change cannot
-/// silently reclassify encrypted archives as merely invalid.
-pub(crate) fn is_password_required(error: &zip::result::ZipError) -> bool {
+/// silently reclassify encrypted archives as merely invalid. A verifier
+/// mismatch is a wrong password only when one was supplied.
+pub(crate) fn encryption_refusal(
+    error: &zip::result::ZipError,
+    credentials: &Credentials,
+) -> Option<ArchiveError> {
     use zip::result::ZipError;
 
-    matches!(
-        error,
-        ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED) | ZipError::InvalidPassword
-    )
+    let reason = match error {
+        ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED) => {
+            crate::EncryptionRefusal::PasswordRequired
+        }
+        ZipError::InvalidPassword if credentials.is_supplied() => {
+            crate::EncryptionRefusal::WrongPassword
+        }
+        ZipError::InvalidPassword => crate::EncryptionRefusal::PasswordRequired,
+        _ => return None,
+    };
+    Some(Violation::Encrypted { reason, name: None }.into())
+}
+
+/// Opens entry `index` for reading, decrypting it when `credentials` hold a
+/// password and the entry is encrypted.
+pub(crate) fn open_entry<'a, R: Read + Seek>(
+    archive: &'a mut ZipReader<R>,
+    index: usize,
+    credentials: &Credentials,
+) -> zip::result::ZipResult<zip::read::ZipFile<'a, R>> {
+    match credentials.zip_secret() {
+        Some(secret) => archive.by_index_decrypt(index, secret),
+        None => archive.by_index(index),
+    }
+}
+
+/// Whether the entry is encrypted with `WinZip` AES, as opposed to the legacy
+/// `ZipCrypto` scheme exarch refuses.
+pub(crate) fn is_aes_entry<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> bool {
+    use zip::HasZipMetadata as _;
+
+    entry.get_metadata().aes_settings().is_some()
 }
 
 /// A ZIP archive that passed [`ZipArchive::check_admission`] under a config:
@@ -413,6 +457,11 @@ impl<R: Read + Seek> AdmittedZip<'_, R> {
     /// What the structural census found when the archive was opened.
     pub(crate) const fn structure(&self) -> &ZipStructure {
         &self.archive.structure
+    }
+
+    /// The password the archive was opened with.
+    pub(crate) const fn credentials(&self) -> &Credentials {
+        &self.archive.credentials
     }
 }
 
@@ -460,7 +509,7 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
 /// - ZIP format (PKZIP 2.0+)
 /// - Compression methods: stored, deflate, deflate64, bzip2, zstd
 /// - Unix symlinks via extended attributes
-/// - Password-protected archive detection (rejected)
+/// - `WinZip` AES entries with a password (`ZipCrypto` refused)
 ///
 /// # Central Directory
 ///
@@ -478,6 +527,7 @@ pub(crate) struct ZipArchive<R: Read + Seek> {
     structure: ZipStructure,
     /// The policy the census ran under and every operation enforces.
     config: Arc<SecurityConfig>,
+    credentials: Credentials,
 }
 
 impl<R: Read + Seek> ZipArchive<R> {
@@ -486,7 +536,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// The reader must support both `Read` and `Seek` because ZIP archives
     /// have a central directory at the end that must be parsed first.
     ///
-    /// Opening runs the checks that need no policy: encrypted entries,
+    /// Opening runs the checks that need no policy: `ZipCrypto` entries,
     /// unsupported compression methods and declared compressed sizes that do
     /// not fit in the archive are rejected, and the archive's structure is
     /// inspected (local versus central headers, duplicate names, overlapping
@@ -504,9 +554,25 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Returns an error if:
     /// - File is not a valid ZIP archive
     /// - Central directory is corrupted, or changes while it is being read
-    /// - Archive is password-protected (rejected for security)
+    /// - An entry is encrypted with `ZipCrypto`
+    #[cfg(test)]
     pub(crate) fn new(reader: R, config: &SecurityConfig) -> Result<Self> {
-        Self::open_for(reader, config, DecodeReuse::Off)
+        Self::open(reader, config, Credentials::default())
+    }
+
+    /// Opens a ZIP archive under `config`, decrypting its AES entries with
+    /// `credentials`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ZipArchive::new`], plus the typed refusals of an encrypted
+    /// entry: no password, `ZipCrypto`.
+    pub(crate) fn open(
+        reader: R,
+        config: &SecurityConfig,
+        credentials: Credentials,
+    ) -> Result<Self> {
+        Self::open_for(reader, config, DecodeReuse::Off, credentials)
     }
 
     /// Opens `reader` for an extraction into a directory, keeping the output
@@ -520,8 +586,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         reader: R,
         config: &SecurityConfig,
         reuse: DecodeReuse,
+        credentials: Credentials,
     ) -> Result<Self> {
-        Self::open_for(reader, config, reuse)
+        Self::open_for(reader, config, reuse, credentials)
     }
 
     /// Opens `reader` for an extraction into a sink that shares its memory
@@ -533,16 +600,26 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// # Errors
     ///
     /// Same as [`ZipArchive::new`].
-    pub(crate) fn for_sink(reader: R, config: &SecurityConfig, reuse: &SinkReuse) -> Result<Self> {
+    pub(crate) fn for_sink(
+        reader: R,
+        config: &SecurityConfig,
+        reuse: &SinkReuse,
+        credentials: Credentials,
+    ) -> Result<Self> {
         let limit = ReuseLimit::new(reuse.limit.bytes());
-        let mut archive = Self::open_for(reader, config, DecodeReuse::Memory(limit))?;
+        let mut archive = Self::open_for(reader, config, DecodeReuse::Memory(limit), credentials)?;
         if let Some(store) = archive.structure.reuse_mut() {
             store.share_limit_with_sink(reuse.usage.clone(), reuse.limit.bytes().get());
         }
         Ok(archive)
     }
 
-    fn open_for(reader: R, config: &SecurityConfig, reuse: DecodeReuse) -> Result<Self> {
+    fn open_for(
+        reader: R,
+        config: &SecurityConfig,
+        reuse: DecodeReuse,
+        credentials: Credentials,
+    ) -> Result<Self> {
         let checks = zip_structure::StreamChecks::of(config.zip_consistency);
         let (inner, structure) = zip_structure::open_with(
             reader,
@@ -550,11 +627,13 @@ impl<R: Read + Seek> ZipArchive<R> {
             config.max_total_size,
             ZstdWindowLog::of(config),
             ReusePlan::of(reuse, config),
+            &credentials,
         )?;
         Ok(Self {
             inner,
             structure,
             config: Arc::new(config.clone()),
+            credentials,
         })
     }
 
@@ -693,12 +772,25 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Admits the archive and applies the structural policy.
     fn admit_structure(&mut self, config: &SecurityConfig) -> Result<AdmittedZip<'_, R>> {
         let admitted = self.check_admission(config)?;
-        if config.zip_consistency == ZipConsistencyPolicy::Enforce
-            && let Some(finding) = admitted.archive.structure.findings().first()
-        {
-            return Err(ArchiveError::ZipInconsistency(finding.clone()));
+        let findings = admitted.archive.structure.findings();
+        let enforced = match config.zip_consistency {
+            ZipConsistencyPolicy::Enforce => findings.first(),
+            ZipConsistencyPolicy::Ignore => None,
+        };
+        let repeated = match config.repeated_paths {
+            RepeatedPaths::Refuse => findings.iter().find_map(duplicate_name),
+            RepeatedPaths::KeepFirst => None,
+        };
+        // A forced repeat takes the place of the duplicate finding it is
+        // (first under `Enforce`), never of another finding that comes first.
+        match (enforced, repeated) {
+            (Some(finding), Some(name)) if duplicate_name(finding).is_some() => {
+                Err(repeated_name_refusal(name))
+            }
+            (Some(finding), _) => Err(ArchiveError::ZipInconsistency(finding.clone())),
+            (None, Some(name)) => Err(repeated_name_refusal(name)),
+            (None, None) => Ok(admitted),
         }
-        Ok(admitted)
     }
 
     /// Checks the structural policy and returns the archive bound to `config`
@@ -708,7 +800,46 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &'a SecurityConfig,
     ) -> Result<CheckedZip<'a, R>> {
         let admitted = self.admit_structure(config)?;
+        admitted.archive.verify_password()?;
         Ok(CheckedZip { admitted, config })
+    }
+
+    /// Refuses an extraction that cannot decrypt every encrypted entry, before
+    /// anything is written: without a password, or with one that does not match
+    /// an entry's verifier. Each entry is opened once with the password, which
+    /// derives its key (1000 PBKDF2 rounds) and checks the 2-byte verifier; the
+    /// authentication code is checked when the entry is read.
+    fn verify_password(&mut self) -> Result<()> {
+        let Some(name) = self.structure.first_encrypted() else {
+            return Ok(());
+        };
+        if !self.credentials.is_supplied() {
+            return Err(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: Some(name.into()),
+            }
+            .into());
+        }
+        let open_failed = |index: usize, error: &zip::result::ZipError| {
+            encryption_refusal(error, &self.credentials).unwrap_or_else(|| {
+                ArchiveError::from(Malformation::ZipEntryOpenFailed {
+                    index,
+                    detail: error.to_string().into(),
+                })
+            })
+        };
+        for index in 0..self.inner.len() {
+            let encrypted = self
+                .inner
+                .by_index_raw(index)
+                .map_err(|e| open_failed(index, &e))?
+                .encrypted();
+            if encrypted {
+                open_entry(&mut self.inner, index, &self.credentials)
+                    .map_err(|e| open_failed(index, &e))?;
+            }
+        }
+        Ok(())
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
@@ -743,12 +874,12 @@ impl<R: Read + Seek> ZipArchive<R> {
         claimed: Option<(Taken, RetainKey)>,
         source: &SourceTap,
     ) -> Result<()> {
-        if zip_file.encrypted() {
-            let name = zip_file
-                .name()
-                .map_or_else(|_| format!("<entry {index}>"), std::borrow::Cow::into_owned);
-            return Err(Violation::EncryptedEntry { name: name.into() }.into());
-        }
+        let faults = ReadFaults::new(ReadFamily::Zip, Some(source));
+        let faults = if zip_file.encrypted() {
+            faults.decrypting(crate::EncryptionRefusal::AuthenticationFailed)
+        } else {
+            faults
+        };
 
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
 
@@ -771,10 +902,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 target.directory(&safe_path, &mut ctx.tally)?;
             }
         } else if entry_kind == ZipEntryKind::Symlink {
-            let link_target = ZipEntryAdapter::read_symlink_target(
-                &mut zip_file,
-                ReadFaults::new(ReadFamily::Zip, Some(source)),
-            )?;
+            let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file, faults)?;
             drop(zip_file);
             if let Admission::Admit(safe_symlink) =
                 target.validate_symlink(&path, &link_target, size, &mut ctx.tally)?
@@ -800,12 +928,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                         ),
                         Err(e) => Err(ArchiveError::Io(e)),
                     },
-                    _ => target.file(
-                        &mut zip_file,
-                        ReadFaults::new(ReadFamily::Zip, Some(source)),
-                        admitted,
-                        &mut ctx.tally,
-                    ),
+                    _ => target.file(&mut zip_file, faults, admitted, &mut ctx.tally),
                 };
                 written
                     .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size.0))?;
@@ -828,6 +951,28 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 }
 
+/// The shared name of a duplicate-name finding.
+fn duplicate_name(finding: &ZipInconsistency) -> Option<&str> {
+    match finding {
+        ZipInconsistency::DuplicateName { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// The refusal of a name the central directory repeats, when repeated paths
+/// are refused.
+///
+/// ASSUMPTION: the finding carries no entry kinds, so both copies take the
+/// kind the name spells (a trailing `/` is a directory).
+fn repeated_name_refusal(name: &str) -> ArchiveError {
+    let kind = if name.ends_with('/') {
+        ManifestEntryType::Directory
+    } else {
+        ManifestEntryType::File
+    };
+    repeated_path_between(Path::new(name.trim_end_matches('/')), kind, kind)
+}
+
 impl<R: Read + Seek> ZipArchive<R> {
     /// Runs the extraction loop against `target`: the validation gates are the
     /// same whether it writes to the filesystem or to an entry sink.
@@ -839,23 +984,22 @@ impl<R: Read + Seek> ZipArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
+        let options = options.under(config);
 
         let mut report = ExtractionReport::new();
 
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            let zip_file = match self.inner.by_index(i) {
+            let zip_file = match open_entry(&mut self.inner, i, &self.credentials) {
                 Ok(f) => f,
                 Err(e) => {
-                    let err = if is_password_required(&e) {
-                        common::encrypted_archive_error()
-                    } else {
+                    let err = encryption_refusal(&e, &self.credentials).unwrap_or_else(|| {
                         ArchiveError::from(Malformation::ZipEntryOpenFailed {
                             index: i,
                             detail: e.to_string().into(),
                         })
-                    };
+                    });
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
@@ -927,9 +1071,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let output = output
-            .into()
-            .with_record_budget(options.existing_files.record_budget());
+        let output = output.into().with_record_budget(
+            OccupantPolicy::new(options.existing_files, config.repeated_paths).record_budget(),
+        );
         self.check_structure(config)?.extract_with(
             |config| HostTarget::create(output, config),
             SinkOptions::existing_files_of(options),
@@ -985,13 +1129,40 @@ impl<R: Read + Seek> ZipArchive<R> {
         let listed = list_for_verify(config, options, progress, |listing| {
             list_zip_reader(&mut admitted, config, listing)
         })?;
-        let (findings, omitted) = match config.zip_consistency {
-            ZipConsistencyPolicy::Enforce => {
-                (self.structure.findings(), self.structure.omitted_findings())
-            }
-            ZipConsistencyPolicy::Ignore => (&[][..], 0),
+        let refusing = config.repeated_paths == RepeatedPaths::Refuse;
+        let repeats: Vec<_> = if refusing {
+            self.structure
+                .findings()
+                .iter()
+                .find_map(duplicate_name)
+                .map(|name| VerificationIssue::from_error(&repeated_name_refusal(name), None))
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
         };
-        let structure = ArchiveStructure::new(self.structure.central_entries(), findings, omitted);
+        // A repeated name is reported once, as the refusal extraction gives,
+        // not also as the structure finding it came from.
+        let (findings, omitted): (std::borrow::Cow<'_, [ZipInconsistency]>, usize) =
+            match (config.zip_consistency, refusing) {
+                (ZipConsistencyPolicy::Enforce, false) => (
+                    self.structure.findings().into(),
+                    self.structure.omitted_findings(),
+                ),
+                (ZipConsistencyPolicy::Enforce, true) => (
+                    self.structure
+                        .findings()
+                        .iter()
+                        .filter(|finding| duplicate_name(finding).is_none())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into(),
+                    self.structure.omitted_findings(),
+                ),
+                (ZipConsistencyPolicy::Ignore, _) => (Vec::new().into(), 0),
+            };
+        let structure = ArchiveStructure::new(self.structure.central_entries(), &findings, omitted)
+            .with_refusals(&repeats);
         Ok(verify_manifest_with_structure(
             &listed.manifest,
             config,
@@ -1053,9 +1224,14 @@ impl ZipEntryAdapter {
         #[allow(clippy::cast_possible_truncation)]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file
-            .take(common::MAX_STORED_SYMLINK_TARGET)
+            .take(common::MAX_STORED_SYMLINK_TARGET + 1)
             .read_to_end(&mut target_bytes)
             .map_err(|e| faults.classify_symlink_read(e))?;
+        // Reading past the declared size reaches the entry's end, so the CRC or
+        // the AES authentication code is checked even for a full-length target.
+        if target_bytes.len() as u64 > size {
+            return Err(common::symlink_target_too_large(target_bytes.len() as u64));
+        }
 
         common::symlink_target_from_bytes(&target_bytes)
     }
@@ -1179,21 +1355,45 @@ impl TryFrom<zip::CompressionMethod> for ZipMethod {
 
 /// Admission check shared by extraction and listing for every ZIP entry.
 ///
-/// Rejects encrypted entries, charges the declared compressed size against
-/// `budget`, and parses the compression method, so `extract`, `list` and
-/// `verify` accept exactly the same set of entries.
+/// Refuses an encrypted entry that does not use `WinZip` AES (`ZipCrypto` is
+/// too weak to accept; without the `encryption` feature no encrypted entry can
+/// be read), charges the declared compressed size against `budget`, and parses
+/// the compression method, so `extract`, `list` and `verify` accept exactly the
+/// same set of entries. Whether a password is needed is decided where the
+/// entry is read: extraction refuses before it writes, a listing marks the
+/// entry unverified.
 ///
 /// # Errors
 ///
-/// Returns the encrypted-archive error, `InvalidArchive` when the declared
-/// size exceeds the budget, or `SecurityViolation` for an unsupported method.
+/// Returns the typed encryption refusal (`WeakEncryptionRefused` for
+/// `ZipCrypto`, `PasswordRequired` without the `encryption` feature),
+/// `InvalidArchive` when the declared size exceeds the budget, or
+/// `SecurityViolation` for an unsupported method.
 pub(crate) fn admit_zip_entry<R: Read>(
     entry: &zip::read::ZipFile<'_, R>,
     budget: &mut DeclaredCompressedBudget,
 ) -> Result<()> {
     if entry.encrypted() {
-        return Err(common::encrypted_archive_error());
+        let reason = if !cfg!(feature = "encryption") {
+            crate::EncryptionRefusal::PasswordRequired
+        } else if !is_aes_entry(entry) {
+            crate::EncryptionRefusal::WeakEncryptionRefused
+        } else {
+            return admit_payload(entry, budget);
+        };
+        return Err(Violation::Encrypted {
+            reason,
+            name: Some(crate::bytes_text(entry.name_raw()).into()),
+        }
+        .into());
     }
+    admit_payload(entry, budget)
+}
+
+fn admit_payload<R: Read>(
+    entry: &zip::read::ZipFile<'_, R>,
+    budget: &mut DeclaredCompressedBudget,
+) -> Result<()> {
     budget.charge(entry.compressed_size())?;
     ZipMethod::try_from(entry.compression()).map(drop)
 }
@@ -2330,17 +2530,26 @@ mod tests {
     }
 
     #[test]
-    fn test_is_password_required_matches_typed_variants_only() {
+    fn test_encryption_refusal_matches_typed_variants_only() {
         use ::zip::result::ZipError;
 
-        assert!(is_password_required(&ZipError::UnsupportedArchive(
-            ZipError::PASSWORD_REQUIRED
-        )));
-        assert!(is_password_required(&ZipError::InvalidPassword));
-        assert!(!is_password_required(&ZipError::FileNotFound));
-        assert!(!is_password_required(&ZipError::UnsupportedArchive(
-            "password mentioned elsewhere"
-        )));
+        let none = Credentials::default();
+        assert!(
+            encryption_refusal(
+                &ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED),
+                &none
+            )
+            .is_some()
+        );
+        assert!(encryption_refusal(&ZipError::InvalidPassword, &none).is_some());
+        assert!(encryption_refusal(&ZipError::FileNotFound, &none).is_none());
+        assert!(
+            encryption_refusal(
+                &ZipError::UnsupportedArchive("password mentioned elsewhere"),
+                &none
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2508,12 +2717,11 @@ mod tests {
             panic!("expected error for encrypted ZIP, got Ok");
         };
         match err {
-            ArchiveError::SecurityViolation { kind } => {
-                let reason = kind.to_string();
-                assert!(
-                    reason.contains("password") || reason.contains("encrypted"),
-                    "expected password/encryption mention in reason: {reason}"
-                );
+            ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted { reason, name },
+            } => {
+                assert_eq!(reason, crate::test_utils::legacy_cipher_refusal());
+                assert_eq!(name.as_deref(), Some("secret.txt"));
             }
             other => panic!("expected SecurityViolation, got: {other}"),
         }
@@ -2555,13 +2763,9 @@ mod tests {
             "archive with encrypted entry at index 3 must be rejected"
         );
         match result.err().unwrap() {
-            ArchiveError::SecurityViolation { kind } => {
-                let reason = kind.to_string();
-                assert!(
-                    reason.contains("password") || reason.contains("encrypted"),
-                    "unexpected reason: {reason}"
-                );
-            }
+            ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted { reason, .. },
+            } => assert_eq!(reason, crate::test_utils::legacy_cipher_refusal()),
             other => panic!("expected SecurityViolation, got: {other}"),
         }
     }
@@ -2769,6 +2973,7 @@ mod tests {
             inner,
             structure,
             config: Arc::new(config),
+            credentials: Credentials::NONE,
         };
         let temp = TempDir::new().unwrap();
 

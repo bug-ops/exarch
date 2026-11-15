@@ -82,6 +82,8 @@ closed_enum! {
         WindowsReservedNames => "windows_reserved_names",
         /// `SecurityConfig::with_max_tar_metadata_bytes`.
         MaxTarMetadataBytes => "max_tar_metadata_bytes",
+        /// `SecurityConfig::with_repeated_paths`.
+        RepeatedPaths => "repeated_paths",
     }
 }
 
@@ -863,7 +865,10 @@ pub enum ArchiveError {
 /// use exarch_core::PartialWrites;
 /// use exarch_core::Violation;
 ///
-/// let cause = ArchiveError::from(Violation::EncryptedArchive);
+/// let cause = ArchiveError::from(Violation::Encrypted {
+///     reason: exarch_core::EncryptionRefusal::PasswordRequired,
+///     name: None,
+/// });
 /// let inner = Partial::new(cause, ExtractionReport::default(), PartialWrites::Kept);
 /// let outer = Partial::new(
 ///     ArchiveError::PartialExtraction(inner),
@@ -1168,7 +1173,11 @@ impl ArchiveError {
     /// use exarch_core::Violation;
     ///
     /// assert_eq!(
-    ///     ArchiveError::from(Violation::EncryptedArchive).relaxable_by(),
+    ///     ArchiveError::from(Violation::Encrypted {
+    ///         reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///         name: None
+    ///     })
+    ///     .relaxable_by(),
     ///     None
     /// );
     /// ```
@@ -1258,8 +1267,17 @@ impl ArchiveError {
     /// use exarch_core::ArchiveError;
     /// use exarch_core::Violation;
     ///
-    /// let err = ArchiveError::from(Violation::EncryptedArchive);
-    /// assert_eq!(err.security_violation(), Some(&Violation::EncryptedArchive));
+    /// let err = ArchiveError::from(Violation::Encrypted {
+    ///     reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///     name: None,
+    /// });
+    /// assert_eq!(
+    ///     err.security_violation(),
+    ///     Some(&Violation::Encrypted {
+    ///         reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///         name: None
+    ///     })
+    /// );
     /// ```
     #[must_use]
     pub fn security_violation(&self) -> Option<&Violation> {
@@ -1532,7 +1550,10 @@ impl ArchiveError {
     /// use exarch_core::Violation;
     ///
     /// let err = ArchiveError::PartialExtraction(Partial::new(
-    ///     ArchiveError::from(Violation::EncryptedArchive),
+    ///     ArchiveError::from(Violation::Encrypted {
+    ///         reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///         name: None,
+    ///     }),
     ///     ExtractionReport::default(),
     ///     PartialWrites::Kept,
     /// ));
@@ -1825,7 +1846,10 @@ mod tests {
     #[test]
     fn test_discarded_marks_only_partial_extractions() {
         let partial = ArchiveError::PartialExtraction(crate::Partial::new(
-            ArchiveError::from(Violation::EncryptedArchive),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None,
+            }),
             crate::ExtractionReport::default(),
             PartialWrites::Kept,
         ));
@@ -1834,7 +1858,11 @@ mod tests {
             ArchiveError::PartialExtraction(partial) if partial.writes() == PartialWrites::Discarded
         );
         assert_matches!(
-            ArchiveError::from(Violation::EncryptedArchive).discarded(),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None
+            })
+            .discarded(),
             ArchiveError::SecurityViolation { .. }
         );
     }
@@ -1897,7 +1925,10 @@ mod tests {
         ));
         assert!(err.is_security_violation());
 
-        let err = ArchiveError::from(Violation::EncryptedArchive);
+        let err = ArchiveError::from(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         assert!(err.is_security_violation());
 
         // Not security violations
@@ -1918,7 +1949,10 @@ mod tests {
         };
         assert!(err.is_recoverable());
 
-        let err = ArchiveError::from(Violation::EncryptedArchive);
+        let err = ArchiveError::from(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         assert!(err.is_recoverable());
 
         // Non-recoverable errors
@@ -2245,7 +2279,10 @@ mod tests {
             ..crate::ExtractionReport::default()
         };
         Partial::new(
-            ArchiveError::from(Violation::EncryptedArchive),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None,
+            }),
             report,
             writes,
         )
@@ -2268,7 +2305,11 @@ mod tests {
     #[test]
     fn a_leftover_survives_nesting_and_marks_a_plain_error_as_rolled_back() {
         let leftover = || Some(crate::StagingLeftover::new("out/.exarch-1".into()));
-        let inner = ArchiveError::from(Violation::EncryptedArchive).rolled_back_with(leftover());
+        let inner = ArchiveError::from(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: None,
+        })
+        .rolled_back_with(leftover());
         let ArchiveError::PartialExtraction(inner) = inner else {
             panic!("a leftover wraps a plain error");
         };
@@ -2583,7 +2624,10 @@ mod tests {
                 Classes::of(true, false).quota(),
             ),
             (
-                ArchiveError::from(Violation::EncryptedArchive),
+                ArchiveError::from(Violation::Encrypted {
+                    reason: crate::EncryptionRefusal::PasswordRequired,
+                    name: None,
+                }),
                 Classes::of(true, true).with_context().typed_violation(),
             ),
             (

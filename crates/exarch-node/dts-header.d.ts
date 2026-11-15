@@ -211,6 +211,8 @@ export interface ExarchInvalidArchiveDetail {
 export interface ExarchSecurityViolationDetail {
   code: 'SECURITY_VIOLATION'
   subCode: SecurityViolationSubCode
+  /** On `subCode === 'ENCRYPTED'` only: why the encrypted archive or entry was refused (`'password_required'`, `'wrong_password'`, `'authentication_failed'`, `'wrong_password_or_corrupt'`, `'weak_encryption_refused'`, `'kdf_cost_exceeded'`); a token newer than this binding reads as a plain string. */
+  reason?: 'password_required' | 'wrong_password' | 'authentication_failed' | 'wrong_password_or_corrupt' | 'weak_encryption_refused' | 'kdf_cost_exceeded' | (string & {})
   relaxableBy?: PolicySetting
   setting?: undefined
   ioKind?: undefined

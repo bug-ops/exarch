@@ -26,6 +26,7 @@ use exarch_core::CreationConfig;
 use exarch_core::Durability;
 use exarch_core::EntryPattern;
 use exarch_core::OutputFile;
+use exarch_core::Parallelism;
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
@@ -33,6 +34,7 @@ use std::hint::black_box;
 use std::io::Cursor;
 use std::io::Seek;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -730,6 +732,16 @@ fn benchmark_zip_parallel_prototype(c: &mut Criterion) {
         if label == "deflate" {
             let config = CreationConfig::default();
             group.bench_function("exarch_sequential", |b| {
+                b.iter(|| {
+                    create_unsynced(&output, &[&source_dir], &config);
+                    fs::remove_file(&output).unwrap();
+                });
+            });
+        }
+        if label == "deflate" {
+            let config = CreationConfig::default()
+                .with_parallelism(Parallelism::Threads(NonZeroUsize::new(4).unwrap()));
+            group.bench_function("exarch_threads_4", |b| {
                 b.iter(|| {
                     create_unsynced(&output, &[&source_dir], &config);
                     fs::remove_file(&output).unwrap();

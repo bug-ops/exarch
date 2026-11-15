@@ -9,25 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { extractArchiveSync, SecurityConfig, ExtractionOptions } = require('../index.js');
-
-function tarEntry({ name, type = '0', data = Buffer.alloc(0) }) {
-  const header = Buffer.alloc(512);
-  header.write(name, 0);
-  header.write('0000644\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
-  header.write('00000000000\0', 136);
-  header.write(type, 156);
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  header.fill(0x20, 148, 156);
-  const sum = header.reduce((acc, byte) => acc + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
+const { tarEntry, tarArchive } = require('./helpers/archives.js');
 
 describe('typed occupant refusal', () => {
   let tempDir;
@@ -45,7 +27,7 @@ describe('typed occupant refusal', () => {
 
   function extractFailure(entries, config = null, options = null) {
     const archive = path.join(tempDir, 'a.tar');
-    fs.writeFileSync(archive, Buffer.concat([...entries.map(tarEntry), Buffer.alloc(1024)]));
+    fs.writeFileSync(archive, tarArchive(entries.map(tarEntry)));
     try {
       extractArchiveSync(archive, out, config, options);
     } catch (err) {

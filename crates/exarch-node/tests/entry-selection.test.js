@@ -19,31 +19,11 @@ const {
   verifyArchiveSync,
   verifyArchiveBytesSync,
 } = require('../index.js');
+const { tarEntry, tarArchive } = require('./helpers/archives.js');
 
-function tarEntry(name, { type = '0', text = '', link = '' } = {}) {
-  const data = Buffer.from(text);
-  const header = Buffer.alloc(512);
-  header.write(name, 0);
-  header.write('0000644\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
-  header.write('00000000000\0', 136);
-  header.write(type, 156);
-  header.write(link, 157);
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  header.fill(0x20, 148, 156);
-  const sum = header.reduce((acc, byte) => acc + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
-
-const dir = (name) => tarEntry(name, { type: '5' });
-const file = (name, text = name) => tarEntry(name, { text });
-const tarOf = (...entries) => Buffer.concat([...entries, Buffer.alloc(1024)]);
+const dir = (name) => tarEntry({ name, type: '5' });
+const file = (name, text = name) => tarEntry({ name, data: Buffer.from(text) });
+const tarOf = (...entries) => tarArchive(entries);
 
 const TREE = tarOf(
   dir('top/'),
@@ -283,7 +263,7 @@ describe('entry selection', () => {
     });
 
     it('refuses a selected symlink under flatten instead of skipping it', () => {
-      const links = tarOf(file('d/f.txt'), tarEntry('d/ln', { type: '2', link: 'f.txt' }));
+      const links = tarOf(file('d/f.txt'), tarEntry({ name: 'd/ln', type: '2', link: 'f.txt' }));
       const linksPath = path.join(tempDir, 'links.tar');
       fs.writeFileSync(linksPath, links);
       const config = new SecurityConfig().withAllowSymlinks(true).withFlatten(true);
@@ -294,7 +274,7 @@ describe('entry selection', () => {
     });
 
     it('refuses a hardlink whose target the selection leaves out', () => {
-      const links = tarOf(file('t.txt'), tarEntry('h', { type: '1', link: 't.txt' }));
+      const links = tarOf(file('t.txt'), tarEntry({ name: 'h', type: '1', link: 't.txt' }));
       const linksPath = path.join(tempDir, 'hard.tar');
       fs.writeFileSync(linksPath, links);
       const config = new SecurityConfig().withAllowHardlinks(true).addIncludePattern('h');
@@ -308,7 +288,7 @@ describe('entry selection', () => {
       const links = tarOf(
         file('x/a.txt', 'one'),
         file('y/a.txt', 'two'),
-        tarEntry('x/h', { type: '1', link: 'x/a.txt' })
+        tarEntry({ name: 'x/h', type: '1', link: 'x/a.txt' })
       );
       const linksPath = path.join(tempDir, 'ambiguous.tar');
       fs.writeFileSync(linksPath, links);
@@ -445,7 +425,7 @@ describe('entry selection', () => {
     });
 
     it('reports a hardlink to an unselected target as an issue, as extract refuses it', () => {
-      const links = tarOf(file('t.txt'), tarEntry('h', { type: '1', link: 't.txt' }));
+      const links = tarOf(file('t.txt'), tarEntry({ name: 'h', type: '1', link: 't.txt' }));
       const config = new SecurityConfig().withAllowHardlinks(true).addIncludePattern('h');
       const report = verifyArchiveBytesSync(links, config);
       assert.strictEqual(report.status, 'FAIL');

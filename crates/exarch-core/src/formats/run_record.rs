@@ -26,6 +26,11 @@
 //! [`ArchiveManifest::dispositions_on`]: crate::ArchiveManifest::dispositions_on
 //! [`VolumeIdentity::LandingPaths`]: crate::VolumeIdentity::LandingPaths
 //!
+//! [`RunRecord::maker`] is the tri-state form an opt-in refusal of repeated
+//! paths reads: a saturated or lossy record, a failed identity lookup and a
+//! path spelling the record does not hold are all [`Maker::Unknown`], never
+//! "not made here".
+//!
 //! The record is bounded by [`RECORD_CAP`]. Past it nothing more is recorded
 //! and every occupant counts as not created by this run, so the run fails
 //! closed.
@@ -156,6 +161,26 @@ fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
 struct Created {
     keys: HashSet<LandingKey>,
     saturated: bool,
+    /// A landing the run created could not be keyed, so the record may be
+    /// missing an entry it made.
+    lossy: bool,
+}
+
+/// Who made the occupant of a landing, as far as the record can prove.
+///
+/// Refusing a repeat is fail-closed: only [`Maker::Run`] is a repeat and only
+/// [`Maker::Foreign`] is left to the existing-files policy; everything the
+/// record cannot decide is [`Maker::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Maker {
+    /// The record holds the occupant's key.
+    Run,
+    /// The key is readable, the record is complete and does not hold it, or
+    /// nothing occupies the landing.
+    Foreign,
+    /// The record is saturated or lossy, the key cannot be read, or it is a
+    /// path spelling the record does not hold.
+    Unknown,
 }
 
 /// The landings a run created, consulted when one is found occupied.
@@ -215,10 +240,11 @@ impl RunRecord {
     /// counts as foreign (a refusal then says `existing`) and nothing more is
     /// recorded.
     fn insert(&self, key: Option<LandingKey>) {
+        let mut created = self.created.borrow_mut();
         let Some(key) = key else {
+            created.lossy = true;
             return;
         };
-        let mut created = self.created.borrow_mut();
         if created.keys.len() >= self.budget.cap() {
             created.saturated = true;
         } else {
@@ -232,6 +258,32 @@ impl RunRecord {
     pub(crate) fn created_here(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> bool {
         let created = self.created.borrow();
         !created.saturated && key_of(dir, leaf, rel).is_some_and(|key| created.keys.contains(&key))
+    }
+
+    /// Who made the occupant of `leaf` in `dir`.
+    ///
+    /// The tri-state form of [`created_here`](Self::created_here) that an
+    /// opt-in refusal of repeats needs: a record that cannot vouch either way
+    /// answers [`Maker::Unknown`] instead of "not made here". `Maker::Run` is
+    /// true exactly when `created_here` is.
+    pub(crate) fn maker(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Maker {
+        let created = self.created.borrow();
+        if created.saturated {
+            return Maker::Unknown;
+        }
+        // A held key proves the run made the occupant even in a lossy record,
+        // so `Run` is exactly `created_here`; lossiness only withdraws
+        // "foreign".
+        match dir.identity(leaf) {
+            Err(_) => Maker::Unknown,
+            Ok(None) => Maker::Foreign,
+            Ok(Some(identity)) => match key_for(identity, rel) {
+                key if created.keys.contains(&key) => Maker::Run,
+                _ if created.lossy => Maker::Unknown,
+                LandingKey::Identity(_) => Maker::Foreign,
+                LandingKey::Path(_) => Maker::Unknown,
+            },
+        }
     }
 
     /// Whether the run created an entry with this identity.
@@ -295,10 +347,148 @@ mod key_tests {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::Maker;
     use super::RecordBudget;
     use super::RunRecord;
+    use super::key_basis;
     use crate::formats::pinned_dir::support::leaf;
     use crate::formats::pinned_dir::support::pinned_at;
+
+    fn made_and_foreign() -> (tempfile::TempDir, crate::formats::pinned_dir::VettedDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        std::fs::write(temp.path().join("made"), b"x").unwrap();
+        std::fs::write(temp.path().join("foreign"), b"y").unwrap();
+        (temp, dir)
+    }
+
+    #[test]
+    fn maker_tells_the_run_from_a_foreign_occupant_and_an_absent_one() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("made"), "made".as_ref());
+
+        assert_eq!(
+            record.maker(&dir, leaf("made"), "made".as_ref()),
+            Maker::Run
+        );
+        assert_eq!(
+            record.maker(&dir, leaf("foreign"), "foreign".as_ref()),
+            Maker::Foreign
+        );
+        assert_eq!(
+            record.maker(&dir, leaf("absent"), "absent".as_ref()),
+            Maker::Foreign
+        );
+    }
+
+    #[test]
+    fn a_saturated_record_cannot_vouch_either_way() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("made"), "made".as_ref());
+
+        record.saturate();
+
+        for name in ["made", "foreign"] {
+            assert_eq!(
+                record.maker(&dir, leaf(name), name.as_ref()),
+                Maker::Unknown,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_that_filled_its_budget_saturates_into_unknown() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Diagnostic);
+        let filler = |index: usize| Some(super::LandingKey::Path(format!("p{index}").into()));
+        for index in 0..=super::DIAGNOSTIC_RECORD_CAP {
+            record.insert(filler(index));
+        }
+
+        assert_eq!(
+            record.maker(&dir, leaf("foreign"), "foreign".as_ref()),
+            Maker::Unknown
+        );
+    }
+
+    #[test]
+    fn a_key_that_could_not_be_read_when_noted_makes_the_record_lossy() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("made"), "made".as_ref());
+
+        record.note(&dir, leaf("absent"), "absent".as_ref());
+
+        assert_eq!(
+            record.maker(&dir, leaf("made"), "made".as_ref()),
+            Maker::Run
+        );
+        assert_eq!(
+            record.maker(&dir, leaf("foreign"), "foreign".as_ref()),
+            Maker::Unknown,
+            "a lossy record cannot call an unseen occupant foreign"
+        );
+    }
+
+    #[test]
+    fn run_is_exactly_created_here_whatever_the_state_of_the_record() {
+        let (_temp, dir) = made_and_foreign();
+        let lossy = RunRecord::new(RecordBudget::Full);
+        lossy.note(&dir, leaf("made"), "made".as_ref());
+        lossy.note(&dir, leaf("absent"), "absent".as_ref());
+        let saturated = RunRecord::new(RecordBudget::Full);
+        saturated.note(&dir, leaf("made"), "made".as_ref());
+        saturated.saturate();
+        let too_long = "x".repeat(300);
+
+        for record in [&lossy, &saturated] {
+            for name in ["made", "foreign", "absent", too_long.as_str()] {
+                assert_eq!(
+                    record.maker(&dir, leaf(name), name.as_ref()) == Maker::Run,
+                    record.created_here(&dir, leaf(name), name.as_ref()),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_identity_lookup_is_unknown_not_foreign() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Full);
+        let too_long = "x".repeat(300);
+
+        assert_eq!(
+            record.maker(&dir, leaf(&too_long), too_long.as_ref()),
+            Maker::Unknown
+        );
+    }
+
+    #[test]
+    fn a_path_keyed_record_knows_its_spelling_and_nothing_else() {
+        let (_temp, dir) = made_and_foreign();
+        let record = RunRecord::new(RecordBudget::Full);
+
+        key_basis::with(key_basis::KeyBasis::Path, || {
+            record.note(&dir, leaf("made"), "made".as_ref());
+
+            assert_eq!(
+                record.maker(&dir, leaf("made"), "made".as_ref()),
+                Maker::Run
+            );
+            assert_eq!(
+                record.maker(&dir, leaf("made"), "MADE".as_ref()),
+                Maker::Unknown
+            );
+            assert_eq!(
+                record.maker(&dir, leaf("foreign"), "foreign".as_ref()),
+                Maker::Unknown
+            );
+        });
+    }
 
     #[test]
     fn only_what_was_noted_counts_as_created() {

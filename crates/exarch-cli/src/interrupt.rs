@@ -590,6 +590,39 @@ pub const fn install(_output: &Path, _run: Run, _mode: OutputMode) -> InterruptG
     }
 }
 
+/// Test-only seam: blocks the run in a real `read(2)` on stdin so the forced
+/// exit can be exercised end to end. Compiled out of release builds.
+#[cfg(all(unix, feature = "test-hooks", debug_assertions))]
+mod stall_hook {
+    use exarch_core::EntryPosition;
+    use std::io::ErrorKind;
+    use std::io::Read as _;
+    use std::sync::OnceLock;
+
+    const VARIABLE: &str = "EXARCH_TEST_STALL_AT_ENTRY";
+
+    fn stall_entry() -> Option<usize> {
+        static ENTRY: OnceLock<Option<usize>> = OnceLock::new();
+        *ENTRY.get_or_init(|| std::env::var(VARIABLE).ok()?.parse().ok())
+    }
+
+    /// Blocks at the entry `EXARCH_TEST_STALL_AT_ENTRY` names until stdin
+    /// delivers a byte or reaches end of input.
+    pub(super) fn stall_at(position: EntryPosition) {
+        if stall_entry() != Some(position.current.get()) {
+            return;
+        }
+        let mut byte = [0_u8; 1];
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            match stdin.read(&mut byte) {
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                _ => return,
+            }
+        }
+    }
+}
+
 /// Wraps a reporter so that a requested stop cancels the run.
 pub struct Interruptible {
     inner: Box<dyn ProgressCallback>,
@@ -604,6 +637,8 @@ impl Interruptible {
 
 impl ProgressCallback for Interruptible {
     fn on_entry_start(&mut self, path: &Path, position: EntryPosition) {
+        #[cfg(all(unix, feature = "test-hooks", debug_assertions))]
+        stall_hook::stall_at(position);
         self.inner.on_entry_start(path, position);
     }
 

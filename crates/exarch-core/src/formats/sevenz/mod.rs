@@ -4,8 +4,9 @@
 //!
 //! # Security Features
 //!
-//! - Encrypted archives rejected (AES-256, AES-128, `ZipCrypto`, all encryption
-//!   methods)
+//! - AES-256 content and headers decrypted only with a password; the key
+//!   derivation of one operation is bounded by `max_kdf_work`, and raw-key mode
+//!   is refused as weak
 //! - Solid archives rejected by default (configurable)
 //! - Path traversal prevention
 //! - Decompression bomb detection
@@ -75,7 +76,8 @@
 //! `extract` and `verify` share one admission step, `sevenz_refusals`. Before
 //! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
 //! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
-//! unknown coder, AES content encryption, or whose files do not add up
+//! unknown coder, AES content without a usable password or over the
+//! key-derivation budget, or whose files do not add up
 //! to the decoded size are refused. A header whose sub-stream count differs
 //! from its number of streamed files (a directory that owns a sub-stream, an
 //! orphan block) is refused when the archive is opened, by `list` as well.
@@ -134,6 +136,7 @@
 //! ```
 
 use super::common;
+use super::occupant::OccupantPolicy;
 use super::output_root::OutputRoot;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
@@ -148,6 +151,8 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
+use crate::Violation;
+use crate::encryption::Credentials;
 use crate::inspection::report::Finding;
 use crate::inspection::report::Heuristic;
 use crate::inspection::report::IssueSeverity;
@@ -178,7 +183,7 @@ const SIGNATURE_HEADER_SIZE: u64 = SIGNATURE_HEADER_LEN as u64;
 /// - 7z format (LZMA SDK)
 /// - Compression methods: LZMA, LZMA2, BZIP2, `PPMd`, Copy
 /// - Multi-volume archives (read-only)
-/// - Encrypted archive detection (rejected)
+/// - AES-256 decryption with a password, bounded key derivation
 /// - Solid archive detection (rejected by default)
 ///
 /// # Solid Archives
@@ -208,18 +213,35 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ///
     /// # Security Checks
     ///
-    /// - Rejects encrypted archives (via password parameter)
+    /// - Refuses encrypted content without a password
     /// - Validates archive header signature
     /// - Checks for solid compression (rejected by default)
     ///
     /// # Errors
     ///
     /// Returns error if:
-    /// - Archive is encrypted
+    /// - The archive header is encrypted and no password is supplied
     /// - Archive header is invalid
     /// - Format is not recognized
-    pub(crate) fn new(mut source: R, config: &SecurityConfig) -> Result<Self> {
-        let header = read_sevenz_header(&mut source, HeaderLimit::from_config(config))?;
+    #[cfg(test)]
+    pub(crate) fn new(source: R, config: &SecurityConfig) -> Result<Self> {
+        Self::open(source, config, &Credentials::default())
+    }
+
+    /// Creates a 7z archive reader that enforces `config` and decrypts with
+    /// `credentials`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], plus the typed refusals of an encrypted header:
+    /// no password, a key derivation over `max_kdf_work`, a wrong password.
+    pub(crate) fn open(
+        mut source: R,
+        config: &SecurityConfig,
+        credentials: &Credentials,
+    ) -> Result<Self> {
+        let header =
+            open_sevenz_header(&mut source, HeaderLimit::from_config(config), credentials)?;
 
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
         let compression = sevenz_entry_compression(&header, source_len)?;
@@ -287,9 +309,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        let output = output
-            .into()
-            .with_record_budget(options.existing_files.record_budget());
+        let output = output.into().with_record_budget(
+            OccupantPolicy::new(options.existing_files, config.repeated_paths).record_budget(),
+        );
         self.admit(&config)?.extract_with(
             |config| SevenZHostTarget::create(output, config),
             SinkOptions::existing_files_of(options),
@@ -364,8 +386,16 @@ pub(crate) fn is_password_error(error: &sevenz_rust2::Error) -> bool {
 /// I/O failures keep their original `io::Error` (kind and source chain).
 impl From<sevenz_rust2::Error> for ArchiveError {
     fn from(err: sevenz_rust2::Error) -> Self {
-        if is_password_error(&err) {
-            return common::encrypted_archive_error();
+        match err {
+            sevenz_rust2::Error::PasswordRequired => return common::encrypted_archive_error(),
+            sevenz_rust2::Error::MaybeBadPassword(_) => {
+                return Violation::Encrypted {
+                    reason: crate::EncryptionRefusal::WrongPasswordOrCorrupt,
+                    name: None,
+                }
+                .into();
+            }
+            _ => {}
         }
 
         match err {
@@ -400,6 +430,8 @@ pub(crate) use header::FileIndex;
 pub(crate) use header::HeaderLimit;
 pub(crate) use header::SEVENZ_MAGIC;
 pub(crate) use header::SevenZHeader;
+pub(crate) use header::open_sevenz_header;
+#[cfg(test)]
 pub(crate) use header::read_sevenz_header;
 use host::SevenZHostTarget;
 pub(crate) use links::LinkCapture;

@@ -20,6 +20,8 @@ use crate::error::chain_text;
 use crate::error::leftover_path;
 use crate::error::raw;
 use crate::operation::Operation;
+use crate::sandbox::NotEnforced;
+use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
@@ -98,6 +100,7 @@ pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Res
             crate::error::CANCELLED_TEXT,
         )
         .with_hint(Some(hint.to_owned())),
+        sandbox: None,
     })
 }
 
@@ -105,13 +108,17 @@ pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Res
 /// tests can inject an in-memory writer (`with_writer`) to capture output.
 pub struct JsonFormatter<W: Write = Stdout> {
     out: W,
+    sandbox: Option<SandboxStatus>,
 }
 
 impl JsonFormatter<Stdout> {
     /// Creates a formatter writing to the process stdout.
     #[must_use]
     pub fn stdout() -> Self {
-        Self { out: io::stdout() }
+        Self {
+            out: io::stdout(),
+            sandbox: None,
+        }
     }
 }
 
@@ -119,7 +126,7 @@ impl<W: Write> JsonFormatter<W> {
     /// Creates a formatter writing to the given writer.
     #[cfg(test)]
     pub fn with_writer(out: W) -> Self {
-        Self { out }
+        Self { out, sandbox: None }
     }
 
     /// Returns a reference to the underlying writer.
@@ -136,7 +143,12 @@ impl<W: Write> JsonFormatter<W> {
     }
 
     fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
-        self.output(&Envelope::Success { operation, data })
+        let sandbox = self.sandbox.take();
+        self.output(&Envelope::Success {
+            operation,
+            data,
+            sandbox,
+        })
     }
 }
 
@@ -325,13 +337,24 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 
     fn format_verification_failed(&mut self) {}
 
+    fn format_sandbox(&mut self, status: &SandboxStatus) {
+        self.sandbox = Some(status.clone());
+    }
+
     fn format_error(&mut self, operation: Operation, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
+        let not_enforced = error.chain().find_map(|e| e.downcast_ref::<NotEnforced>());
         let ffi_kind = extraction_err.map(ArchiveError::ffi_kind);
-        let kind = ffi_kind
-            .as_ref()
-            .map_or(JsonKind::Generic, |kind| JsonKind::Code(kind.code()));
+        let kind = match (&ffi_kind, not_enforced) {
+            (Some(kind), _) => JsonKind::Code(kind.code()),
+            (None, Some(_)) => JsonKind::SandboxNotEnforced,
+            (None, None) => JsonKind::Generic,
+        };
+        let sandbox = self
+            .sandbox
+            .take()
+            .or_else(|| not_enforced.map(|refusal| refusal.0.clone()));
 
         // The message and hints are the exact text: archive-derived parts are
         // escaped only when a terminal formatter renders them.
@@ -351,7 +374,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         if let Some(error) = extraction_err {
             json_error = json_error
                 .with_occupancy(error)
-                .with_destination_step(error);
+                .with_destination_step(error)
+                .with_encryption_reason(error);
         }
         json_error = json_error.with_leftover_path(leftover_path(error).map(HostPath::from));
         if let Some(kind) = &ffi_kind {
@@ -360,6 +384,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         let written = self.output(&Envelope::<()>::Error {
             operation,
             error: json_error,
+            sandbox,
         });
         if let Err(error) = written {
             // The document is the only report of the failure, so a stdout
@@ -547,6 +572,7 @@ mod tests {
         let output = Envelope::<()>::Error {
             operation: Operation::Extract,
             error: JsonError::new(JsonKind::Code(ErrorCode::ZipBomb), "zip bomb detected"),
+            sandbox: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -566,6 +592,7 @@ mod tests {
                 JsonKind::Code(ErrorCode::PathTraversal),
                 "traversal attempt",
             ),
+            sandbox: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         // data field should be absent (skip_serializing_if = None)
@@ -670,6 +697,7 @@ mod tests {
         let output = Envelope::<()>::Error {
             operation: Operation::Extract,
             error: JsonError::new(JsonKind::Code(kind.code()), "denied").with_ffi_kind(&kind),
+            sandbox: None,
         };
         serde_json::to_value(&output).unwrap()
     }
@@ -682,9 +710,34 @@ mod tests {
         assert_eq!(relaxable["error"]["relaxable_by"], "symlinks");
         assert_eq!(relaxable["error"]["sub_code"], "LINK_POLICY");
 
-        let fixed = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let fixed = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(fixed["error"].get("relaxable_by").is_none());
         assert_eq!(fixed["error"]["sub_code"], "ENCRYPTED");
+    }
+
+    #[test]
+    fn test_error_envelope_reports_the_encryption_reason_only_for_encryption() {
+        let wrong = ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::WrongPassword,
+            name: None,
+        });
+        let error = JsonError::new(JsonKind::Generic, "denied").with_encryption_reason(&wrong);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["reason"],
+            "wrong_password"
+        );
+
+        let other = JsonError::new(JsonKind::Generic, "denied")
+            .with_encryption_reason(&ArchiveError::Cancelled);
+        assert!(
+            serde_json::to_value(&other)
+                .unwrap()
+                .get("reason")
+                .is_none()
+        );
     }
 
     #[test]
@@ -695,7 +748,10 @@ mod tests {
         assert_eq!(denied["error"]["kind"], "IoError");
         assert_eq!(denied["error"]["io_kind"], "PermissionDenied");
 
-        let other = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let other = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(other["error"].get("io_kind").is_none());
     }
 
@@ -739,7 +795,10 @@ mod tests {
         assert_eq!(v["error"]["leftover_path"], "out/.exarch-AbC123");
         assert_eq!(v["error"]["partial_report"]["writes"], "rolled_back");
 
-        let clean = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let clean = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(clean["error"].get("leftover_path").is_none());
     }
 
@@ -811,7 +870,10 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_security_violation() {
-        let err = ArchiveError::from(Violation::EncryptedArchive);
+        let err = ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         assert_eq!(error_kind(&err), "SecurityViolation");
     }
 
@@ -982,6 +1044,31 @@ mod tests {
     }
 
     #[test]
+    fn format_error_names_a_failed_require_and_carries_the_status() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let status = SandboxStatus::Unavailable {
+            reason: crate::sandbox::Unavailable::NotLinux,
+        };
+        let err = anyhow::Error::new(NotEnforced(status));
+        f.format_error(Operation::Extract, &err);
+        let v = parsed(&f);
+        assert_eq!(v["error"]["kind"], "SandboxNotEnforced");
+        assert_eq!(v["sandbox"]["status"], "unavailable");
+    }
+
+    #[test]
+    fn format_error_keeps_the_status_reported_before_the_failure() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_sandbox(&SandboxStatus::Unavailable {
+            reason: crate::sandbox::Unavailable::Disabled,
+        });
+        f.format_error(Operation::List, &anyhow::anyhow!("boom"));
+        let v = parsed(&f);
+        assert_eq!(v["error"]["kind"], "Error");
+        assert_eq!(v["sandbox"]["reason"], "disabled");
+    }
+
+    #[test]
     fn format_error_writes_error_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
         let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
@@ -1147,6 +1234,7 @@ mod tests {
         let success = serde_json::to_value(Envelope::Success {
             operation: Operation::List,
             data: serde_json::json!({"n": 1}),
+            sandbox: None,
         })
         .unwrap();
         assert_eq!(
@@ -1157,6 +1245,7 @@ mod tests {
         let error = serde_json::to_value(Envelope::<()>::Error {
             operation: Operation::Verify,
             error: JsonError::new(JsonKind::Generic, "boom"),
+            sandbox: None,
         })
         .unwrap();
         assert_eq!(

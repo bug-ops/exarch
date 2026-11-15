@@ -111,6 +111,31 @@ without an end-of-archive marker); it comes with a Medium issue, so `status` is
 at least `"WARNING"`. With the check on, a TAR entry whose content fails to
 decode raises `InvalidArchiveError`.
 
+### Password-Protected Archives
+
+ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
+`password` to `extract_archive`, `extract_archive_with_progress`, `list_archive`
+or `verify_archive`. The password must be a `bytearray`: `bytes` and `str` are
+refused with `TypeError` because immutable objects cannot be wiped. exarch wipes
+its own copy; you wipe yours.
+
+```python
+import exarch
+
+password = bytearray(b"correct-horse")
+try:
+    exarch.extract_archive("secret.zip", "out", password=password)
+finally:
+    password[:] = bytes(len(password))  # best effort: wipe your copy
+```
+
+A missing, wrong or weak (ZipCrypto) password raises `SecurityViolationError`
+with `sub_code == "ENCRYPTED"`; a password for an archive that is not encrypted
+is ignored. `SecurityConfig.max_kdf_work` bounds the key-derivation work of one
+7z operation. Zeroization across the binding boundary is best effort.
+
+**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation requests.
+
 ### Archives in Memory
 
 `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory`

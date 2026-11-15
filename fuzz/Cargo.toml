@@ -13,7 +13,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 unicode-normalization = "0.1"
-exarch-core = { path = "../crates/exarch-core" }
+exarch-core = { path = "../crates/exarch-core", features = ["encryption"] }
 
 [workspace]
 
@@ -72,6 +72,13 @@ bench = false
 [[bin]]
 name = "detect"
 path = "fuzz_targets/detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encrypted"
+path = "fuzz_targets/encrypted.rs"
 test = false
 doc = false
 bench = false

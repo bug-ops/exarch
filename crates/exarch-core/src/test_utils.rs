@@ -344,6 +344,16 @@ pub(crate) fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
     tar
 }
 
+/// What a `ZipCrypto` entry is refused as: too weak where decryption is built
+/// in, password-required where it is not.
+pub(crate) const fn legacy_cipher_refusal() -> crate::EncryptionRefusal {
+    if cfg!(feature = "encryption") {
+        crate::EncryptionRefusal::WeakEncryptionRefused
+    } else {
+        crate::EncryptionRefusal::PasswordRequired
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,19 +429,20 @@ mod tests {
     }
 
     /// Dumps the adversarial archives built by this module's generators into
-    /// `fuzz/seeds/<target>/` so `fuzz/seed-corpus.sh` can assemble them into
-    /// the fuzz corpus. `test_utils` is `pub(crate)`, so this is the only
-    /// place that can reach these generators without widening crate
+    /// `$EXARCH_FUZZ_SEEDS_DIR/<target>/` so `fuzz/seed-corpus.sh` can assemble
+    /// them into the fuzz corpus. `test_utils` is `pub(crate)`, so this is the
+    /// only place that can reach these generators without widening crate
     /// visibility for a dev-only need. Not run by default; invoked via
-    /// `cargo test -p exarch-core --lib -- --ignored dump_fuzz_seeds`.
+    /// `EXARCH_FUZZ_SEEDS_DIR=<dir> cargo test -p exarch-core --lib --
+    /// --ignored dump_fuzz_seeds`; the test fails with a message when the
+    /// variable is unset.
     #[test]
-    #[ignore = "generates fuzz/seeds/ on demand; not part of the default test run"]
+    #[ignore = "generates fuzz seeds on demand; not part of the default test run"]
     fn dump_fuzz_seeds() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .unwrap();
-        let seeds = repo_root.join("fuzz/seeds");
+        let Some(dir) = std::env::var_os("EXARCH_FUZZ_SEEDS_DIR") else {
+            panic!("set EXARCH_FUZZ_SEEDS_DIR to the directory that receives the seeds");
+        };
+        let seeds = std::path::PathBuf::from(dir);
 
         let write_seed = |target: &str, name: &str, data: &[u8]| {
             let dir = seeds.join(target);

@@ -14,9 +14,13 @@ use super::header_probe::Refusal;
 use super::header_probe::header_entries;
 use super::header_probe::probe;
 use crate::ArchiveError;
+use crate::EncryptionRefusal;
 use crate::Malformation;
 use crate::QuotaResource;
 use crate::Result;
+use crate::Violation;
+use crate::encryption::Credentials;
+use crate::encryption::kdf::HEADER_RESERVE;
 use crate::formats::common;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
@@ -132,6 +136,8 @@ impl<T> std::ops::IndexMut<BlockIndex> for PerBlock<T> {
 pub(crate) struct SevenZHeader {
     archive: Archive,
     unchecked_crc: OnceLock<Archive>,
+    credentials: Credentials,
+    header_encrypted: bool,
 }
 
 impl SevenZHeader {
@@ -164,7 +170,50 @@ impl SevenZHeader {
         Self {
             archive,
             unchecked_crc: OnceLock::new(),
+            credentials: Credentials::default(),
+            header_encrypted: false,
         }
+    }
+
+    /// Keeps the password the archive was opened with, and whether its header
+    /// was encrypted, for the decoding and admission that follow.
+    fn opened_with(mut self, credentials: Credentials, header_encrypted: bool) -> Self {
+        self.credentials = credentials;
+        self.header_encrypted = header_encrypted;
+        self
+    }
+
+    /// The password the archive was opened with.
+    pub(crate) const fn credentials(&self) -> &Credentials {
+        &self.credentials
+    }
+
+    /// Whether the header itself was encrypted, which costs one key
+    /// derivation `exarch` cannot observe.
+    pub(crate) const fn header_encrypted(&self) -> bool {
+        self.header_encrypted
+    }
+
+    /// Whether any block holds AES-encrypted content.
+    pub(crate) fn content_encrypted(&self) -> bool {
+        self.archive.blocks.iter().any(|block| {
+            block.coders.iter().any(|coder| {
+                coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256
+            })
+        })
+    }
+
+    /// The password block decoding passes to `sevenz-rust2`.
+    ///
+    /// Empty when none was supplied or when the supplied bytes are not text a
+    /// 7z password can be: admission has already refused every encrypted
+    /// block in that case, so no block reads it.
+    pub(crate) fn block_password(&self) -> Password {
+        self.credentials
+            .sevenz_secret()
+            .ok()
+            .flatten()
+            .unwrap_or_else(Password::empty)
     }
 
     /// Wraps a hand-built archive without checking it, for tests that
@@ -332,6 +381,7 @@ pub(crate) struct HeaderLimit {
     memory: NonZeroU64,
     entry_bytes: NonZeroU64,
     entries: u64,
+    kdf_work: NonZeroU64,
 }
 
 impl HeaderLimit {
@@ -341,13 +391,17 @@ impl HeaderLimit {
         memory: NonZeroU64::MAX,
         entry_bytes: NonZeroU64::MAX,
         entries: u64::MAX,
+        kdf_work: NonZeroU64::MAX,
     };
 
     /// The limit of `config`: `max_decoder_memory`, and the header bytes its
     /// `max_file_count` entries may take.
     pub(crate) fn from_config(config: &crate::SecurityConfig) -> Self {
         let files = u64::try_from(config.max_file_count.ceiling()).unwrap_or(u64::MAX);
-        Self::from_limits(config.max_decoder_memory, files)
+        Self {
+            kdf_work: config.max_kdf_work,
+            ..Self::from_limits(config.max_decoder_memory, files)
+        }
     }
 
     fn from_limits(max_decoder_memory: NonZeroU64, max_file_count: u64) -> Self {
@@ -358,6 +412,7 @@ impl HeaderLimit {
             memory: max_decoder_memory,
             entry_bytes: NonZeroU64::new(entry_bytes).unwrap_or(NonZeroU64::MAX),
             entries: max_file_count.saturating_add(HEADER_ENTRIES_BASE),
+            kdf_work: NonZeroU64::MAX,
         }
     }
 
@@ -421,7 +476,12 @@ fn kib(limit: NonZeroU64) -> usize {
 /// buffer that receives the decoded header (about twice its limit at most) and
 /// block decoding, whose windows admission estimates separately.
 ///
-/// A password requirement is [`common::encrypted_archive_error`]. The valid
+/// An encrypted header needs `credentials`: without a password the error is
+/// [`common::encrypted_archive_error`]; the key derivation it costs is
+/// reserved against `max_kdf_work` before the parse, and a parse that fails is
+/// a wrong password or corrupt data. The entry count of such a header cannot be
+/// probed, so it is held to `max_file_count` after the parse, the parse itself
+/// being bounded by the header cap. The valid
 /// 32-byte empty archive, which `sevenz-rust2` reports as `UnexpectedEof`,
 /// opens as an empty header.
 ///
@@ -438,9 +498,10 @@ fn kib(limit: NonZeroU64) -> usize {
 /// `max_decoder_memory`. A header whose block, sub-stream or pack-stream
 /// table is longer than its entries and blocks account for is refused as
 /// [`Malformation::SevenZHeaderTableTooLarge`] before the parse.
-pub(crate) fn read_sevenz_header<R: Read + Seek>(
+pub(crate) fn open_sevenz_header<R: Read + Seek>(
     source: &mut R,
     limit: HeaderLimit,
+    credentials: &Credentials,
 ) -> Result<SevenZHeader> {
     let cap = limit.header_cap();
     let parse_limit = match probe(source, cap.bytes().get()) {
@@ -452,6 +513,7 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
         }
         DeclaredHeader::Unrecognized => cap,
     };
+    let mut header_encrypted = false;
     match header_entries(source, cap.bytes().get(), kib(limit.memory)) {
         HeaderEntries::Declared(tables) if tables.entries() > limit.entries => {
             return Err(ArchiveError::QuotaExceeded {
@@ -471,35 +533,91 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
                 detail: "unsupported header layout: the number of entries cannot be read".into(),
             }));
         }
-        HeaderEntries::Refused(Refusal::Encrypted) => return Err(common::encrypted_archive_error()),
+        HeaderEntries::Refused(Refusal::Encrypted) => {
+            admit_encrypted_header(credentials, limit)?;
+            header_encrypted = true;
+        }
         HeaderEntries::Refused(Refusal::Memory) => {
             return Err(HeaderCap::Memory(limit.memory).refusal());
         }
         HeaderEntries::NotApplicable => {}
     }
+    let password = if header_encrypted {
+        credentials
+            .sevenz_secret()
+            .ok()
+            .flatten()
+            .ok_or_else(|| encryption_refusal(EncryptionRefusal::WrongPasswordOrCorrupt))?
+    } else {
+        Password::empty()
+    };
     source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
     let parsed = Archive::read_with_memory_limit(
         &mut SourceRead::new(&mut *source, tap.clone()),
-        &Password::empty(),
+        &password,
         kib(parse_limit.bytes()),
     );
     match parsed {
-        Ok(archive) => SevenZHeader::check(archive),
-        Err(error) => header_failure(&error, &tap, source, parse_limit),
+        Ok(archive) => {
+            let declared = u64::try_from(archive.files.len()).unwrap_or(u64::MAX);
+            if header_encrypted && declared > limit.entries {
+                return Err(ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::HeaderEntryCount {
+                        declared,
+                        max: limit.entries,
+                    },
+                });
+            }
+            Ok(SevenZHeader::check(archive)?.opened_with(credentials.clone(), header_encrypted))
+        }
+        Err(error) => header_failure(&error, &tap, source, parse_limit, header_encrypted),
     }
 }
 
+/// Opens the header with no password, for tests of the header itself.
+#[cfg(test)]
+pub(crate) fn read_sevenz_header<R: Read + Seek>(
+    source: &mut R,
+    limit: HeaderLimit,
+) -> Result<SevenZHeader> {
+    open_sevenz_header(source, limit, &Credentials::default())
+}
+
+fn encryption_refusal(reason: EncryptionRefusal) -> ArchiveError {
+    Violation::Encrypted { reason, name: None }.into()
+}
+
+/// Admits an encrypted header: a password must be supplied, and the key
+/// derivation `Archive::read` runs for it must fit the budget, which is known
+/// before it runs because the header's own power is not visible.
+fn admit_encrypted_header(credentials: &Credentials, limit: HeaderLimit) -> Result<()> {
+    if !credentials.is_supplied() {
+        return Err(common::encrypted_archive_error());
+    }
+    if HEADER_RESERVE > limit.kdf_work.get() {
+        return Err(encryption_refusal(EncryptionRefusal::KdfCostExceeded));
+    }
+    Ok(())
+}
+
 /// The result of a header parse that failed with `error`: a fault the source
-/// raised is I/O, never a verdict on the header.
+/// raised is I/O, never a verdict on the header. A failed parse of an
+/// encrypted header is a wrong password or corrupt data: 7z has no verifier.
 fn header_failure<R: Read + Seek>(
     error: &sevenz_rust2::Error,
     tap: &SourceTap,
     source: &mut R,
     limit: HeaderCap,
+    header_encrypted: bool,
 ) -> Result<SevenZHeader> {
     if let Some(fault) = tap.fault() {
         return Err(ArchiveError::Io(fault));
+    }
+    if header_encrypted {
+        return Err(encryption_refusal(
+            EncryptionRefusal::WrongPasswordOrCorrupt,
+        ));
     }
     if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
         return Err(limit.refusal());
@@ -542,9 +660,14 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
 
-    const NO_FILES_INFO: &[u8] =
-        include_bytes!("../../../../../tests/fixtures/streams-without-files-info.7z");
-    const SIMPLE: &[u8] = include_bytes!("../../../../../tests/fixtures/simple.7z");
+    const NO_FILES_INFO: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streams-without-files-info.7z"
+    ));
+    const SIMPLE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/simple.7z"
+    ));
 
     fn header_with_blocks(count: usize) -> SevenZHeader {
         let mut archive = Archive::default();
@@ -724,7 +847,10 @@ mod tests {
 
     #[test]
     fn read_header_opens_the_empty_archive() {
-        let bytes = include_bytes!("../../../../../tests/fixtures/empty.7z");
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/empty.7z"
+        ));
         let header =
             read_sevenz_header(&mut Cursor::new(&bytes[..]), HeaderLimit::UNLIMITED).unwrap();
         assert!(header.files().is_empty());

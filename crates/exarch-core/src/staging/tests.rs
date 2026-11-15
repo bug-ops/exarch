@@ -2084,7 +2084,14 @@ fn pinned_run(
         &mut crate::NoopProgress,
         |output, options, progress| {
             swap(&staging_dirs(&parent)[0]);
-            crate::api::extract_validated(&archive, output, &config, options, progress)
+            crate::api::extract_validated(
+                &archive,
+                output,
+                &config,
+                options,
+                progress,
+                crate::encryption::Credentials::NONE,
+            )
         },
     );
     (result, fx.parent.join("aside"))
@@ -2164,6 +2171,7 @@ fn a_ledger_holds_every_entry_a_run_creates_whatever_existing_files_says() {
         &SecurityConfig::default(),
         &options,
         &mut crate::NoopProgress,
+        crate::encryption::Credentials::NONE,
     )
     .unwrap();
 

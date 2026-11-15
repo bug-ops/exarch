@@ -13,6 +13,8 @@ use tempfile::TempDir;
 
 use super::ArchiveError;
 use super::PolicySetting;
+use super::Violation;
+use crate::ManifestEntryType;
 use crate::SecurityConfig;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::security::hardlink::require_hardlinks_allowed;
@@ -40,8 +42,7 @@ fn refusal(setting: PolicySetting) -> ArchiveError {
         PolicySetting::Symlinks => expect_err(require_symlinks_allowed(&config), setting),
         PolicySetting::Hardlinks => expect_err(require_hardlinks_allowed(&config), setting),
         PolicySetting::SolidArchives => {
-            let fixture =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/solid.7z");
+            let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/solid.7z");
             expect_err(
                 crate::extract_archive(fixture, temp.path(), &SecurityConfig::default()),
                 setting,
@@ -68,6 +69,11 @@ fn refusal(setting: PolicySetting) -> ArchiveError {
                 .expect_err("budget must trip");
             ArchiveError::from(err)
         }
+        PolicySetting::RepeatedPaths => ArchiveError::from(Violation::RepeatedPath {
+            path: "a".into(),
+            earlier: ManifestEntryType::File,
+            later: ManifestEntryType::File,
+        }),
     }
 }
 

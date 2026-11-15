@@ -73,7 +73,7 @@ sudo mv exarch /usr/local/bin/
 </details>
 
 > [!IMPORTANT]
-> Requires Rust 1.99.1 or later for building from source.
+> Requires Rust 1.100 or later for building from source.
 
 ## Usage
 
@@ -169,6 +169,25 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 
 > [!IMPORTANT]
 > `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. It also refuses `.`, `..`, any directory that contains the working directory or the archive, a filesystem root, and any use of `--include`, `--exclude`, `--strip-components` or `--flatten`. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
+
+## Encrypted Archives
+
+`extract`, `list` and `verify` read password-protected ZIP archives (WinZip AES-128/192/256) and 7z archives (AES-256, content or header). The password is never an argument value or an environment variable, so it cannot leak through `ps`, shell history or `/proc/<pid>/environ`. Give it through exactly one of:
+
+| Flag | Source |
+|------|--------|
+| `--password-file <PATH>` | The first line of a regular file, at most 1 KiB; on Unix the file must not be readable by group or others (`chmod 600`) |
+| `--password-fd <N>` | The first line read from an inherited file descriptor (Unix), for example `--password-fd 3 3< secret.txt` |
+| `--password-prompt` | A no-echo prompt on the terminal; without a terminal it fails instead of waiting |
+
+```bash
+exarch extract --password-file ~/.secrets/archive.pw backup.zip out/
+exarch list --password-prompt backup.7z
+```
+
+A password for an archive that is not encrypted is ignored. Without a password, `list` shows a ZIP's entries (encrypted entries are not decrypted; `verify --check-integrity` reports them as unverified with reason `encrypted`), and `extract` refuses with `SECURITY_VIOLATION` / `ENCRYPTED` before it writes anything. A wrong password and tampered data are different errors (`wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`). ZipCrypto, the legacy ZIP cipher, and 7z raw-key mode are refused as too weak. Solid 7z archives stay refused whether or not they are encrypted.
+
+Key derivation is bounded: a 7z may not cost more than `max_kdf_work` (default 2^27 SHA-256 rounds, a library setting with no CLI flag). The last 7z key stays in process memory until the process exits (an upstream behavior of `sevenz-rust2`).
 
 ## Create Command
 
@@ -416,7 +435,7 @@ exarch is designed with security as a primary concern, protecting against common
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
+> 7z creation is not yet supported. Solid 7z archives are rejected for security reasons. Password-protected ZIP (WinZip AES) and 7z archives are read with `--password-file`, `--password-fd` or `--password-prompt`; see [Encrypted Archives](#encrypted-archives).
 
 ## Development
 

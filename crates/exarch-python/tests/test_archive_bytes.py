@@ -9,7 +9,7 @@ import pytest
 
 import exarch
 
-FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures"
 FORMATS = ["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip", "SevenZ"]
 
 

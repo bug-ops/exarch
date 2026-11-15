@@ -23,6 +23,7 @@ use crate::formats::common;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::replaces_symlink;
@@ -30,6 +31,7 @@ use crate::formats::output_root::OutputRoot;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::run_record::Maker;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -99,10 +101,9 @@ impl DestOccupancy {
     }
 
     /// A pre-existing symlink that is refused rather than unlinked and written
-    /// under its name, as TAR and ZIP refuse it through `O_NOFOLLOW`. Elsewhere
-    /// a symlink is replaced like a regular file.
+    /// under its name, as TAR and ZIP refuse it on every host.
     fn kept_symlink(self) -> Option<KeptOccupant> {
-        (cfg!(unix) && self == Self::Symlink).then_some(KeptOccupant::Symlink)
+        (self == Self::Symlink).then_some(KeptOccupant::Symlink)
     }
 
     /// How to write over this occupant with the policy's `permit`, or the
@@ -178,14 +179,11 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         let write_mode = if occupancy.is_occupied() {
             let root = self.inner.root();
-            let action = tally.options.existing_files.on_occupant(
+            let action = OccupantPolicy::of(tally.options).on_occupant(
                 EntryShape::File,
                 safe_path.as_path(),
                 || Ok(occupancy.occupant()),
-                || {
-                    root.created()
-                        .created_here(&parent, leaf, safe_path.as_path())
-                },
+                || root.created().maker(&parent, leaf, safe_path.as_path()),
                 OccupiedSite::Host(root),
             )?;
             match action {
@@ -330,9 +328,7 @@ impl PrePass for HostPrePass<'_> {
         path: &Path,
         shape: EntryShape,
     ) -> Result<Gated<EntryPath<SafePath>>> {
-        let ctx: ValidationContext<HostFs> = self.core.context();
-        #[cfg(any(unix, target_os = "wasi"))]
-        let ctx = ctx.deferring_leaf_symlink();
+        let ctx: ValidationContext<HostFs> = self.core.context().deferring_leaf_symlink();
         self.core
             .route_entry_in(path, shape, self.root.dest(), &HostFs, &ctx)
     }
@@ -363,11 +359,11 @@ impl PrePass for HostPrePass<'_> {
         let dest_path = self.root.dest().join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() {
-            let action = self.options.existing_files.on_occupant(
+            let action = OccupantPolicy::of(self.options).on_occupant(
                 EntryShape::File,
                 safe_path.as_path(),
                 || Ok(occupancy.occupant()),
-                || false,
+                || Maker::Foreign,
                 OccupiedSite::Host(self.root),
             )?;
             if matches!(action, OccupantAction::Skip) {

@@ -31,7 +31,7 @@ impl Zone {
 
     fn parse(content: &[u8]) -> Option<Self> {
         let content = content.get(..MAX_LEN).unwrap_or(content);
-        let content = content.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(content);
+        let content = content.trim_prefix(b"\xEF\xBB\xBF");
         let mut in_section = false;
         for line in content.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii) {
             if line.first() == Some(&b'[') {

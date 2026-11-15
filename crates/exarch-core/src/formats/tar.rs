@@ -130,6 +130,7 @@ use super::target::Tally;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
 use crate::formats::compression::DecoderLimits;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::output_root::OutputRoot;
 use crate::reader::TarStream;
 use crate::reader::decode_tar_stream;
@@ -339,6 +340,7 @@ impl<R: Read> TarArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
+        let options = options.under(config);
 
         let mut report = ExtractionReport::new();
 
@@ -447,9 +449,9 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        let output = output
-            .into()
-            .with_record_budget(options.existing_files.record_budget());
+        let output = output.into().with_record_budget(
+            OccupantPolicy::new(options.existing_files, config.repeated_paths).record_budget(),
+        );
         let mut target = HostTarget::create(output, &config)?;
         self.extract_into(
             &mut target,

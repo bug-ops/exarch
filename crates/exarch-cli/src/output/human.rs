@@ -18,6 +18,7 @@ use crate::error::join_chain;
 use crate::error::terminal;
 use crate::error::visible_chain;
 use crate::operation::Operation;
+use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use console::Term;
 use console::style;
@@ -480,6 +481,14 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 
     fn format_verification_failed(&mut self) {
         self.emit_error_line("Archive verification failed");
+    }
+
+    fn format_sandbox(&mut self, status: &SandboxStatus) {
+        let silent =
+            self.verbosity == Verbosity::Quiet && matches!(status, SandboxStatus::Enforced { .. });
+        if !silent {
+            let _ = emit_line(&mut self.err, format_args!("Sandbox: {status}"));
+        }
     }
 
     fn format_error(&mut self, _operation: Operation, error: &anyhow::Error) {

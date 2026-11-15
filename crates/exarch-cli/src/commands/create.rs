@@ -16,7 +16,9 @@ use exarch_core::CreationConfig;
 use exarch_core::EntryPattern;
 use exarch_core::Limit;
 use exarch_core::OutputFile;
+use exarch_core::Parallelism;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 
 /// Runs `create`: builds the archive inside the armed interrupt window and
 /// prints the report once the window is closed.
@@ -43,6 +45,9 @@ pub fn execute(
         .with_strip_prefix(args.strip_prefix.clone())
         .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
+    if let Some(threads) = args.threads {
+        config = config.with_parallelism(Parallelism::Threads(NonZeroUsize::from(threads)));
+    }
     if let Some(requested) = args.compression_level {
         config = config.with_compression_level(CompressionLevel::try_from(requested)?);
     }
@@ -133,6 +138,8 @@ mod tests {
         fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
 
         fn format_verification_failed(&mut self) {}
+
+        fn format_sandbox(&mut self, _status: &crate::sandbox::SandboxStatus) {}
     }
 
     /// `JsonFormatter` always calls `format_creation_result` regardless of
@@ -179,6 +186,8 @@ mod tests {
         fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
 
         fn format_verification_failed(&mut self) {}
+
+        fn format_sandbox(&mut self, _status: &crate::sandbox::SandboxStatus) {}
     }
 
     fn make_args(output: PathBuf, source: PathBuf) -> CreateArgs {
@@ -186,6 +195,7 @@ mod tests {
             output,
             sources: vec![source],
             compression_level: None,
+            threads: None,
             follow_symlinks: false,
             include_hidden: false,
             exclude: vec![],

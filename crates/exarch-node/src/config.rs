@@ -22,6 +22,7 @@ use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
 use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::RepeatedPaths as CoreRepeatedPaths;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::Staging as CoreStaging;
@@ -116,6 +117,36 @@ mirror_from_core!(
     CorePolicy,
     "ZIP consistency policy",
     [Enforce, Ignore]
+);
+
+/// How an archive that names one landing twice is handled.
+///
+/// `keep_first` (the default, also for `SecurityConfig.permissive()`) keeps the
+/// first copy and lets the existing-files policy decide every repeat. `refuse`
+/// rejects the archive instead, under every existing-files mode; combine it
+/// with `staging: 'atomic'` to leave nothing behind.
+// Values must equal `exarch_core::RepeatedPaths::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatedPaths {
+    /// Keep the first copy.
+    #[napi(value = "keep_first")]
+    KeepFirst,
+    /// Refuse an entry whose landing already holds an occupant the run made.
+    #[napi(value = "refuse")]
+    Refuse,
+}
+
+mirror_into_core!(
+    RepeatedPaths => CoreRepeatedPaths,
+    [KeepFirst, Refuse]
+);
+
+mirror_from_core!(
+    RepeatedPaths,
+    CoreRepeatedPaths,
+    "repeated paths policy",
+    [KeepFirst, Refuse]
 );
 
 /// What extraction does when a destination path is already occupied.
@@ -502,6 +533,28 @@ impl SecurityConfig {
         self
     }
 
+    /// Sets the most SHA-256 rounds of key derivation one operation may spend.
+    ///
+    /// Default: 2^27.
+    ///
+    /// # Errors
+    ///
+    /// Throws `INVALID_CONFIGURATION` (`setting` is `max_kdf_work`) if `rounds`
+    /// is not a positive whole number.
+    #[napi(js_name = "withMaxKdfWork")]
+    pub fn with_max_kdf_work(&mut self, env: Env, rounds: f64) -> Result<&Self> {
+        self.try_set_max_kdf_work(rounds)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
+    }
+
+    /// Sets how an archive that names one landing twice is handled.
+    #[napi(js_name = "withRepeatedPaths")]
+    pub fn with_repeated_paths(&mut self, policy: RepeatedPaths) -> &Self {
+        self.inner.repeated_paths = policy.into();
+        self
+    }
+
     /// Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
     /// block ahead on worker threads, or `null` to decode on one thread.
     ///
@@ -832,6 +885,13 @@ impl SecurityConfig {
         self.inner.zip_consistency.as_str().to_owned()
     }
 
+    /// How an archive that names one landing twice is handled. A policy newer
+    /// than this binding is reported as core's token.
+    #[napi(getter, ts_return_type = "RepeatedPaths | (string & {})")]
+    pub fn get_repeated_paths(&self) -> String {
+        self.inner.repeated_paths.as_str().to_owned()
+    }
+
     /// Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
     /// `null` when decoding runs on one thread.
     #[napi(getter)]
@@ -862,6 +922,12 @@ impl SecurityConfig {
     #[napi(getter)]
     pub fn get_max_tar_metadata_bytes(&self) -> i64 {
         saturating_i64(self.inner.max_tar_metadata_bytes.get())
+    }
+
+    /// Most SHA-256 rounds of key derivation one operation may spend.
+    #[napi(getter)]
+    pub fn get_max_kdf_work(&self) -> i64 {
+        saturating_i64(self.inner.max_kdf_work.get())
     }
 
     /// Memory in bytes a decoder may use for its dictionary or window.
@@ -1059,6 +1125,12 @@ impl SecurityConfig {
     /// Env-free core of `withMaxTarMetadataBytes`.
     fn try_set_max_tar_metadata_bytes(&mut self, size: f64) -> std::result::Result<(), CoreError> {
         self.inner.max_tar_metadata_bytes = byte_count(ConfigSetting::MaxTarMetadataBytes, size)?;
+        Ok(())
+    }
+
+    /// Env-free core of `withMaxKdfWork`.
+    fn try_set_max_kdf_work(&mut self, rounds: f64) -> std::result::Result<(), CoreError> {
+        self.inner.max_kdf_work = byte_count(ConfigSetting::MaxKdfWork, rounds)?;
         Ok(())
     }
 
@@ -2811,6 +2883,34 @@ mod tests {
         let dts = include_str!("../index.d.ts");
         assert!(
             dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_repeated_paths_defaults_to_keep_first_and_round_trips() {
+        let mut config = SecurityConfig::new();
+        assert_eq!(config.get_repeated_paths(), "keep_first");
+        assert_eq!(
+            SecurityConfig::permissive().get_repeated_paths(),
+            "keep_first"
+        );
+
+        config.with_repeated_paths(RepeatedPaths::Refuse);
+        assert_eq!(config.get_repeated_paths(), "refuse");
+    }
+
+    #[test]
+    fn test_repeated_paths_covers_every_core_variant_and_index_d_ts() {
+        let mut values = Vec::new();
+        for core in CoreRepeatedPaths::ALL {
+            let policy = RepeatedPaths::try_from(*core).unwrap();
+            assert_eq!(CoreRepeatedPaths::from(policy), *core);
+            values.push(format!("'{}'", core.as_str()));
+        }
+        let expected = format!("export type RepeatedPaths = {}", values.join(" | "));
+        assert!(
+            include_str!("../index.d.ts").lines().any(|l| l == expected),
             "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
         );
     }

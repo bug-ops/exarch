@@ -21,6 +21,7 @@ use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
 use exarch_core::PermissionPolicy;
 use exarch_core::RatioLimit;
+use exarch_core::RepeatedPaths;
 use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::Staging;
@@ -493,6 +494,37 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
+    /// Sets the most SHA-256 rounds of key derivation one operation may spend.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `rounds` is zero, negative or above 2**64 - 1.
+    fn with_max_kdf_work(
+        mut slf: PyRefMut<'_, Self>,
+        rounds: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_kdf_work = rounds.positive(ConfigSetting::MaxKdfWork)?;
+        Ok(slf)
+    }
+
+    /// Sets how an archive that names one landing twice is handled.
+    ///
+    /// `"keep_first"` (the default, also for `permissive()`) keeps the first
+    /// copy and lets the existing-files policy decide every repeat.
+    /// `"refuse"` rejects the archive instead, under every existing-files
+    /// mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` for any other string.
+    fn with_repeated_paths<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        policy: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.repeated_paths = parse_repeated_paths(policy)?;
+        Ok(slf)
+    }
+
     /// Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
     /// block ahead on worker threads, or `None` to decode on one thread.
     ///
@@ -776,6 +808,19 @@ impl PySecurityConfig {
         Ok(())
     }
 
+    /// Returns how an archive that names one landing twice is handled
+    /// (`"keep_first"` or `"refuse"`).
+    #[getter]
+    fn get_repeated_paths(&self) -> &'static str {
+        self.inner.repeated_paths.as_str()
+    }
+
+    #[setter]
+    fn set_repeated_paths(&mut self, value: &str) -> PyResult<()> {
+        self.inner.repeated_paths = parse_repeated_paths(value)?;
+        Ok(())
+    }
+
     /// Returns the lookahead memory in bytes for parallel 7z LZMA2 decoding,
     /// or `None` when decoding runs on one thread.
     #[getter]
@@ -833,6 +878,17 @@ impl PySecurityConfig {
     #[setter]
     fn set_max_tar_metadata_bytes(&mut self, value: PyInteger) -> PyResult<()> {
         self.inner.max_tar_metadata_bytes = value.positive(ConfigSetting::MaxTarMetadataBytes)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn get_max_kdf_work(&self) -> u64 {
+        self.inner.max_kdf_work.get()
+    }
+
+    #[setter]
+    fn set_max_kdf_work(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.max_kdf_work = value.positive(ConfigSetting::MaxKdfWork)?;
         Ok(())
     }
 
@@ -1044,6 +1100,11 @@ fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDe
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
 fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
     parse_one(ConfigSetting::ZipConsistency, value)
+}
+
+/// Parses the string form shared with `RepeatedPaths::as_str`.
+fn parse_repeated_paths(value: &str) -> PyResult<RepeatedPaths> {
+    parse_one(ConfigSetting::RepeatedPaths, value)
 }
 
 impl PySecurityConfig {

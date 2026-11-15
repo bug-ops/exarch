@@ -643,9 +643,18 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    const SIMPLE: &[u8] = include_bytes!("../../../../../tests/fixtures/simple.7z");
-    const LARGE_FILE: &[u8] = include_bytes!("../../../../../tests/fixtures/large-file.7z");
-    const EMPTY: &[u8] = include_bytes!("../../../../../tests/fixtures/empty.7z");
+    const SIMPLE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/simple.7z"
+    ));
+    const LARGE_FILE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/large-file.7z"
+    ));
+    const EMPTY: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/empty.7z"
+    ));
     const ROOMY: u64 = 1 << 20;
     const MEMORY_KIB: usize = 1 << 20;
 
@@ -753,7 +762,7 @@ mod tests {
 
     #[test]
     fn every_fixture_sevenz_rust2_parses_declares_the_count_it_builds() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut walked = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -1075,7 +1084,7 @@ mod tests {
     /// Every fixture sevenz-rust2 parses, with a next header to mutate: plain
     /// and encoded headers both.
     static FIXTURE_SEEDS: std::sync::LazyLock<Vec<Vec<u8>>> = std::sync::LazyLock::new(|| {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut seeds: Vec<Vec<u8>> = std::fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())

@@ -15,6 +15,7 @@ pub(crate) mod source;
 pub(crate) mod staged;
 pub(crate) mod tar;
 pub(crate) mod zip;
+pub(crate) mod zip_prepared;
 
 #[cfg(all(test, unix))]
 mod source_tests;
@@ -22,6 +23,7 @@ mod source_tests;
 // Re-exports for public API
 pub use config::CompressionLevel;
 pub use config::CreationConfig;
+pub use config::Parallelism;
 pub use report::CreationReport;
 pub use report::CreationWarning;
 pub use report::CreationWarningKind;

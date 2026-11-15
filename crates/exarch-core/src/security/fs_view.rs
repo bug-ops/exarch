@@ -1579,6 +1579,8 @@ impl VirtualTree {
     /// What an earlier entry left at `rel`, without following a link at the
     /// path itself; a parent link is followed as extraction would.
     pub(crate) fn occupant(&self, rel: &Path) -> Option<Occupant> {
+        #[cfg(test)]
+        occupant_lookups::count();
         let name = rel.file_name()?;
         let parent = match self.resolve(&self.root.join(rel.parent()?)) {
             Ok(Resolved::Inside { id, .. }) if self.nodes.node(id).kind == Node::Dir => id,
@@ -3316,5 +3318,27 @@ mod strip_prefix_folded_tests {
             strip_prefix_folded(Path::new("/destevil/a"), Path::new("/dest")),
             None
         );
+    }
+}
+
+/// Counts [`VirtualTree::occupant`] lookups on this thread, so a test can prove
+/// that a policy which never asks for an occupant never pays for one.
+#[cfg(test)]
+pub(crate) mod occupant_lookups {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn count() {
+        LOOKUPS.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    /// The lookups `body` made.
+    pub(crate) fn during<T>(body: impl FnOnce() -> T) -> (T, usize) {
+        let before = LOOKUPS.with(Cell::get);
+        let value = body();
+        (value, LOOKUPS.with(Cell::get) - before)
     }
 }

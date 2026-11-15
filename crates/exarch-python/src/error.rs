@@ -217,6 +217,9 @@ fn class_for(code: ErrorCode) -> Option<NewErr> {
 /// This function is a workaround for Rust's orphan rules, which prevent
 /// implementing `From<CoreError> for PyErr` directly.
 pub fn convert_error(err: CoreError) -> PyErr {
+    let reason = err
+        .encryption_refusal()
+        .map(exarch_core::EncryptionRefusal::as_str);
     let FfiErrorMessage {
         kind,
         description,
@@ -254,6 +257,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
             kind.relaxable_by().map(PolicySetting::as_str),
         );
         set_optional_str(&err, "sub_code", kind.sub_code().map(SubCode::as_str));
+        set_optional_str(&err, "reason", reason);
         set_optional_str(
             &err,
             "setting",
@@ -614,6 +618,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<UnknownFormatError>(),
     )?;
     security_violation.setattr("sub_code", m.py().None())?;
+    security_violation.setattr("reason", m.py().None())?;
     security_violation.setattr("by", m.py().None())?;
     m.add("SecurityViolationError", security_violation)?;
     let invalid_archive = m.py().get_type::<InvalidArchiveError>();
@@ -1003,8 +1008,9 @@ mod tests {
 
     #[test]
     fn test_security_violation_conversion() {
-        let err = CoreError::from(exarch_core::Violation::EncryptedEntry {
-            name: "test violation".into(),
+        let err = CoreError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: Some("test violation".into()),
         });
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
@@ -1519,7 +1525,10 @@ mod tests {
             r.bytes_written = 512;
             r
         };
-        let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
+        let source = CoreError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         let err = CoreError::PartialExtraction(exarch_core::Partial::new(
             source,
             report,

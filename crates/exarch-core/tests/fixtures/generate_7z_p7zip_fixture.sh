@@ -10,7 +10,7 @@
 #   symlink-p7zip-dir.7z  `7z a x.7z pkg`: a link met while recursing into a
 #                         directory is stored with S_IFLNK
 #
-#   tests/fixtures/generate_7z_p7zip_fixture.sh
+#   crates/exarch-core/tests/fixtures/generate_7z_p7zip_fixture.sh
 
 set -euo pipefail
 

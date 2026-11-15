@@ -8,6 +8,7 @@
 //! formatter escapes archive-derived parts for the terminal while `--json`
 //! keeps them exact.
 
+use crate::cli::RepeatedPathsArg;
 use crate::cli::ZipConsistencyArg;
 use crate::cli::default_banned_components_text;
 use crate::cli::solid_ratio_text;
@@ -25,6 +26,7 @@ use exarch_core::ArchiveType;
 use exarch_core::CompressionRatio;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
+use exarch_core::EncryptionRefusal;
 use exarch_core::ExtractionReport;
 use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
@@ -826,6 +828,10 @@ fn problem_hint(problem: &ConfigProblem) -> Option<&'static str> {
     Some(hint)
 }
 
+/// The hint of a refusal that no policy flag relaxes.
+const UNRELAXABLE_HINT: &str =
+    "This archive was rejected by a security check that cannot be relaxed via any policy flag.";
+
 /// The hint for a `SecurityViolation` that `relaxable_by` names.
 ///
 /// With no `SecurityConfig` value to relax it, or no flag of `op` for one,
@@ -841,9 +847,7 @@ fn relaxation_hint(op: Operation, relaxable_by: Option<PolicySetting>) -> String
     };
     let hint = match relaxable_by {
         None => {
-            return "This archive was rejected by a security check that cannot be relaxed via any \
-                    policy flag."
-                .to_owned();
+            return UNRELAXABLE_HINT.to_owned();
         }
         Some(PolicySetting::Symlinks) => trusted(Flag::AllowSymlinks),
         Some(PolicySetting::Hardlinks) => trusted(Flag::AllowHardlinks),
@@ -873,6 +877,14 @@ fn relaxation_hint(op: Operation, relaxable_by: Option<PolicySetting>) -> String
                     SecurityConfig::with_max_tar_metadata_bytes."
                 .to_owned();
         }
+        Some(PolicySetting::RepeatedPaths) => op.accepts(Flag::RepeatedPaths).then(|| {
+            format!(
+                "Pass {} {} to keep the first copy of a repeated path, only for archives from a \
+                 trusted producer.",
+                Flag::RepeatedPaths.long(),
+                RepeatedPathsArg::KeepFirst.value_name()
+            )
+        }),
         Some(_) => {
             return "Relax the SecurityConfig setting that refused this entry.".to_owned();
         }
@@ -1176,12 +1188,53 @@ fn refusal_hint(kind: &Violation) -> Option<String> {
              another destination."
                 .to_owned(),
         ),
+        Violation::Encrypted { reason, .. } => Some(encryption_hint(*reason)),
         Violation::DestinationChanged => Some(
             "Another process modified the destination during the replace, so nothing was \
              replaced. Re-run once the destination is no longer in use."
                 .to_owned(),
         ),
         _ => None,
+    }
+}
+
+/// The hint of an encryption refusal. Only the refusals no input of the user
+/// can lift (weak encryption, the key-derivation budget) state that no policy
+/// flag relaxes them; a missing or wrong password is fixed by the password.
+fn encryption_hint(reason: EncryptionRefusal) -> String {
+    let policy_note = matches!(
+        reason,
+        EncryptionRefusal::WeakEncryptionRefused | EncryptionRefusal::KdfCostExceeded
+    );
+    let advice = match reason {
+        EncryptionRefusal::PasswordRequired => format!(
+            "Supply the password with {} <PATH>, {} <FD> (Unix) or {}.",
+            Flag::PasswordFile.long(),
+            Flag::PasswordFd.long(),
+            Flag::PasswordPrompt.long(),
+        ),
+        EncryptionRefusal::WrongPassword | EncryptionRefusal::WrongPasswordOrCorrupt => {
+            "Check the password and try again; the archive may also be damaged.".to_owned()
+        }
+        EncryptionRefusal::AuthenticationFailed => {
+            "The encrypted data was altered or damaged; do not trust the archive.".to_owned()
+        }
+        EncryptionRefusal::WeakEncryptionRefused => {
+            "The archive uses an encryption exarch refuses as too weak (ZipCrypto or raw-key \
+             7z); re-create it with AES-256."
+                .to_owned()
+        }
+        EncryptionRefusal::KdfCostExceeded => {
+            "No CLI flag raises the key-derivation budget. Rust and binding API only: \
+             SecurityConfig::with_max_kdf_work."
+                .to_owned()
+        }
+        _ => String::new(),
+    };
+    if policy_note {
+        format!("{UNRELAXABLE_HINT} {advice}").trim_end().to_owned()
+    } else {
+        advice
     }
 }
 
@@ -1650,8 +1703,9 @@ mod tests {
 
     #[test]
     fn test_security_violation_reason_appears_exactly_once() {
-        let err = ArchiveError::from(Violation::EncryptedEntry {
-            name: "distinctive-entry".into(),
+        let err = ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: Some("distinctive-entry".into()),
         });
         let converted = convert_error(Operation::Extract, err, Path::new("archive.tar.gz"));
         let msg = full_text(&converted);
@@ -1660,6 +1714,30 @@ mod tests {
             1,
             "reason should appear exactly once, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_encryption_hint_states_the_policy_only_where_no_input_lifts_the_refusal() {
+        use exarch_core::EncryptionRefusal as Reason;
+
+        for (reason, policy_note) in [
+            (Reason::PasswordRequired, false),
+            (Reason::WrongPassword, false),
+            (Reason::WrongPasswordOrCorrupt, false),
+            (Reason::AuthenticationFailed, false),
+            (Reason::WeakEncryptionRefused, true),
+            (Reason::KdfCostExceeded, true),
+        ] {
+            let hint = encryption_hint(reason);
+            assert_eq!(
+                hint.contains("cannot be relaxed"),
+                policy_note,
+                "{reason:?}: {hint}"
+            );
+        }
+        let required = encryption_hint(Reason::PasswordRequired);
+        assert!(required.starts_with("Supply the password"), "{required}");
+        assert!(required.contains("--password-fd"), "{required}");
     }
 
     // Regression test for issue #520: the GHSA-5j8q-wxg5-hj4r forged-size
@@ -1701,6 +1779,11 @@ mod tests {
                 component: "CON".into(),
             },
             PolicySetting::MaxTarMetadataBytes => Violation::TarMetadataBudget { limit: 1 },
+            PolicySetting::RepeatedPaths => Violation::RepeatedPath {
+                path: "a".into(),
+                earlier: exarch_core::ManifestEntryType::File,
+                later: exarch_core::ManifestEntryType::File,
+            },
             other => panic!("no sample violation for {other}"),
         }
     }
@@ -1719,6 +1802,7 @@ mod tests {
             (PolicySetting::SolidArchives, "--allow-solid-archives"),
             (PolicySetting::BannedComponents, "--banned-component"),
             (PolicySetting::MaxPathDepth, "--max-path-depth"),
+            (PolicySetting::RepeatedPaths, "--repeated-paths keep-first"),
         ] {
             let msg = hint_for(setting);
             assert!(msg.contains(flag), "HINT missing {flag}: {msg}");

@@ -16,7 +16,15 @@ const {
 } = require('../index.js');
 
 // Written with sevenz-rust2: `a.txt` and a Unix-mode symlink `link` -> `a.txt`.
-const SYMLINK_7Z = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'symlink-mode.7z');
+const SYMLINK_7Z = path.join(
+  __dirname,
+  '..',
+  '..',
+  'exarch-core',
+  'tests',
+  'fixtures',
+  'symlink-mode.7z'
+);
 
 /** A tar of `count` empty members named `<prefix>0..N` of the given type flag. */
 function tarOfEmptyMembers(count, prefix, typeflag, linkname) {

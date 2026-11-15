@@ -544,10 +544,6 @@ mod sevenz_fixtures {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
         .join("tests/fixtures")
         .join(name)
 }

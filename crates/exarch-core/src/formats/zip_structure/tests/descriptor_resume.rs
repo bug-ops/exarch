@@ -247,7 +247,12 @@ pub(super) fn findings_with_budgets(
         recheck,
         ..ChunkSizes::PRODUCTION
     };
-    let (_, structure) = open_chunked(Cursor::new(built.bytes.clone()), chunks).unwrap();
+    let (_, structure) = open_chunked(
+        Cursor::new(built.bytes.clone()),
+        &crate::encryption::Credentials::NONE,
+        chunks,
+    )
+    .unwrap();
     structure.findings().to_vec()
 }
 

@@ -7,7 +7,7 @@ use std::io;
 #[derive(Clone, Copy)]
 #[allow(
     clippy::empty_enums,
-    reason = "uninhabited on purpose, stable has no `!`"
+    reason = "an alias of `!` makes the callers' match arms unreachable code"
 )]
 pub(super) enum Mark {}
 

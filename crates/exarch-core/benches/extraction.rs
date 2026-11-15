@@ -59,12 +59,7 @@ fn fixtures_dir() -> PathBuf {
 /// Returns path to test fixtures directory.
 fn test_fixtures_dir() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
+    PathBuf::from(manifest_dir).join("tests/fixtures")
 }
 
 /// Returns a [`SecurityConfig`] suitable for benchmarks.

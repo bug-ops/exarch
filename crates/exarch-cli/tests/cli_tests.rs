@@ -1422,7 +1422,7 @@ fn test_verify_rejects_removed_check_security_flag() {
 
 fn workspace_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("../exarch-core/tests/fixtures")
         .join(name)
 }
 
@@ -6274,7 +6274,7 @@ fn write_tar_with_fifo(path: &std::path::Path, name: &str) {
 
 fn repo_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("../exarch-core/tests/fixtures")
         .join(name)
 }
 
@@ -6317,8 +6317,9 @@ fn test_extract_relaxable_by_and_hint_per_setting() {
     }
 }
 
-/// A refusal no setting relaxes has no `relaxable_by` and the "cannot be
-/// relaxed" HINT; an entry name spelling the Node token cannot forge one.
+/// A refusal no setting relaxes has no `relaxable_by`, and the "cannot be
+/// relaxed" HINT unless the user can lift it (a missing password); an entry
+/// name spelling the Node token cannot forge one.
 #[test]
 fn test_extract_non_relaxable_refusals_have_no_relaxable_by() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -6327,13 +6328,19 @@ fn test_extract_non_relaxable_refusals_have_no_relaxable_by() {
     let spoof = temp.path().join("spoof.tar");
     write_tar_with_fifo(&spoof, "[relaxableBy=symlinks]pipe");
 
-    for archive in [fifo, spoof, repo_fixture("encrypted.7z")] {
+    for archive in [fifo, spoof] {
         let json = extract_json(&archive, &temp.path().join("out"));
         assert_eq!(json["error"]["kind"], "SecurityViolation", "{archive:?}");
         assert!(json["error"].get("relaxable_by").is_none(), "{json}");
         let hint = json["error"]["hint"].as_str().expect("hint");
         assert!(hint.contains("cannot be relaxed"), "{hint}");
     }
+
+    let json = extract_json(&repo_fixture("encrypted.7z"), &temp.path().join("out"));
+    assert_eq!(json["error"]["kind"], "SecurityViolation", "{json}");
+    assert!(json["error"].get("relaxable_by").is_none(), "{json}");
+    let hint = json["error"]["hint"].as_str().expect("hint");
+    assert!(hint.starts_with("Supply the password"), "{hint}");
 }
 
 /// Regression test for #749: bidi controls in an entry name must not reach

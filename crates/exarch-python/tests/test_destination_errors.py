@@ -158,7 +158,8 @@ def test_overwrite_over_a_symlink_occupant_is_an_existing_symlink_violation(temp
     assert (destination / "link_entry").is_symlink()
 
 
-_SIMPLE_7Z = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "simple.7z"
+_CORE_FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures"
+_SIMPLE_7Z = _CORE_FIXTURES / "simple.7z"
 
 
 def _escaping_link_archive(temp_dir, kind, name):
@@ -202,7 +203,7 @@ def test_file_over_an_escaping_symlink_is_the_occupant_kind(temp_dir, kind, name
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
 @pytest.mark.parametrize("kind", ["tar", "zip"])
-def test_file_under_an_escaping_parent_symlink_stays_a_containment_error(temp_dir, kind):
+def test_file_under_an_escaping_parent_symlink_is_a_symlink_escape(temp_dir, kind):
     archive, _ = _escaping_link_archive(temp_dir, kind, "d/l")
     config = exarch.SecurityConfig().with_allow_symlinks()
     destination = temp_dir / "out"
@@ -212,7 +213,7 @@ def test_file_under_an_escaping_parent_symlink_stays_a_containment_error(temp_di
     (destination / "d").symlink_to(outside)
     (outside / "l").symlink_to("elsewhere")
 
-    with pytest.raises((exarch.PathTraversalError, exarch.SymlinkEscapeError)):
+    with pytest.raises(exarch.SymlinkEscapeError):
         exarch.extract_archive(archive, destination, config)
 
     assert [p.name for p in outside.iterdir()] == ["l"]

@@ -26,6 +26,7 @@ time.workspace = true
 typed-path.workspace = true
 unicode-normalization.workspace = true
 walkdir.workspace = true
+zeroize = { workspace = true, optional = true }
 zip = { workspace = true, features = ["deflate", "deflate64", "bzip2", "zstd", "time"] }
 zstd.workspace = true
 
@@ -47,6 +48,8 @@ proptest.workspace = true
 trybuild.workspace = true
 
 [features]
+# Password-based decryption of WinZip AES ZIP entries and 7z AES archives.
+encryption = ["zip/aes-crypto", "dep:zeroize"]
 # Exposes security primitives as `pub` for external benchmarks and integration
 # tests that cannot access pub(crate) items. Not intended for production use.
 testing = []

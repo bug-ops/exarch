@@ -359,7 +359,7 @@ mod tests {
         fs::create_dir(&subdir).expect("failed to create subdir");
 
         // Use a path with . in it
-        let path_with_dot = subdir.join(".").join("..");
+        let path_with_dot = subdir.join("./..");
         let dest = DestDir::new(path_with_dot).expect("should create dest dir");
 
         // Should be canonicalized to absolute path
@@ -497,7 +497,7 @@ mod tests {
         let escape_result = SafePath::validate(&PathBuf::from("out/loot.txt"), &dest, &config);
         assert_matches!(
             escape_result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "non-lexical escape via nested symlink must still be rejected: {escape_result:?}"
         );
     }

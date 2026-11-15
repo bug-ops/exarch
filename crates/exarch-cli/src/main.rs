@@ -8,7 +8,9 @@ mod exit;
 mod interrupt;
 mod operation;
 mod output;
+mod password;
 mod progress;
+mod sandbox;
 #[cfg(test)]
 mod test_support;
 

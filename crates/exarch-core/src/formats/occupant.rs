@@ -17,13 +17,163 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::ExistingFiles;
+use crate::ManifestEntryType;
 use crate::OccupiedBy;
+use crate::RepeatedPaths;
 use crate::Result;
+use crate::SinkOptions;
 use crate::Violation;
 use crate::formats::pinned_dir::PinnedRoot;
+use crate::formats::run_record::Maker;
+use crate::formats::run_record::RecordBudget;
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::normalized_display;
 use crate::selection::EntryShape;
+
+/// The two policies that decide an occupied landing, taken together.
+///
+/// The run record must outlive the existing-files policy alone: refusing a
+/// repeat needs to know what the run made, so an opt-in
+/// [`RepeatedPaths::Refuse`] keeps the full record under every
+/// [`ExistingFiles`] mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OccupantPolicy {
+    existing: ExistingFiles,
+    repeats: RepeatedPaths,
+}
+
+impl OccupantPolicy {
+    /// The policy of a check made before any entry of a run exists.
+    pub(crate) const PRE_EXISTING: Self = Self::new(ExistingFiles::Skip, RepeatedPaths::KeepFirst);
+
+    /// The product of `existing` and `repeats`.
+    pub(crate) const fn new(existing: ExistingFiles, repeats: RepeatedPaths) -> Self {
+        Self { existing, repeats }
+    }
+
+    /// The policies of a run that carries `options`.
+    pub(crate) const fn of(options: SinkOptions) -> Self {
+        Self::new(options.existing_files, options.repeats)
+    }
+
+    /// The budget of the record of an in-place run under this policy.
+    pub(crate) const fn record_budget(self) -> RecordBudget {
+        match self.repeats {
+            RepeatedPaths::Refuse => RecordBudget::Full,
+            RepeatedPaths::KeepFirst => self.existing.record_budget(),
+        }
+    }
+
+    /// Refuses an entry `arriving` over the occupant `found` of `rel` when
+    /// repeated paths are refused and the run made it or cannot show that it
+    /// did not; any other occupant, and every occupant under
+    /// [`RepeatedPaths::KeepFirst`], is left to the caller.
+    ///
+    /// A directory entry over a directory is no repeat. `maker` runs only
+    /// under [`RepeatedPaths::Refuse`].
+    ///
+    /// # Errors
+    ///
+    /// [`Violation::RepeatedPath`] for an occupant the run made, and the
+    /// refusal of `site` that names an existing occupant when the maker is
+    /// unknown, under every [`ExistingFiles`] mode.
+    pub(crate) fn refuse_repeat(
+        self,
+        arriving: EntryShape,
+        rel: &Path,
+        found: Occupant,
+        maker: impl FnOnce() -> Maker,
+        site: OccupiedSite<'_>,
+    ) -> Result<()> {
+        if self.repeats == RepeatedPaths::KeepFirst {
+            return Ok(());
+        }
+        match maker() {
+            Maker::Run if arriving == EntryShape::Directory && found == Occupant::Directory => {
+                Ok(())
+            }
+            Maker::Run => Err(repeated_path(rel, found, arriving)),
+            Maker::Unknown => Err(site.refuse(rel, Some(found), OccupiedBy::Existing)),
+            Maker::Foreign => Ok(()),
+        }
+    }
+
+    /// Decides an occupied path: the repeat rule first, then the
+    /// [`ExistingFiles`] policy for what it leaves.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`refuse_repeat`](Self::refuse_repeat) and
+    /// [`ExistingFiles::on_occupant`], and the I/O error of `occupant`.
+    pub(crate) fn on_occupant(
+        self,
+        arriving: EntryShape,
+        rel: &Path,
+        occupant: impl FnOnce() -> std::io::Result<Option<Occupant>>,
+        maker: impl FnOnce() -> Maker,
+        site: OccupiedSite<'_>,
+    ) -> Result<OccupantAction> {
+        if self.repeats == RepeatedPaths::KeepFirst {
+            return self.existing.on_occupant(
+                arriving,
+                rel,
+                occupant,
+                || maker() == Maker::Run,
+                site,
+            );
+        }
+        let found = occupant()?;
+        if let Some(found) = found {
+            self.refuse_repeat(arriving, rel, found, maker, site)?;
+        }
+        // The maker was foreign or the occupant is gone, never the run.
+        self.existing
+            .on_occupant(arriving, rel, || Ok(found), || false, site)
+    }
+}
+
+/// The kind of manifest entry an occupant of the destination was made as.
+const fn occupant_type(occupant: Occupant) -> ManifestEntryType {
+    match occupant {
+        Occupant::File => ManifestEntryType::File,
+        Occupant::Directory => ManifestEntryType::Directory,
+        Occupant::Symlink => ManifestEntryType::Symlink,
+    }
+}
+
+/// The kind of manifest entry an arriving entry is.
+pub(crate) const fn shape_type(shape: EntryShape) -> ManifestEntryType {
+    match shape {
+        EntryShape::Directory => ManifestEntryType::Directory,
+        EntryShape::File => ManifestEntryType::File,
+        EntryShape::Link(LinkKind::Symlink) => ManifestEntryType::Symlink,
+        EntryShape::Link(LinkKind::Hardlink) => ManifestEntryType::Hardlink,
+    }
+}
+
+/// The refusal of the entry `later` at `rel`, which an earlier entry of the
+/// run, held by `earlier`, already made.
+///
+/// Shared by extraction, the in-memory sink, `list` and `verify`.
+pub(crate) fn repeated_path(rel: &Path, earlier: Occupant, later: EntryShape) -> ArchiveError {
+    repeated_path_between(rel, occupant_type(earlier), shape_type(later))
+}
+
+/// The one constructor of [`Violation::RepeatedPath`], for callers that know
+/// the kinds of both copies already.
+pub(crate) fn repeated_path_between(
+    rel: &Path,
+    earlier: ManifestEntryType,
+    later: ManifestEntryType,
+) -> ArchiveError {
+    Violation::RepeatedPath {
+        path: normalized_display(rel).into(),
+        earlier,
+        later,
+    }
+    .into()
+}
 
 /// Where an occupied-path refusal is raised: on a host destination, which the
 /// refusal names, or with none (the in-memory sink and the `list` model).
@@ -186,14 +336,12 @@ pub(crate) fn refuse_unless_duplicate(
 
 /// The occupants a write does not replace, even under
 /// [`ExistingFiles::Overwrite`]: a file is replaced, so it cannot reach
-/// [`kept_occupant_refusal`]. The one exception is a 7z extraction on a
-/// Windows host, which replaces a symlink like a regular file.
+/// [`kept_occupant_refusal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeptOccupant {
     /// A directory, which only a directory entry may share.
     Directory,
-    /// A symlink, which a file entry does not replace (see the type doc for 7z
-    /// on Windows).
+    /// A symlink, which a file entry does not replace.
     Symlink,
 }
 
@@ -306,6 +454,7 @@ mod tests {
 
     use super::KeptOccupant;
     use super::OccupantAction;
+    use super::OccupantPolicy;
     use super::ReplacePermit;
     use super::is_run_duplicate;
     use super::kept_occupant_refusal;
@@ -313,11 +462,184 @@ mod tests {
     use crate::ArchiveError;
     use crate::ExistingFiles;
     use crate::OccupiedBy;
+    use crate::RepeatedPaths;
+    use crate::formats::run_record::RecordBudget;
     use crate::security::fs_view::LinkKind;
     use crate::security::fs_view::Occupant;
     use crate::selection::EntryShape;
 
+    #[test]
+    fn refuse_repeats_keep_the_full_record_under_every_existing_files_mode() {
+        for existing in [
+            ExistingFiles::Skip,
+            ExistingFiles::Refuse,
+            ExistingFiles::Overwrite,
+        ] {
+            assert_eq!(
+                OccupantPolicy::new(existing, RepeatedPaths::Refuse).record_budget(),
+                RecordBudget::Full,
+                "{existing:?}"
+            );
+            assert_eq!(
+                OccupantPolicy::new(existing, RepeatedPaths::KeepFirst).record_budget(),
+                existing.record_budget(),
+                "{existing:?}"
+            );
+        }
+    }
+
     use super::OccupiedSite;
+    use crate::Violation;
+    use crate::formats::run_record::Maker;
+
+    const MODES: [ExistingFiles; 3] = [
+        ExistingFiles::Skip,
+        ExistingFiles::Refuse,
+        ExistingFiles::Overwrite,
+    ];
+
+    fn decide(
+        existing: ExistingFiles,
+        repeats: RepeatedPaths,
+        arriving: EntryShape,
+        found: Occupant,
+        maker: Maker,
+    ) -> Result<OccupantAction, ArchiveError> {
+        OccupantPolicy::new(existing, repeats).on_occupant(
+            arriving,
+            Path::new("x"),
+            || Ok(Some(found)),
+            || maker,
+            OccupiedSite::Detached,
+        )
+    }
+
+    #[test]
+    fn refused_repeats_refuse_an_occupant_of_the_run_under_every_mode() {
+        for existing in MODES {
+            for found in [Occupant::File, Occupant::Symlink, Occupant::Directory] {
+                let outcome = decide(existing, RepeatedPaths::Refuse, FILE, found, Maker::Run);
+
+                assert_matches!(
+                    outcome,
+                    Err(ArchiveError::SecurityViolation {
+                        kind: Violation::RepeatedPath { .. },
+                        ..
+                    }),
+                    "{existing:?} {found:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refused_repeats_fail_closed_when_the_maker_is_unknown_under_every_mode() {
+        for existing in MODES {
+            let outcome = decide(
+                existing,
+                RepeatedPaths::Refuse,
+                FILE,
+                Occupant::File,
+                Maker::Unknown,
+            );
+
+            assert_matches!(
+                outcome,
+                Err(ArchiveError::DestinationOccupied {
+                    by: OccupiedBy::Existing,
+                    ..
+                }),
+                "{existing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refused_repeats_leave_a_foreign_occupant_to_the_existing_files_policy() {
+        let foreign = |existing| {
+            decide(
+                existing,
+                RepeatedPaths::Refuse,
+                FILE,
+                Occupant::File,
+                Maker::Foreign,
+            )
+        };
+
+        assert_matches!(foreign(ExistingFiles::Skip), Ok(OccupantAction::Skip));
+        assert_matches!(
+            foreign(ExistingFiles::Overwrite),
+            Ok(OccupantAction::Replace(_))
+        );
+        assert_matches!(
+            foreign(ExistingFiles::Refuse),
+            Err(ArchiveError::DestinationOccupied {
+                by: OccupiedBy::Existing,
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn a_directory_over_a_directory_of_the_run_is_no_repeat() {
+        let policy = OccupantPolicy::new(ExistingFiles::Skip, RepeatedPaths::Refuse);
+        let check =
+            |arriving, found| policy.refuse_repeat(arriving, x(), found, || Maker::Run, DETACHED);
+
+        assert!(check(EntryShape::Directory, Occupant::Directory).is_ok());
+        assert!(check(EntryShape::Directory, Occupant::File).is_err());
+        assert!(check(EntryShape::Directory, Occupant::Symlink).is_err());
+        assert!(check(FILE, Occupant::Directory).is_err());
+    }
+
+    #[test]
+    fn kept_repeats_ignore_the_maker_and_decide_as_existing_files_does() {
+        for existing in MODES {
+            for maker in [Maker::Run, Maker::Foreign, Maker::Unknown] {
+                let kept = decide(
+                    existing,
+                    RepeatedPaths::KeepFirst,
+                    FILE,
+                    Occupant::File,
+                    maker,
+                );
+                let direct = existing.on_occupant(
+                    FILE,
+                    x(),
+                    || Ok(Some(Occupant::File)),
+                    || maker == Maker::Run,
+                    DETACHED,
+                );
+
+                assert_eq!(
+                    std::mem::discriminant(&kept.map_err(|e| e.to_string())),
+                    std::mem::discriminant(&direct.map_err(|e| e.to_string())),
+                    "{existing:?} {maker:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refused_repeats_name_both_kinds_and_the_path() {
+        let outcome = decide(
+            ExistingFiles::Skip,
+            RepeatedPaths::Refuse,
+            EntryShape::Link(LinkKind::Hardlink),
+            Occupant::Symlink,
+            Maker::Run,
+        );
+
+        assert_matches!(
+            outcome,
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::RepeatedPath { path, earlier, later },
+                ..
+            }) if &*path == "x"
+                && earlier == crate::ManifestEntryType::Symlink
+                && later == crate::ManifestEntryType::Hardlink
+        );
+    }
 
     const FILE: EntryShape = EntryShape::File;
     const DETACHED: OccupiedSite<'static> = OccupiedSite::Detached;

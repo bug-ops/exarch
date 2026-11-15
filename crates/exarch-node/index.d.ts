@@ -211,6 +211,8 @@ export interface ExarchInvalidArchiveDetail {
 export interface ExarchSecurityViolationDetail {
   code: 'SECURITY_VIOLATION'
   subCode: SecurityViolationSubCode
+  /** On `subCode === 'ENCRYPTED'` only: why the encrypted archive or entry was refused (`'password_required'`, `'wrong_password'`, `'authentication_failed'`, `'wrong_password_or_corrupt'`, `'weak_encryption_refused'`, `'kdf_cost_exceeded'`); a token newer than this binding reads as a plain string. */
+  reason?: 'password_required' | 'wrong_password' | 'authentication_failed' | 'wrong_password_or_corrupt' | 'weak_encryption_refused' | 'kdf_cost_exceeded' | (string & {})
   relaxableBy?: PolicySetting
   setting?: undefined
   ioKind?: undefined
@@ -1030,6 +1032,19 @@ export declare class SecurityConfig {
   /** Sets how ZIP archives with ambiguous structure are handled. */
   withZipConsistency(policy: ZipConsistencyPolicy): this
   /**
+   * Sets the most SHA-256 rounds of key derivation one operation may spend.
+   *
+   * Default: 2^27.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_kdf_work`) if `rounds`
+   * is not a positive whole number.
+   */
+  withMaxKdfWork(rounds: number): this
+  /** Sets how an archive that names one landing twice is handled. */
+  withRepeatedPaths(policy: RepeatedPaths): this
+  /**
    * Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
    * block ahead on worker threads, or `null` to decode on one thread.
    *
@@ -1233,6 +1248,11 @@ export declare class SecurityConfig {
    */
   get zipConsistency(): ZipConsistencyPolicy | (string & {})
   /**
+   * How an archive that names one landing twice is handled. A policy newer
+   * than this binding is reported as core's token.
+   */
+  get repeatedPaths(): RepeatedPaths | (string & {})
+  /**
    * Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
    * `null` when decoding runs on one thread.
    */
@@ -1246,6 +1266,8 @@ export declare class SecurityConfig {
   get allowWindowsReservedNames(): boolean
   /** Budget in bytes for TAR metadata. */
   get maxTarMetadataBytes(): number
+  /** Most SHA-256 rounds of key derivation one operation may spend. */
+  get maxKdfWork(): number
   /** Memory in bytes a decoder may use for its dictionary or window. */
   get maxDecoderMemory(): number
   /**
@@ -1459,7 +1481,7 @@ export type BackupIdentity = 'verified' | 'unverified'
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'max_kdf_work' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'repeated_paths' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -1854,6 +1876,13 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * * `archive_path` - Path to the archive file
  * * `output_dir` - Directory where files will be extracted
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -1910,7 +1939,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
-export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): Promise<ExtractionReport>
+export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Uint8Array | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive to the specified directory (sync).
@@ -1923,6 +1952,13 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * * `archive_path` - Path to the archive file
  * * `output_dir` - Directory where files will be extracted
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -1945,7 +1981,7 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
  * ```
  */
-export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): ExtractionReport
+export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Uint8Array | undefined | null): ExtractionReport
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -2223,6 +2259,13 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
  *   string, total: number | null, current: number, bytesWritten: number]) =>
  *   void`
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2290,7 +2333,7 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Uint8Array | undefined | null): Promise<ExtractionReport>
 
 /** An entry that extraction writes. */
 export interface ExtractDisposition {
@@ -2412,6 +2455,13 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * * `destination` - Optional directory `extractArchive` would write to. Its
  *   volume decides whether a repeated name is listed as a `duplicate` skip or
  *   as refused in `dispositions`; nothing is created
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2431,7 +2481,7 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * }
  * ```
  */
-export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): Promise<ArchiveManifest>
+export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Uint8Array | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (async).
@@ -2587,6 +2637,13 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ListOptions`, as in `listArchive`
  * * `destination` - Optional destination directory, as in `listArchive`
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2606,7 +2663,7 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * }
  * ```
  */
-export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): ArchiveManifest
+export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Uint8Array | undefined | null): ArchiveManifest
 
 /** A directory in a listing. */
 export interface ManifestDirectoryEntry {
@@ -2851,7 +2908,7 @@ export type PathModel = 'host' | 'portable'
  * Value of the `relaxableBy` property: the `SecurityConfig` setting whose
  * current value refused the entry.
  */
-export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
+export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes' | 'repeated_paths'
 
 /**
  * What makes a destination too important to replace as a whole (the
@@ -2882,6 +2939,16 @@ export interface RefuseDisposition {
 }
 
 /**
+ * How an archive that names one landing twice is handled.
+ *
+ * `keep_first` (the default, also for `SecurityConfig.permissive()`) keeps the
+ * first copy and lets the existing-files policy decide every repeat. `refuse`
+ * rejects the archive instead, under every existing-files mode; combine it
+ * with `staging: 'atomic'` to leave nothing behind.
+ */
+export type RepeatedPaths = 'keep_first' | 'refuse'
+
+/**
  * What became of the original destination after a failed replace
  * (`restore` property of an `IO_ERROR` raised by `'atomic_replace'`).
  */
@@ -2901,7 +2968,7 @@ export interface RootAccessNarrowedWarning {
 }
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
-export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
+export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH' | 'REPEATED_PATH'
 
 /** How many entries were skipped for one reason. */
 export interface SkipCount {
@@ -3066,7 +3133,7 @@ export interface UnverifiedEntry {
 }
 
 /** Why part of the payload was not verified by the integrity check. */
-export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker' | 'path_too_long' | 'descriptor_tail'
+export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker' | 'path_too_long' | 'encrypted' | 'descriptor_tail'
 
 /**
  * Single verification issue.
@@ -3159,6 +3226,13 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  *   VerificationOptions().withIntegrityCheck()` to decode the payload and
  *   verify checksums (default: metadata only, `integrityStatus` is
  *   `'SKIPPED'`)
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -3183,7 +3257,7 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * }
  * ```
  */
-export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): Promise<VerificationReport>
+export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Uint8Array | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (async).
@@ -3330,6 +3404,13 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * * `archive_path` - Path to archive file
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `VerificationOptions` (see `verifyArchive`)
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
+ *   is refused because it cannot be wiped; an empty or over-long (more than
+ *   1024 bytes) password is `InvalidArg`. A password for an archive that is
+ *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
+ *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -3349,7 +3430,7 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * }
  * ```
  */
-export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport
+export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Uint8Array | undefined | null): VerificationReport
 
 /**
  * Value of the `subCode` property of a `ZIP_BOMB` error: what the refused

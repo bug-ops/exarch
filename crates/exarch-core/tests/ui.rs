@@ -25,3 +25,13 @@ fn ui_walked_paths() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui_testing/*.rs");
 }
+
+/// A `Password` is neither `Clone` nor `Display` and cannot be forged, so the
+/// secret cannot be copied or printed by accident. Gated on the `encryption`
+/// feature that provides the type.
+#[cfg(feature = "encryption")]
+#[test]
+fn ui_password() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui_encryption/*.rs");
+}

@@ -55,6 +55,7 @@ use crate::api::extract_tar_stream;
 use crate::api::extract_validated;
 use crate::closed_enum::closed_enum;
 use crate::config::ExtractionOptions;
+use crate::encryption::Credentials;
 use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
@@ -314,6 +315,7 @@ pub struct ListedArchive {
     kept: Kept,
     config: Box<SecurityConfig>,
     reuse: DecodeReuse,
+    credentials: Credentials,
 }
 
 impl std::fmt::Debug for ListedArchive {
@@ -398,6 +400,7 @@ impl ListedArchive {
             kept,
             config,
             reuse,
+            credentials,
             ..
         } = self;
         let extraction = ExtractionOptions::default()
@@ -416,6 +419,7 @@ impl ListedArchive {
             &config,
             &extraction,
             progress,
+            &credentials,
         )
     }
 }
@@ -429,6 +433,7 @@ fn extract_kept(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: &Credentials,
 ) -> Result<ExtractionReport> {
     let spool = match kept {
         Kept::Zip(zip, source) => {
@@ -459,7 +464,7 @@ fn extract_kept(
                 .around(|mark| {
                     replay_spool(spool.file, dir.with_mark(mark), config, options, progress)
                 }),
-            None => extract_validated(archive, dir, config, options, progress),
+            None => extract_validated(archive, dir, config, options, progress, credentials.clone()),
         },
     )
 }
@@ -498,8 +503,17 @@ impl ListedArchive {
         options: ListOptions,
         reuse: DecodeReuse,
         progress: Option<&mut dyn ProgressCallback>,
+        credentials: Credentials,
     ) -> Result<Self> {
-        Self::list_within(archive, extraction, options, reuse, REPLAY_LIMIT, progress)
+        Self::list_within(
+            archive,
+            extraction,
+            options,
+            reuse,
+            REPLAY_LIMIT,
+            progress,
+            credentials,
+        )
     }
 
     /// [`list`](Self::list) with a replay limit other than [`REPLAY_LIMIT`].
@@ -510,6 +524,7 @@ impl ListedArchive {
         reuse: DecodeReuse,
         limit: u64,
         progress: Option<&mut dyn ProgressCallback>,
+        credentials: Credentials,
     ) -> Result<Self> {
         let mut listed = list_with_limit(
             archive,
@@ -518,6 +533,7 @@ impl ListedArchive {
             limit,
             reuse,
             progress,
+            credentials,
         )?;
         listed.config = Box::new(extraction.clone());
         Ok(listed)
@@ -531,9 +547,11 @@ fn list_with_limit(
     limit: u64,
     reuse: DecodeReuse,
     progress: Option<&mut dyn ProgressCallback>,
+    credentials: Credentials,
 ) -> Result<ListedArchive> {
     let format = detect_format(archive)?;
-    let mut pass = ListPass::strict_with(options.stored_targets);
+    let mut pass =
+        ListPass::strict_with(options.stored_targets).with_credentials(credentials.clone());
     if let Some(progress) = progress {
         pass = pass.with_progress(progress);
     }
@@ -552,7 +570,8 @@ fn list_with_limit(
         }
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = SourceFile::open(archive)?;
-            let mut zip = ZipArchive::for_extraction(file.clone(), config, reuse)?;
+            let mut zip =
+                ZipArchive::for_extraction(file.clone(), config, reuse, credentials.clone())?;
             let manifest = zip.list_with(config, &mut pass)?;
             (manifest, Kept::Zip(Box::new(zip), file))
         }
@@ -567,6 +586,7 @@ fn list_with_limit(
         kept,
         config: Box::new(config.clone()),
         reuse,
+        credentials,
     })
 }
 
@@ -750,6 +770,7 @@ mod tests {
             DecodeReuse::default(),
             limit,
             None,
+            Credentials::NONE,
         )
     }
 

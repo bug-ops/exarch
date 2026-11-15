@@ -17,7 +17,7 @@ const {
   verifyArchiveSync,
 } = require('../index.js');
 
-const FIXTURES = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures');
+const FIXTURES = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures');
 const SYMLINK_7Z = path.join(FIXTURES, 'symlink-mode.7z');
 const SOLID_7Z = path.join(FIXTURES, 'solid.7z');
 

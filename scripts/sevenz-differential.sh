@@ -6,7 +6,7 @@
 #
 # The archives come from the ignored test write_kind_contradictions_for_the_differential
 # (crates/exarch-core/tests/sevenz_entry_classifier.rs). Each holds `ok.txt` and
-# the contradicting `entry`. The p7zip 16.02 fixtures in tests/fixtures are not
+# the contradicting `entry`. The p7zip 16.02 fixtures in crates/exarch-core/tests/fixtures are not
 # among them; bsdtar, 7zz 26.05 and exarch agree on both. symlink-p7zip.7z
 # (links named on the command line) extracts `link.txt` as a regular file holding
 # the target text; symlink-p7zip-dir.7z (links met in a directory) extracts

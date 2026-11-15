@@ -194,6 +194,9 @@ pub enum PolicySetting {
     /// `SecurityConfig.withMaxTarMetadataBytes`.
     #[napi(value = "max_tar_metadata_bytes")]
     MaxTarMetadataBytes,
+    /// `SecurityConfig.withRepeatedPaths`.
+    #[napi(value = "repeated_paths")]
+    RepeatedPaths,
 }
 
 /// Value of the `subCode` property of an `INVALID_ARCHIVE` error.
@@ -328,6 +331,9 @@ pub enum ConfigSetting {
     /// `max_decoder_memory`.
     #[napi(value = "max_decoder_memory")]
     MaxDecoderMemory,
+    /// `max_kdf_work`.
+    #[napi(value = "max_kdf_work")]
+    MaxKdfWork,
     /// `compressed_member_allowance`.
     #[napi(value = "compressed_member_allowance")]
     CompressedMemberAllowance,
@@ -370,6 +376,9 @@ pub enum ConfigSetting {
     /// `zip_consistency`.
     #[napi(value = "zip_consistency")]
     ZipConsistency,
+    /// `repeated_paths`.
+    #[napi(value = "repeated_paths")]
+    RepeatedPaths,
     /// `path_model`.
     #[napi(value = "path_model")]
     PathModel,
@@ -653,6 +662,9 @@ pub enum SecurityViolationSubCode {
     /// A source path to archive lies outside the archive root.
     #[napi(value = "SOURCE_PATH")]
     SourcePath,
+    /// A landing named by more than one entry while repeated paths are refused.
+    #[napi(value = "REPEATED_PATH")]
+    RepeatedPath,
 }
 
 mirror_from_core!(
@@ -691,7 +703,8 @@ mirror_from_core!(
         BannedComponents,
         MaxPathDepth,
         WindowsReservedNames,
-        MaxTarMetadataBytes
+        MaxTarMetadataBytes,
+        RepeatedPaths
     ]
 );
 mirror_from_core!(
@@ -708,6 +721,7 @@ mirror_from_core!(
         MaxSolidBlockMemory,
         MaxTarMetadataBytes,
         MaxDecoderMemory,
+        MaxKdfWork,
         CompressedMemberAllowance,
         DecompressionBudget,
         AllowedExtension,
@@ -722,6 +736,7 @@ mirror_from_core!(
         ParallelDecodeMemory,
         ExcludePattern,
         ZipConsistency,
+        RepeatedPaths,
         PathModel,
         ArchiveFormat,
         DecodeReuse,
@@ -776,7 +791,8 @@ mirror_from_core!(
         TarTrailer,
         Platform,
         OutputConflict,
-        SourcePath
+        SourcePath,
+        RepeatedPath
     ]
 );
 mirror_from_core!(
@@ -1150,6 +1166,7 @@ struct ErrorProps {
     code: JsCode,
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
+    reason: Option<&'static str>,
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<exarch_core::IoKind>,
     source_fault: Option<SourceFault>,
@@ -1168,6 +1185,7 @@ impl ErrorProps {
             code,
             relaxable_by: None,
             sub_code: None,
+            reason: None,
             setting: None,
             io_kind: None,
             source_fault: None,
@@ -1188,6 +1206,9 @@ struct Described {
 }
 
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
+    let reason = err
+        .encryption_refusal()
+        .map(exarch_core::EncryptionRefusal::as_str);
     let FfiErrorMessage {
         kind,
         description,
@@ -1215,6 +1236,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
     );
     props.relaxable_by = kind.relaxable_by();
     props.sub_code = kind.sub_code();
+    props.reason = reason;
     props.setting = kind.setting();
     props.io_kind = kind.io_kind().map(exarch_core::IoKind::from);
     props.source_fault = source_fault;
@@ -1342,6 +1364,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(sub_code) = props.sub_code {
         set_property(&mut obj, "subCode", sub_code.as_str());
+    }
+    if let Some(reason) = props.reason {
+        set_property(&mut obj, "reason", reason);
     }
     if let Some(setting) = props.setting {
         set_property(&mut obj, "setting", setting.as_str());
@@ -1887,7 +1912,8 @@ mod tests {
             BannedComponents,
             MaxPathDepth,
             WindowsReservedNames,
-            MaxTarMetadataBytes
+            MaxTarMetadataBytes,
+            RepeatedPaths
         ]
     );
 
@@ -1940,7 +1966,8 @@ mod tests {
             TarTrailer,
             Platform,
             OutputConflict,
-            SourcePath
+            SourcePath,
+            RepeatedPath
         ]
     );
 
@@ -1959,6 +1986,7 @@ mod tests {
             MaxSolidBlockMemory,
             MaxTarMetadataBytes,
             MaxDecoderMemory,
+            MaxKdfWork,
             CompressedMemberAllowance,
             DecompressionBudget,
             AllowedExtension,
@@ -1973,6 +2001,7 @@ mod tests {
             ParallelDecodeMemory,
             ExcludePattern,
             ZipConsistency,
+            RepeatedPaths,
             PathModel,
             ArchiveFormat,
             DecodeReuse,
@@ -2111,7 +2140,10 @@ mod tests {
 
     #[test]
     fn test_violation_sets_its_family_sub_code() {
-        let d = described(CoreError::from(CoreViolation::EncryptedArchive));
+        let d = described(CoreError::from(CoreViolation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert_eq!(
             d.props.sub_code,
             Some(SubCode::SecurityViolation(
@@ -2122,8 +2154,9 @@ mod tests {
 
     #[test]
     fn test_reason_cannot_forge_relaxable_by() {
-        let d = described(CoreError::from(CoreViolation::EncryptedEntry {
-            name: "[relaxableBy=symlinks]".into(),
+        let d = described(CoreError::from(CoreViolation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: Some("[relaxableBy=symlinks]".into()),
         }));
         assert_eq!(d.props.relaxable_by, None);
     }

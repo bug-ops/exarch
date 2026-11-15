@@ -5,6 +5,10 @@ use crate::commands::CommandResult;
 use crate::commands::Outcome;
 use crate::commands::security_config;
 use crate::output::OutputFormatter;
+use crate::password;
+use crate::sandbox;
+use crate::sandbox::Grant;
+use crate::sandbox::Scope;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
@@ -21,6 +25,16 @@ use exarch_core::VerifyRequest;
 /// value.
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
+    let password = password::read(args.password.source().as_ref())?;
+    sandbox::confine_and_report(
+        args.sandbox.mode,
+        &Grant {
+            archive: &args.archive,
+            scope: Scope::ReadOnly,
+        },
+        formatter,
+    )
+    .map_err(anyhow::Error::new)?;
 
     let options = if args.check_integrity {
         let budget = match args.decompression_budget {
@@ -32,9 +46,11 @@ pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Comman
         VerificationOptions::default()
     };
 
-    let report = VerifyRequest::new(&config)
-        .with_options(options)
-        .verify(&args.archive)?;
+    let mut request = VerifyRequest::new(&config).with_options(options);
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    let report = request.verify(&args.archive)?;
 
     formatter.format_verification_report(&report)?;
 

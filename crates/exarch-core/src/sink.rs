@@ -30,6 +30,7 @@ use crate::ExistingFiles;
 use crate::ExtractionOptions;
 use crate::Malformation;
 use crate::QuotaResource;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Staging;
@@ -39,10 +40,12 @@ use crate::formats::common;
 use crate::formats::io_marker::IoMarker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::refuse_hardlink_replace;
 use crate::formats::occupant::tree_occupant_refusal;
+use crate::formats::run_record::Maker;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -142,6 +145,10 @@ pub struct SinkOptions {
     /// [`extract_reader_to_memory`] always
     /// reuses in memory within its own limit and ignores this field.
     pub decode_reuse: DecodeReuse,
+
+    /// The repeated-path policy of the run, taken from its
+    /// [`SecurityConfig`] by the format handler.
+    pub(crate) repeats: RepeatedPaths,
 }
 
 impl Default for SinkOptions {
@@ -149,6 +156,7 @@ impl Default for SinkOptions {
         Self {
             existing_files: ExistingFiles::Skip,
             decode_reuse: DecodeReuse::Off,
+            repeats: RepeatedPaths::KeepFirst,
         }
     }
 }
@@ -192,7 +200,14 @@ impl SinkOptions {
         Self {
             existing_files: options.existing_files,
             decode_reuse: DecodeReuse::Off,
+            repeats: RepeatedPaths::KeepFirst,
         }
+    }
+
+    /// These options under the repeated-path policy of `config`.
+    pub(crate) const fn under(mut self, config: &SecurityConfig) -> Self {
+        self.repeats = config.repeated_paths;
+        self
     }
 }
 
@@ -218,6 +233,7 @@ impl TryFrom<&ExtractionOptions> for SinkOptions {
         Ok(Self {
             existing_files: options.existing_files,
             decode_reuse: DecodeReuse::Off,
+            repeats: RepeatedPaths::KeepFirst,
         })
     }
 }
@@ -634,7 +650,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
 
         let rel = path.as_path();
         if let Some(occupant) = self.tree.occupant(rel) {
-            let policy = tally.options.existing_files;
+            let policy = OccupantPolicy::of(tally.options);
             match occupied_action(policy, EntryShape::File, occupant, rel)? {
                 OccupantAction::Skip => {
                     tally.record_duplicate_skip(rel)?;
@@ -726,9 +742,10 @@ fn kept_refusal(kept: KeptOccupant, rel: &Path) -> ArchiveError {
 /// What to do with a path the sink tree already holds.
 ///
 /// The tree holds only what this run delivered, so `Refuse` skips exactly the
-/// occupants `is_run_duplicate` accepts and refuses the rest, as the host does.
+/// occupants `is_run_duplicate` accepts and refuses the rest, as the host does,
+/// and refused repeats refuse every occupant.
 fn occupied_action(
-    policy: ExistingFiles,
+    policy: OccupantPolicy,
     arriving: EntryShape,
     occupant: Occupant,
     rel: &Path,
@@ -737,7 +754,7 @@ fn occupied_action(
         arriving,
         rel,
         || Ok(Some(occupant)),
-        || true,
+        || Maker::Run,
         OccupiedSite::Detached,
     )
 }
@@ -866,7 +883,17 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
 
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
         let rel = path.as_path();
-        let occupied = self.tree.occupant(rel).is_some();
+        let occupant = self.tree.occupant(rel);
+        let occupied = occupant.is_some();
+        if let Some(found) = occupant {
+            OccupantPolicy::of(tally.options).refuse_repeat(
+                EntryShape::Directory,
+                rel,
+                found,
+                || Maker::Run,
+                OccupiedSite::Detached,
+            )?;
+        }
         let resolved = self
             .tree
             .project_landing(path, Node::Dir, LandingLimits::Enforced)
@@ -928,7 +955,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let rel = link.as_path();
         let target = symlink.target_path();
         if let Some(occupant) = self.tree.occupant(rel) {
-            let policy = tally.options.existing_files;
+            let policy = OccupantPolicy::of(tally.options);
             let arriving = EntryShape::Link(LinkKind::Symlink);
             if matches!(
                 occupied_action(policy, arriving, occupant, rel)?,
@@ -1009,7 +1036,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             }));
         }
         if let Some(occupant) = self.tree.occupant(link.as_path()) {
-            let policy = tally.options.existing_files;
+            let policy = OccupantPolicy::of(tally.options);
             let arriving = EntryShape::Link(LinkKind::Hardlink);
             return match occupied_action(policy, arriving, occupant, link.as_path())? {
                 OccupantAction::Skip => common::record_duplicate_skip(tally.report, link.as_path()),

@@ -1,6 +1,7 @@
 //! Output formatter trait for CLI results.
 
 use crate::operation::Operation;
+use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
@@ -20,6 +21,7 @@ use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
 use exarch_core::PathOccupant;
 use exarch_core::PolicySetting;
+use exarch_core::RepeatedPaths;
 use exarch_core::SecurityConfig;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
@@ -51,8 +53,8 @@ pub enum ManifestView {
 }
 
 /// What the selection of a listing does to each entry, aligned with
-/// `manifest.entries()`; empty when the selection is the default, which
-/// leaves every entry extracted where it is named.
+/// `manifest.entries()`; empty when the selection is the default and repeated
+/// paths are kept, which leaves every entry extracted where it is named.
 #[derive(Debug, Default)]
 pub struct Dispositions(Vec<Option<Disposition>>);
 
@@ -65,7 +67,7 @@ impl Dispositions {
     /// The disposition of each entry of `manifest` under its own selection,
     /// on a destination volume that identifies landings as `volume` says.
     pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig, volume: VolumeIdentity) -> Self {
-        if manifest.selection().is_default() {
+        if manifest.selection().is_default() && config.repeated_paths == RepeatedPaths::KeepFirst {
             return Self::none();
         }
         let mut judged = manifest.dispositions_on(config, volume).peekable();
@@ -108,6 +110,9 @@ pub trait OutputFormatter {
     /// Format verification report
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()>;
 
+    /// Reports the outcome of `--sandbox` once the run is confined.
+    fn format_sandbox(&mut self, status: &SandboxStatus);
+
     /// Format error message for the given operation
     fn format_error(&mut self, operation: Operation, error: &anyhow::Error);
 
@@ -132,6 +137,9 @@ pub enum Envelope<T> {
         operation: Operation,
         /// The command's result.
         data: T,
+        /// The `--sandbox` outcome; absent unless the flag was given.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sandbox: Option<SandboxStatus>,
     },
     /// The command failed.
     Error {
@@ -139,6 +147,9 @@ pub enum Envelope<T> {
         operation: Operation,
         /// What went wrong.
         error: JsonError,
+        /// The `--sandbox` outcome; absent unless the flag was given.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sandbox: Option<SandboxStatus>,
     },
 }
 
@@ -187,6 +198,8 @@ pub enum JsonKind {
     Code(ErrorCode),
     /// A CLI failure with no core error behind it.
     Generic,
+    /// `--sandbox require` could not fully confine the process.
+    SandboxNotEnforced,
 }
 
 impl JsonKind {
@@ -194,6 +207,7 @@ impl JsonKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Generic => "Error",
+            Self::SandboxNotEnforced => "SandboxNotEnforced",
             Self::Code(code) => match code {
                 ErrorCode::IoError => "IoError",
                 ErrorCode::SecurityViolation => "SecurityViolation",
@@ -585,6 +599,13 @@ pub struct JsonError {
     /// what the user must clean up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leftover_path: Option<HostPath>,
+    /// Why an encrypted archive or entry was refused: the token of an
+    /// `EncryptionRefusal` (`password_required`, `wrong_password`,
+    /// `authentication_failed`, `wrong_password_or_corrupt`,
+    /// `weak_encryption_refused`, `kdf_cost_exceeded`); present only on a
+    /// `SECURITY_VIOLATION` with sub-code `ENCRYPTED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
     /// current value refused the entry (only for a `SecurityViolation` a
     /// setting relaxes); `sub_code` the finer classification (always for a
@@ -608,8 +629,19 @@ impl JsonError {
             by: None,
             step: None,
             leftover_path: None,
+            reason: None,
             discriminants: None,
         }
+    }
+
+    /// Records why an encryption refusal happened. Any other error leaves the
+    /// object unchanged.
+    #[must_use]
+    pub fn with_encryption_reason(mut self, error: &ArchiveError) -> Self {
+        self.reason = error
+            .encryption_refusal()
+            .map(exarch_core::EncryptionRefusal::as_str);
+        self
     }
 
     /// Records what an occupied-path refusal names: the refused paths with

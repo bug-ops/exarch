@@ -315,6 +315,7 @@ pub fn extract_reader_to_memory(
         request.options,
         progress,
         Some(reuse),
+        crate::encryption::Credentials::NONE,
     )
     .map_err(ArchiveError::discarded)?;
     Ok((report, sink))

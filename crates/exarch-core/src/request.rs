@@ -13,6 +13,8 @@
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 
 use crate::ArchiveReader;
 use crate::ArchiveWriter;
@@ -22,6 +24,8 @@ use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ListOptions;
 use crate::NoopProgress;
+#[cfg(feature = "encryption")]
+use crate::Password;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -38,6 +42,7 @@ use crate::creation::staged::StagedOutput;
 use crate::creation::tar::write_tar;
 use crate::creation::zip::warn_on_extraction_ratio;
 use crate::creation::zip::write_zip;
+use crate::encryption::Credentials;
 use crate::formats::detect::CreatableFormat;
 use crate::formats::detect::CreationFamily;
 use crate::inspection::ArchiveManifest;
@@ -72,6 +77,8 @@ struct Carrier<'a, C, O> {
     config: &'a C,
     options: O,
     progress: OptionalProgress<'a>,
+    #[cfg(feature = "encryption")]
+    password: Option<Arc<Password>>,
 }
 
 impl<'a, C, O> Carrier<'a, C, O> {
@@ -80,6 +87,32 @@ impl<'a, C, O> Carrier<'a, C, O> {
             config,
             options,
             progress: OptionalProgress(None),
+            #[cfg(feature = "encryption")]
+            password: None,
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    fn with_password(mut self, password: Arc<Password>) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    #[cfg_attr(
+        not(feature = "encryption"),
+        expect(
+            clippy::unused_self,
+            reason = "without the feature there is no password to read, but callers are the same"
+        )
+    )]
+    fn credentials(&self) -> Credentials {
+        #[cfg(feature = "encryption")]
+        {
+            Credentials::new(self.password.clone())
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            Credentials::NONE
         }
     }
 
@@ -98,6 +131,7 @@ impl<'a, C, O> Carrier<'a, C, O> {
             config,
             options,
             progress,
+            ..
         } = self;
         progress.run(|progress| operation(config, options, progress))
     }
@@ -155,6 +189,37 @@ impl<'a> ExtractRequest<'a> {
         Self(self.0.with_options(options))
     }
 
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::ExtractRequest;
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = ExtractRequest::new(&config)
+    ///     .with_password(password)
+    ///     .extract("secret.zip", "out")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
+    }
+
     /// Reports progress to `progress`.
     #[must_use]
     pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
@@ -172,6 +237,7 @@ impl<'a> ExtractRequest<'a> {
         output_dir: impl AsRef<Path>,
     ) -> Result<ExtractionReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
             extract_staged(
                 output_dir.as_ref(),
@@ -180,7 +246,14 @@ impl<'a> ExtractRequest<'a> {
                 Some(archive.as_ref()),
                 progress,
                 |dir, options, progress| {
-                    extract_validated(archive.as_ref(), dir, config, options, progress)
+                    extract_validated(
+                        archive.as_ref(),
+                        dir,
+                        config,
+                        options,
+                        progress,
+                        credentials.clone(),
+                    )
                 },
             )
         })
@@ -236,6 +309,37 @@ impl<'a> ListRequest<'a> {
         Self(self.0.with_options(options))
     }
 
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::ListRequest;
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = ListRequest::new(&config)
+    ///     .with_password(password)
+    ///     .list("secret.zip")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
+    }
+
     /// Reports progress to `progress`.
     #[must_use]
     pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
@@ -249,8 +353,15 @@ impl<'a> ListRequest<'a> {
     /// See [`ListRequest`].
     pub fn list(self, archive: impl AsRef<Path>) -> Result<ArchiveManifest> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            crate::inspection::list_archive_with_progress(archive, config, options, progress)
+            crate::inspection::list_archive_with_progress(
+                archive,
+                config,
+                options,
+                progress,
+                credentials,
+            )
         })
     }
 
@@ -261,10 +372,13 @@ impl<'a> ListRequest<'a> {
     /// See [`ListRequest`].
     pub fn list_reader(self, reader: ArchiveReader<'_>) -> Result<ArchiveManifest> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
             let manifest = reader.list(
                 config,
-                &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
+                &mut ListPass::strict_with(options.stored_targets)
+                    .with_credentials(credentials)
+                    .with_progress(progress),
             )?;
             progress.on_complete();
             Ok(manifest)
@@ -320,8 +434,16 @@ impl<'a> ListRequest<'a> {
         reuse: DecodeReuse,
     ) -> Result<ListedArchive> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            ListedArchive::list(archive.as_ref(), config, options, reuse, Some(progress))
+            ListedArchive::list(
+                archive.as_ref(),
+                config,
+                options,
+                reuse,
+                Some(progress),
+                credentials,
+            )
         })
     }
 }
@@ -380,6 +502,37 @@ impl<'a> VerifyRequest<'a> {
         Self(self.0.with_options(options))
     }
 
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::VerifyRequest;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = VerifyRequest::new(&config)
+    ///     .with_password(password)
+    ///     .verify("secret.zip")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
+    }
+
     /// Reports progress to `progress`.
     #[must_use]
     pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
@@ -393,8 +546,15 @@ impl<'a> VerifyRequest<'a> {
     /// See [`VerifyRequest`].
     pub fn verify(self, archive: impl AsRef<Path>) -> Result<VerificationReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            crate::inspection::verify_archive_with_progress(archive, config, options, progress)
+            crate::inspection::verify_archive_with_progress(
+                archive,
+                config,
+                options,
+                progress,
+                credentials,
+            )
         })
     }
 
@@ -406,8 +566,9 @@ impl<'a> VerifyRequest<'a> {
     /// See [`VerifyRequest`].
     pub fn verify_reader(self, reader: ArchiveReader<'_>) -> Result<VerificationReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            let report = reader.verify(config, options, progress)?;
+            let report = reader.verify(config, options, progress, credentials)?;
             progress.on_complete();
             Ok(report)
         })
@@ -480,6 +641,35 @@ impl<'a> SinkExtractRequest<'a> {
         Self(self.0.with_options(options))
     }
 
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::SinkExtractRequest;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _request = SinkExtractRequest::new(&config).with_password(password);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
+    }
+
     /// Reports progress to `progress`.
     #[must_use]
     pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
@@ -497,8 +687,9 @@ impl<'a> SinkExtractRequest<'a> {
         sink: &mut S,
     ) -> Result<ExtractionReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            extract_to_sink_reusing(reader, sink, config, options, progress, None)
+            extract_to_sink_reusing(reader, sink, config, options, progress, None, credentials)
         })
     }
 }

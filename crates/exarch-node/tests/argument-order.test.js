@@ -17,7 +17,7 @@ const {
 } = require('../index.js');
 
 const SYMLINK_7Z = fs.readFileSync(
-  path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'symlink-mode.7z')
+  path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures', 'symlink-mode.7z')
 );
 
 const config = () => new SecurityConfig();

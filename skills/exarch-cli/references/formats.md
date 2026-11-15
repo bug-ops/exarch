@@ -65,3 +65,11 @@ Details that matter:
 - An entry with an empty name is rejected (`empty path not allowed`).
 - A block coded with Deflate, Deflate64, zstd, or lz4 is refused at admission, before any write: `extract` and `extract --atomic` exit `1` and create no destination, `list` still works, `verify` reports `FAIL` (one `HIGH` `7z block uses an unsupported coder or malformed coder properties` issue per block), and `verify --check-integrity` reports `INCOMPLETE` (`not_decodable`) with exit `1`, also under `--json`.
 - Solid archives, decoder memory, and header limits: [security-model.md](security-model.md).
+
+## Encrypted archives (ZIP and 7z)
+
+- Supported: ZIP WinZip AES (128/192/256) and 7z AES-256 (content, or header and content). Refused with `SECURITY_VIOLATION` / `ENCRYPTED`: ZipCrypto and 7z raw-key content (`weak_encryption_refused`). Solid encrypted 7z stays refused as solid.
+- Password sources: `--password-file <PATH>` (first line, at most 1 KiB, a regular file; on Unix not readable by group or others, else `chmod 600`), `--password-fd <N>` (Unix, first line of an inherited descriptor, e.g. `3< file`), `--password-prompt` (no echo; fails without a terminal). The flags exclude each other; there is no argument or environment variable. A password for an unencrypted archive is ignored. A password file or descriptor that cannot be read fails before the archive is opened.
+- Without a password: `extract` fails `ENCRYPTED` (`password_required`) before writing; `list` shows the entries of a ZIP and of a 7z with a plain header (a 7z with an encrypted header fails `password_required`); `verify --check-integrity` counts the encrypted ZIP entries as unverified with reason `encrypted`.
+- Wrong password: ZIP `wrong_password` (verifier mismatch, before any write) or `authentication_failed` (tampered data); 7z `wrong_password_or_corrupt`. Key derivation of a 7z over the library budget `max_kdf_work` (2^27 rounds, no CLI flag) fails `kdf_cost_exceeded`.
+- The password is never printed, logged or put in JSON.

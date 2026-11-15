@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tests: the release-only redaction test builds `DestinationOccupied.conflicts` as `OccupiedPaths`, so the release-profile test job compiles again (#1236).
 - Extraction: a destination below a file, a destination name that is too long under `--atomic` and a plain extraction into a destination without search permission are typed `DestinationNotAccessible` errors that name the destination, with `errno` and `filename` set in Python (#1218).
 - Node: a committed loader requires only bundled addons, and the release workflow checks the packed package layout (#1218).
 - Python: errors pickle and the stubtest gate passes (#1218).

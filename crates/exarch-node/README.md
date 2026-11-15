@@ -143,7 +143,7 @@ the promise.
 ### Password-Protected Archives
 
 ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
-a `Buffer` as the `password` argument of `extractArchive`,
+a `Uint8Array` (a `Buffer` works) as the `password` argument of `extractArchive`,
 `extractArchiveSync`, `extractArchiveWithProgress`, `listArchive`,
 `listArchiveSync`, `verifyArchive` or `verifyArchiveSync`. A string is refused
 because it cannot be wiped; exarch wipes its own copy and you wipe yours.

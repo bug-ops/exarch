@@ -20,6 +20,7 @@ use crate::error::chain_text;
 use crate::error::leftover_path;
 use crate::error::raw;
 use crate::operation::Operation;
+use crate::sandbox::NotEnforced;
 use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use exarch_core::ArchiveError;
@@ -99,6 +100,7 @@ pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Res
             crate::error::CANCELLED_TEXT,
         )
         .with_hint(Some(hint.to_owned())),
+        sandbox: None,
     })
 }
 
@@ -342,10 +344,17 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
     fn format_error(&mut self, operation: Operation, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
+        let not_enforced = error.chain().find_map(|e| e.downcast_ref::<NotEnforced>());
         let ffi_kind = extraction_err.map(ArchiveError::ffi_kind);
-        let kind = ffi_kind
-            .as_ref()
-            .map_or(JsonKind::Generic, |kind| JsonKind::Code(kind.code()));
+        let kind = match (&ffi_kind, not_enforced) {
+            (Some(kind), _) => JsonKind::Code(kind.code()),
+            (None, Some(_)) => JsonKind::SandboxNotEnforced,
+            (None, None) => JsonKind::Generic,
+        };
+        let sandbox = self
+            .sandbox
+            .take()
+            .or_else(|| not_enforced.map(|refusal| refusal.0.clone()));
 
         // The message and hints are the exact text: archive-derived parts are
         // escaped only when a terminal formatter renders them.
@@ -374,6 +383,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         let written = self.output(&Envelope::<()>::Error {
             operation,
             error: json_error,
+            sandbox,
         });
         if let Err(error) = written {
             // The document is the only report of the failure, so a stdout
@@ -561,6 +571,7 @@ mod tests {
         let output = Envelope::<()>::Error {
             operation: Operation::Extract,
             error: JsonError::new(JsonKind::Code(ErrorCode::ZipBomb), "zip bomb detected"),
+            sandbox: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -580,6 +591,7 @@ mod tests {
                 JsonKind::Code(ErrorCode::PathTraversal),
                 "traversal attempt",
             ),
+            sandbox: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         // data field should be absent (skip_serializing_if = None)
@@ -684,6 +696,7 @@ mod tests {
         let output = Envelope::<()>::Error {
             operation: Operation::Extract,
             error: JsonError::new(JsonKind::Code(kind.code()), "denied").with_ffi_kind(&kind),
+            sandbox: None,
         };
         serde_json::to_value(&output).unwrap()
     }
@@ -1008,6 +1021,31 @@ mod tests {
     }
 
     #[test]
+    fn format_error_names_a_failed_require_and_carries_the_status() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let status = SandboxStatus::Unavailable {
+            reason: crate::sandbox::Unavailable::NotLinux,
+        };
+        let err = anyhow::Error::new(NotEnforced(status));
+        f.format_error(Operation::Extract, &err);
+        let v = parsed(&f);
+        assert_eq!(v["error"]["kind"], "SandboxNotEnforced");
+        assert_eq!(v["sandbox"]["status"], "unavailable");
+    }
+
+    #[test]
+    fn format_error_keeps_the_status_reported_before_the_failure() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_sandbox(&SandboxStatus::Unavailable {
+            reason: crate::sandbox::Unavailable::Disabled,
+        });
+        f.format_error(Operation::List, &anyhow::anyhow!("boom"));
+        let v = parsed(&f);
+        assert_eq!(v["error"]["kind"], "Error");
+        assert_eq!(v["sandbox"]["reason"], "disabled");
+    }
+
+    #[test]
     fn format_error_writes_error_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
         let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
@@ -1184,6 +1222,7 @@ mod tests {
         let error = serde_json::to_value(Envelope::<()>::Error {
             operation: Operation::Verify,
             error: JsonError::new(JsonKind::Generic, "boom"),
+            sandbox: None,
         })
         .unwrap();
         assert_eq!(

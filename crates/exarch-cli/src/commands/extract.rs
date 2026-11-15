@@ -22,6 +22,7 @@ use crate::progress::BarLength;
 use crate::progress::progress_for;
 use crate::sandbox;
 use crate::sandbox::Grant;
+use crate::sandbox::Placement;
 use crate::sandbox::SandboxMode;
 use crate::sandbox::Scope;
 use anyhow::Context;
@@ -213,6 +214,14 @@ impl WriteMode {
             Self::Safe | Self::Force => interrupt::Run::ExtractInPlace,
             Self::Atomic => interrupt::Run::ExtractAtomic,
             Self::AtomicReplace => interrupt::Run::ExtractReplace,
+        }
+    }
+
+    const fn placement(self) -> Placement {
+        if self.stages() {
+            Placement::Staged
+        } else {
+            Placement::InPlace
         }
     }
 
@@ -470,7 +479,7 @@ pub fn execute(
     };
     let config = security_config(args, base)?;
     let password = password::read(args.password.source().as_ref())?;
-    if cfg!(target_os = "linux") && args.sandbox.mode != SandboxMode::Off && !args.atomic {
+    if cfg!(target_os = "linux") && args.sandbox.mode != SandboxMode::Off && !write_mode.stages() {
         // The grant needs a directory to attach to; core creates it with the
         // same call for an unsandboxed in-place run.
         DestDir::new_or_create(&output_dir)?;
@@ -481,7 +490,7 @@ pub fn execute(
             archive: &args.archive,
             scope: Scope::Extract {
                 destination: &output_dir,
-                atomic: args.atomic,
+                placement: write_mode.placement(),
             },
         },
         formatter,

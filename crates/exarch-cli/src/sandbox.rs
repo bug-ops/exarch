@@ -6,6 +6,11 @@
 //! password was read and the destination exists, and before the interrupt
 //! handler spawns its thread, so every later thread inherits the restriction.
 //!
+//! A sandboxed `extract` pre-creates a missing destination and writes in place,
+//! because a staging directory beside the destination needs rights outside it:
+//! an interrupted or failed run into a destination that did not exist leaves
+//! its partial output and reports it as such, instead of discarding it.
+//!
 //! Only Linux has a backend (Landlock, ABI v2 or newer). Elsewhere [`confine`]
 //! reports [`Unavailable::NotLinux`], which `--sandbox require` turns into a
 //! failure. The status is [`SandboxStatus::Enforced`] only when the kernel
@@ -69,22 +74,39 @@ pub struct Abi(pub NonZeroU8);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRight {
+    /// Run a file.
     Execute,
+    /// Open a file for writing.
     WriteFile,
+    /// Open a file for reading.
     ReadFile,
+    /// Open or list a directory.
     ReadDir,
+    /// Remove a directory.
     RemoveDir,
+    /// Remove or rename away a file.
     RemoveFile,
+    /// Create a character device.
     MakeChar,
+    /// Create a directory.
     MakeDir,
+    /// Create a regular file.
     MakeReg,
+    /// Create a socket.
     MakeSock,
+    /// Create a named pipe.
     MakeFifo,
+    /// Create a block device.
     MakeBlock,
+    /// Create a symbolic link.
     MakeSym,
+    /// Link or rename a file across directories.
     Refer,
+    /// Truncate a file.
     Truncate,
+    /// Run `ioctl` commands on a device file.
     IoctlDev,
+    /// Connect to a path-based Unix socket.
     ResolveUnix,
 }
 
@@ -202,6 +224,16 @@ pub struct Grant<'a> {
     pub scope: Scope<'a>,
 }
 
+/// Where an `extract` run writes its output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// Straight into the destination, which a grant can cover.
+    InPlace,
+    /// Into a staging directory beside the destination, which needs rights
+    /// outside the destination and so cannot be confined.
+    Staged,
+}
+
 /// The command a [`Grant`] is for.
 #[derive(Clone, Copy, Debug)]
 pub enum Scope<'a> {
@@ -209,8 +241,8 @@ pub enum Scope<'a> {
     Extract {
         /// The destination directory.
         destination: &'a Path,
-        /// Whether the run stages atomically.
-        atomic: bool,
+        /// Where the run writes.
+        placement: Placement,
     },
     /// `list` and `verify`: only the archive is read.
     ReadOnly,
@@ -265,8 +297,30 @@ pub fn confine_and_report(
 ) -> Result<(), NotEnforced> {
     if let Some(status) = confine(mode, grant)? {
         formatter.format_sandbox(&status);
+        #[cfg(all(target_os = "linux", feature = "test-hooks", debug_assertions))]
+        probe::create_outside();
     }
     Ok(())
+}
+
+/// Test-only seam: after confinement, tries to create the file
+/// `EXARCH_TEST_SANDBOX_PROBE` names (a path outside the destination) and
+/// reports the outcome on stderr, so a test can prove the kernel denies it.
+#[cfg(all(target_os = "linux", feature = "test-hooks", debug_assertions))]
+mod probe {
+    use std::fs::OpenOptions;
+
+    const VARIABLE: &str = "EXARCH_TEST_SANDBOX_PROBE";
+
+    pub(super) fn create_outside() {
+        let Some(path) = std::env::var_os(VARIABLE) else {
+            return;
+        };
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => eprintln!("sandbox probe: created {}", path.to_string_lossy()),
+            Err(error) => eprintln!("sandbox probe: {error}"),
+        }
+    }
 }
 
 fn judge(mode: SandboxMode, status: SandboxStatus) -> Result<SandboxStatus, NotEnforced> {
@@ -317,6 +371,7 @@ mod platform {
     use super::Abi;
     use super::AccessRight;
     use super::Grant;
+    use super::Placement;
     use super::SandboxStatus;
     use super::Scope;
     use super::Unavailable;
@@ -387,7 +442,13 @@ mod platform {
     }
 
     pub(super) fn apply(grant: &Grant<'_>) -> SandboxStatus {
-        if matches!(grant.scope, Scope::Extract { atomic: true, .. }) {
+        if matches!(
+            grant.scope,
+            Scope::Extract {
+                placement: Placement::Staged,
+                ..
+            }
+        ) {
             return unavailable(Unavailable::AtomicStaging);
         }
         match kernel_abi() {
@@ -402,9 +463,14 @@ mod platform {
     }
 
     /// Every right of `abi` except those a destination subtree must never
-    /// hold: running a file, device `ioctl`s and connecting to a path socket.
+    /// hold: running a file, device `ioctl`s, connecting to a path socket and
+    /// creating device nodes, named pipes or sockets (extraction creates none
+    /// of them, and under root a stray node would be a write path outside).
     fn destination_rights(abi: ABI) -> landlock::BitFlags<AccessFs> {
-        AccessFs::from_all(abi) & !(AccessFs::Execute | AccessFs::IoctlDev | AccessFs::ResolveUnix)
+        const WITHHELD: landlock::BitFlags<AccessFs> = landlock::make_bitflags!(AccessFs::{
+            Execute | IoctlDev | ResolveUnix | MakeChar | MakeBlock | MakeFifo | MakeSock
+        });
+        AccessFs::from_all(abi) & !WITHHELD
     }
 
     fn restrict(grant: &Grant<'_>, abi: ABI) -> Result<SandboxStatus, Failure> {

@@ -147,6 +147,9 @@ pub enum Envelope<T> {
         operation: Operation,
         /// What went wrong.
         error: JsonError,
+        /// The `--sandbox` outcome; absent unless the flag was given.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sandbox: Option<SandboxStatus>,
     },
 }
 
@@ -195,6 +198,8 @@ pub enum JsonKind {
     Code(ErrorCode),
     /// A CLI failure with no core error behind it.
     Generic,
+    /// `--sandbox require` could not fully confine the process.
+    SandboxNotEnforced,
 }
 
 impl JsonKind {
@@ -202,6 +207,7 @@ impl JsonKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Generic => "Error",
+            Self::SandboxNotEnforced => "SandboxNotEnforced",
             Self::Code(code) => match code {
                 ErrorCode::IoError => "IoError",
                 ErrorCode::SecurityViolation => "SecurityViolation",

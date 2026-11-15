@@ -24,7 +24,7 @@ pub(crate) const HEADER_RESERVE: u64 = 1 << MAX_POWER;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AesParams {
     power: u8,
-    salt: Vec<u8>,
+    params_tail: Vec<u8>,
 }
 
 impl AesParams {
@@ -42,15 +42,15 @@ impl AesParams {
         };
         let (&b0, &b1) = (properties.first()?, properties.get(1)?);
         let iv_size = usize::from((b0 >> 6) & 1).saturating_add(usize::from(b1 & 15));
-        let salt_size = usize::from((b0 >> 7) & 1).saturating_add(usize::from(b1 >> 4));
-        let salt_end = 2usize.checked_add(salt_size)?;
-        let salt = properties.get(2..salt_end)?;
-        if properties.len() < salt_end.checked_add(iv_size)? {
+        let tail_len = usize::from((b0 >> 7) & 1).saturating_add(usize::from(b1 >> 4));
+        let tail_end = 2usize.checked_add(tail_len)?;
+        let tail = properties.get(2..tail_end)?;
+        if properties.len() < tail_end.checked_add(iv_size)? {
             return None;
         }
         Some(Self {
             power: b0 & 0x3F,
-            salt: salt.to_vec(),
+            params_tail: tail.to_vec(),
         })
     }
 }
@@ -119,12 +119,16 @@ impl KdfRuns {
 mod tests {
     use super::*;
 
-    fn props(power: u8, salt: &[u8]) -> Vec<u8> {
-        let salt_size = u8::try_from(salt.len()).unwrap();
-        let mut bytes = vec![power | if salt.is_empty() { 0 } else { 0x80 }, 0];
-        bytes[1] = (salt_size.saturating_sub(1)) << 4;
-        bytes.extend_from_slice(salt);
+    fn props(power: u8, tail: &[u8]) -> Vec<u8> {
+        let tail_len = u8::try_from(tail.len()).unwrap();
+        let mut bytes = vec![power | if tail.is_empty() { 0 } else { 0x80 }, 0];
+        bytes[1] = (tail_len.saturating_sub(1)) << 4;
+        bytes.extend_from_slice(tail);
         bytes
+    }
+
+    fn round_after(last: u8) -> u8 {
+        last.checked_add(1).unwrap()
     }
 
     fn budget(rounds: u64) -> NonZeroU64 {
@@ -141,13 +145,13 @@ mod tests {
     }
 
     #[test]
-    fn a_changing_salt_is_charged_per_change() {
+    fn a_changing_tail_is_charged_per_change() {
         let mut runs = KdfRuns::new(budget(3 << 19), false);
-        assert_eq!(runs.admit(&props(19, &[1])), Ok(()));
-        assert_eq!(runs.admit(&props(19, &[2])), Ok(()));
-        assert_eq!(runs.admit(&props(19, &[3])), Ok(()));
+        for round in 1u8..=3 {
+            assert_eq!(runs.admit(&props(19, &[round])), Ok(()));
+        }
         assert_eq!(
-            runs.admit(&props(19, &[4])),
+            runs.admit(&props(19, &[round_after(3)])),
             Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
         );
     }

@@ -270,11 +270,9 @@ fn a_directory_entry_under_an_escaping_symlink_whose_target_already_holds_it_is_
 
         // With symlinks allowed the full-path canonicalize sees the escape
         // first (`PathTraversal`, unchanged); otherwise the walk does.
-        assert!(
-            matches!(
-                error,
-                ArchiveError::SymlinkEscape { .. } | ArchiveError::PathTraversal { .. }
-            ),
+        assert_matches!(
+            error,
+            ArchiveError::SymlinkEscape { .. } | ArchiveError::PathTraversal { .. },
             "{allow}: {error}"
         );
         assert_eq!(std::fs::read_dir(outside.join("sub")).unwrap().count(), 0);

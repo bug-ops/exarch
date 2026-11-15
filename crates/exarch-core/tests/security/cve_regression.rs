@@ -80,11 +80,6 @@ impl TarTestBuilder {
     }
 }
 
-/// Creates a minimal POSIX ustar TAR archive where each entry has an arbitrary
-/// raw path (bypassing the `tar` crate's path sanitization).
-///
-/// This is needed to craft archives that reproduce CVE attack vectors —
-/// attackers control raw archive bytes and are not constrained by safe APIs.
 fn raw_header(path: &[u8], size: usize, typeflag: u8) -> [u8; 512] {
     let mut header = [0u8; 512];
 
@@ -128,6 +123,11 @@ fn push_padded(out: &mut Vec<u8>, data: &[u8]) {
     }
 }
 
+/// Creates a minimal POSIX ustar TAR archive where each entry has an arbitrary
+/// raw path (bypassing the `tar` crate's path sanitization).
+///
+/// This is needed to craft archives that reproduce CVE attack vectors —
+/// attackers control raw archive bytes and are not constrained by safe APIs.
 fn make_raw_tar(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
 

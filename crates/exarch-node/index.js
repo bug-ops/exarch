@@ -11,14 +11,16 @@ const addons = {
   'linux-arm64': () => require('./exarch-rs.linux-arm64-gnu.node'),
 };
 
-function isGlibc() {
+// Musl only on positive evidence: a report that exists but names no glibc.
+// Runtimes without process.report fall through to the glibc addon require.
+function isMusl() {
   const report = process.report?.getReport?.();
-  return typeof report?.header?.glibcVersionRuntime === 'string';
+  return report !== undefined && typeof report.header?.glibcVersionRuntime !== 'string';
 }
 
 function platformKey() {
   const key = `${process.platform}-${process.arch}`;
-  if (process.platform === 'linux' && !isGlibc()) {
+  if (process.platform === 'linux' && isMusl()) {
     throw new Error(`exarch-rs: unsupported platform ${key}-musl; only glibc Linux is bundled`);
   }
   if (process.platform === 'win32' && process.arch !== 'x64') {

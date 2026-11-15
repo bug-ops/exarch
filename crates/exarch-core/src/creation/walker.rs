@@ -322,8 +322,8 @@ pub(crate) enum EntryType {
 
     /// Directory with the metadata the walk used to classify it: `stat` of
     /// the object a followed link leads to, `lstat` otherwise (boxed to keep
-    /// the entry small). Directory
-    /// mode, owner and mtime are written from this, never re-read by path.
+    /// the entry small). Directory mode, owner and mtime are written from
+    /// this, never re-read by path.
     Directory {
         /// The walk's own metadata of the directory.
         metadata: Box<Metadata>,

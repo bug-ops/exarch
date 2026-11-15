@@ -71,6 +71,25 @@ describe('npm loader (#1200)', () => {
     assert.match(result.message, /freebsd/);
   });
 
+  it('treats Linux as musl only when the runtime report lacks glibc', () => {
+    const probe = (report) => {
+      const script = `
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        Object.defineProperty(process, 'arch', { value: 'x64' });
+        Object.defineProperty(process, 'report', { value: ${report} });
+        try { require('./index.js'); console.log('LOADED'); }
+        catch (e) { console.log(e.message); }
+      `;
+      return execFileSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8' });
+    };
+    assert.match(probe('undefined'), /failed to load the addon for linux-x64/);
+    assert.match(
+      probe('{ getReport: () => ({ header: { glibcVersionRuntime: "2.39" } }) }'),
+      /failed to load/
+    );
+    assert.match(probe('{ getReport: () => ({ header: {} }) }'), /musl/);
+  });
+
   it('the build scripts do not regenerate the committed loader', () => {
     assert.match(pkg.scripts.build, /--no-js\b/);
     assert.match(pkg.scripts['build:debug'], /--no-js\b/);

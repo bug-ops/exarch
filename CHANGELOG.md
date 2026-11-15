@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, `Violation::SymlinkParent` and `SymlinkComponent` gain `by`, and `EntryType` no longer implements `PartialEq` (#PR).
+- Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, and `Violation::SymlinkParent` and `SymlinkComponent` gain `by` (#PR).
+- Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` instead of `Box<[OccupiedPath]>` (#PR).
 - Extraction: a file or link landing on an existing symlink is refused with one typed kind in every format, 7z included: `EXISTING_SYMLINK` (`by` set) under `--force`, and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` under the default refuse mode, where it used to be a security violation (#PR).
 - `verify`: a directory entry over an earlier file entry is a Medium `InvalidArchive` finding, so the status is WARNING (exit 0, exit 3 with `--strict`) instead of FAIL (exit 1) (#PR).
 - Python: `Skip`, `Skipped` and `NameCollision` have public constructors, and the stub declares `step` (#PR).
-- Under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards, so a run's memory stays flat (#PR).
+- Under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards, so an in-place run's memory stays flat (#PR).
 - Creation: a source that changed between the walk and the read fails with the new `ArchiveError::SourceChanged` (`SOURCE_CHANGED`, Python `SourceChangedError`, Node `SOURCE_CHANGED`), and FIFOs, sockets and devices are skipped as the new `SkipKind::SpecialFile` (`special_file`) (#1213).
 - Core API: `DestinationOccupied.conflicts` is `Box<[OccupiedPath]>` (path plus `Option<PathOccupant>`), `Violation::ReplacesSymlink` gains `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190).
 - Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
@@ -23,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects and `EXISTING_SYMLINK` errors carry `error.by` (#1190).
 - Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
 - Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
+
+### Added
+
+- Core API: `OccupancyDetail` and `ArchiveError::occupancy()` expose the typed occupant details of a refusal (#PR).
 
 ### Fixed
 

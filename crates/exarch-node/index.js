@@ -14,7 +14,12 @@ const addons = {
 // Musl only on positive evidence: a report that exists but names no glibc.
 // Runtimes without process.report fall through to the glibc addon require.
 function isMusl() {
-  const report = process.report?.getReport?.();
+  let report;
+  try {
+    report = process.report?.getReport?.();
+  } catch {
+    return false;
+  }
   return report !== undefined && typeof report.header?.glibcVersionRuntime !== 'string';
 }
 

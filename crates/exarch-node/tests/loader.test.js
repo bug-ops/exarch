@@ -88,6 +88,10 @@ describe('npm loader (#1200)', () => {
       /failed to load/
     );
     assert.match(probe('{ getReport: () => ({ header: {} }) }'), /musl/);
+    assert.match(
+      probe('{ getReport: () => { throw new Error("NotCapable"); } }'),
+      /failed to load/
+    );
   });
 
   it('the build scripts do not regenerate the committed loader', () => {

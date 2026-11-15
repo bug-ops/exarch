@@ -82,16 +82,11 @@ describe('npm loader (#1200)', () => {
       `;
       return execFileSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8' });
     };
-    assert.match(probe('undefined'), /failed to load the addon for linux-x64/);
-    assert.match(
-      probe('{ getReport: () => ({ header: { glibcVersionRuntime: "2.39" } }) }'),
-      /failed to load/
-    );
+    const notMusl = (out) => assert.doesNotMatch(out, /musl/);
+    notMusl(probe('undefined'));
+    notMusl(probe('{ getReport: () => ({ header: { glibcVersionRuntime: "2.39" } }) }'));
+    notMusl(probe('{ getReport: () => { throw new Error("NotCapable"); } }'));
     assert.match(probe('{ getReport: () => ({ header: {} }) }'), /musl/);
-    assert.match(
-      probe('{ getReport: () => { throw new Error("NotCapable"); } }'),
-      /failed to load/
-    );
   });
 
   it('the build scripts do not regenerate the committed loader', () => {

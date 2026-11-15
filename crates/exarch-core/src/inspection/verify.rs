@@ -9,6 +9,7 @@ use crate::ExistingFiles;
 use crate::IntegrityCheck;
 use crate::NoopProgress;
 use crate::ProgressCallback;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
@@ -594,6 +595,9 @@ fn repeat_issue(
     entry: &ArchiveEntry,
     config: &SecurityConfig,
 ) -> Option<VerificationIssue> {
+    if config.repeated_paths == RepeatedPaths::KeepFirst {
+        return None;
+    }
     let held = tree.occupant(landing.as_path())?;
     OccupantPolicy::new(ExistingFiles::Skip, config.repeated_paths)
         .refuse_repeat(
@@ -1265,6 +1269,36 @@ mod tests {
             None,
             |root| VirtualTree::with_fold(root, ascii_upper),
         )
+    }
+
+    #[test]
+    fn a_kept_repeat_costs_no_occupant_lookup_and_a_refused_one_does() {
+        use crate::security::fs_view::occupant_lookups;
+
+        let manifest = manifest_of(vec![
+            ("a", file()),
+            ("a", file()),
+            ("d", ManifestEntryKind::Directory),
+            ("d", ManifestEntryKind::Directory),
+        ]);
+        let verify = |repeats| {
+            let config = link_config().with_repeated_paths(repeats);
+            occupant_lookups::during(|| verify_manifest(&manifest, &config, None))
+        };
+
+        let (_, kept) = verify(RepeatedPaths::KeepFirst);
+        let (report, refused) = verify(RepeatedPaths::Refuse);
+
+        assert_eq!(kept, 0);
+        assert!(refused > 0);
+        assert_eq!(
+            report
+                .issues()
+                .iter()
+                .filter(|issue| issue.message().contains("is named twice"))
+                .count(),
+            1
+        );
     }
 
     #[cfg(unix)]

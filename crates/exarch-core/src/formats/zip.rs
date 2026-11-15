@@ -1143,18 +1143,24 @@ impl<R: Read + Seek> ZipArchive<R> {
         };
         // A repeated name is reported once, as the refusal extraction gives,
         // not also as the structure finding it came from.
-        let (findings, omitted) = match config.zip_consistency {
-            ZipConsistencyPolicy::Enforce => (
-                self.structure
-                    .findings()
-                    .iter()
-                    .filter(|finding| !(refusing && duplicate_name(finding).is_some()))
-                    .cloned()
-                    .collect(),
-                self.structure.omitted_findings(),
-            ),
-            ZipConsistencyPolicy::Ignore => (Vec::new(), 0),
-        };
+        let (findings, omitted): (std::borrow::Cow<'_, [ZipInconsistency]>, usize) =
+            match (config.zip_consistency, refusing) {
+                (ZipConsistencyPolicy::Enforce, false) => (
+                    self.structure.findings().into(),
+                    self.structure.omitted_findings(),
+                ),
+                (ZipConsistencyPolicy::Enforce, true) => (
+                    self.structure
+                        .findings()
+                        .iter()
+                        .filter(|finding| duplicate_name(finding).is_none())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into(),
+                    self.structure.omitted_findings(),
+                ),
+                (ZipConsistencyPolicy::Ignore, _) => (Vec::new().into(), 0),
+            };
         let structure = ArchiveStructure::new(self.structure.central_entries(), &findings, omitted)
             .with_refusals(&repeats);
         Ok(verify_manifest_with_structure(

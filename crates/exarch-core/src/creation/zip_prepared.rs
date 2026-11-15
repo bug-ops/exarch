@@ -7,11 +7,15 @@
 //!
 //! This is the only module that names the `zip` prepared-entry API.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::panic::resume_unwind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -53,6 +57,8 @@ impl PreparedJob {
     /// A source failure (including [`ArchiveError::SourceChanged`]) for a read
     /// that fails; an I/O error when the entry cannot be built.
     pub(crate) fn compress(mut self) -> Result<PreparedZipFile> {
+        #[cfg(test)]
+        assert!(self.name != tests::PANIC_NAME, "injected compression panic");
         let mut builder = ZipFileBuilder::new(&self.name, self.options)
             .map_err(|e| zip_error("failed to start prepared zip entry", &e))?;
         let mut buffer = vec![0u8; COPY_BUFFER];
@@ -100,14 +106,21 @@ pub(crate) fn worker_count(parallelism: Parallelism) -> Option<NonZeroUsize> {
     }
 }
 
-type Outcome = (usize, Result<PreparedZipFile>);
+/// What a worker reports for one job; a panic is carried to the thread that
+/// waits for the entry instead of being lost with the worker.
+enum Finished {
+    Compressed(Result<PreparedZipFile>),
+    Panicked(Box<dyn Any + Send>),
+}
+
+type Outcome = (usize, Finished);
 
 /// A pool of scoped threads compressing jobs, with an archive-order reorder
 /// buffer on the receiving side.
 pub(crate) struct Workers {
     jobs: mpsc::SyncSender<(usize, PreparedJob)>,
     results: mpsc::Receiver<Outcome>,
-    ready: BTreeMap<usize, Result<PreparedZipFile>>,
+    ready: BTreeMap<usize, Finished>,
     capacity: usize,
 }
 
@@ -134,7 +147,11 @@ impl Workers {
                     let next = queue.recv();
                     drop(queue);
                     let Ok((index, job)) = next else { break };
-                    if result_tx.send((index, job.compress())).is_err() {
+                    let finished = match catch_unwind(AssertUnwindSafe(|| job.compress())) {
+                        Ok(compressed) => Finished::Compressed(compressed),
+                        Err(payload) => Finished::Panicked(payload),
+                    };
+                    if result_tx.send((index, finished)).is_err() {
                         break;
                     }
                 }
@@ -171,10 +188,16 @@ impl Workers {
     ///
     /// The error of that entry's job, or an I/O error when every worker has
     /// stopped.
+    ///
+    /// # Panics
+    ///
+    /// Resumes the panic of that entry's job on the calling thread.
     pub(crate) fn take(&mut self, index: usize) -> Result<PreparedZipFile> {
         loop {
-            if let Some(outcome) = self.ready.remove(&index) {
-                return outcome;
+            match self.ready.remove(&index) {
+                Some(Finished::Compressed(outcome)) => return outcome,
+                Some(Finished::Panicked(payload)) => resume_unwind(payload),
+                None => {}
             }
             let (done, outcome) = self.results.recv().map_err(|_| worker_lost())?;
             self.ready.insert(done, outcome);
@@ -194,6 +217,33 @@ fn worker_lost() -> ArchiveError {
 mod tests {
     use super::*;
     use std::assert_matches;
+
+    pub(super) const PANIC_NAME: &str = "panic-on-compress";
+
+    fn named(name: &str, content: &[u8]) -> (tempfile::TempDir, PreparedJob) {
+        let (dir, mut job) = job_over(content, content.len() as u64);
+        job.name = name.to_string();
+        (dir, job)
+    }
+
+    #[test]
+    fn a_worker_panic_surfaces_on_the_waiting_thread_instead_of_hanging() {
+        let (_a, fine) = named("fine", b"data");
+        let (_b, boom) = named(PANIC_NAME, b"data");
+        let (_c, later) = named("later", b"data");
+
+        std::thread::scope(|scope| {
+            let mut pool = Workers::spawn(scope, NonZeroUsize::new(2).unwrap()).unwrap();
+            pool.submit(0, fine).unwrap();
+            pool.submit(1, boom).unwrap();
+            pool.submit(2, later).unwrap();
+
+            assert!(pool.take(0).is_ok());
+            let panicked = catch_unwind(AssertUnwindSafe(|| pool.take(1)));
+            assert!(panicked.is_err());
+            assert!(pool.take(2).is_ok());
+        });
+    }
 
     fn job_over(content: &[u8], claimed: u64) -> (tempfile::TempDir, PreparedJob) {
         let dir = tempfile::tempdir().unwrap();

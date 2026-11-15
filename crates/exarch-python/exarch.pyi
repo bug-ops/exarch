@@ -51,6 +51,7 @@ _MarkState = Literal[
 ]
 _OccupiedBy = Literal["existing", "archive"]
 _PathOccupant = Literal["file", "directory", "symlink"]
+_DestinationStep = Literal["resolve", "create", "open", "list", "write_access", "stage"]
 _Restore = Literal["not_needed", "restored", "failed"]
 _ProtectedPath = Literal["filesystem_root", "archive_ancestor", "working_directory"]
 _IoKind = Literal[
@@ -987,8 +988,19 @@ class CreationConfig:
 
 @final
 class Skip:
-    """One entry an operation left out."""
+    """
+    One entry an operation left out.
 
+    Constructible so a pickled exception revives its ``skipped`` sample;
+    ``ValueError`` for an unknown ``kind`` or ``io_kind``.
+    """
+
+    def __new__(
+        cls,
+        kind: _SkipKind | str,
+        path: str | Path,
+        io_kind: _IoKind | str | None = None,
+    ) -> Skip: ...
     @property
     def kind(self) -> _SkipKind | str:
         """Why the entry was skipped."""
@@ -1009,8 +1021,12 @@ class Skipped:
     """
     Everything an operation left out: exact counts per kind plus a bounded
     sample of the individual entries.
+
+    Constructible so a pickled exception revives its ``skipped`` with the same
+    exact counts.
     """
 
+    def __new__(cls, counts: dict[str, int], sample: list[Skip]) -> Skipped: ...
     @property
     def total(self) -> int:
         """How many entries were skipped, over all kinds."""
@@ -2420,7 +2436,8 @@ class _IOErrorAttributes(Protocol):
     subclasses, so type checkers see only ``OSError``. Read the attributes with
     ``getattr``; ``code``, ``io_kind``, ``restore``, ``backup_path``,
     ``leftover_path`` and ``filename`` are always set (``None`` when they do not
-    apply), ``writes`` only after an extraction recorded progress.
+    apply), ``writes`` only after an extraction recorded progress and ``step``
+    only on a destination failure.
 
     An error that names a path is the exact builtin called as
     ``cls(errno, strerror, filename)``: ``errno`` is the OS error number
@@ -2448,6 +2465,10 @@ class _IOErrorAttributes(Protocol):
             destination.
         writes: As on ``ArchiveError``, when extraction failed after recording
             progress.
+        step: Only when the destination could not be reached, created or
+            used: the step that failed (``"resolve"``, ``"create"``,
+            ``"open"``, ``"list"``, ``"write_access"`` or ``"stage"``), the
+            same tokens as the Node ``step`` and the CLI ``error.step``.
     """
 
     code: Literal["IO_ERROR"]
@@ -2457,6 +2478,7 @@ class _IOErrorAttributes(Protocol):
     leftover_path: str | None
     filename: str | None
     writes: _PartialWrites
+    step: _DestinationStep
 
 class ArchiveError(Exception):
     """
@@ -2566,8 +2588,14 @@ class InvalidConfigurationError(ArchiveError, ValueError):
 
 @final
 class NameCollision:
-    """Two creation sources that map to one entry name."""
+    """
+    Two creation sources that map to one entry name.
 
+    Constructible so a pickled ``InvalidConfigurationError`` revives its
+    ``collision``.
+    """
+
+    def __new__(cls, name: str, first: str, second: str) -> NameCollision: ...
     @property
     def name(self) -> str:
         """The entry name both sources map to."""
@@ -2591,7 +2619,7 @@ class OccupiedPath:
     Constructible so a pickled ``OutputExistsError`` revives its ``conflicts``.
     """
 
-    def __init__(self, path: str, occupant: str | None = None) -> None: ...
+    def __new__(cls, path: str, occupant: str | None = None) -> OccupiedPath: ...
     @property
     def path(self) -> str:
         """The archive-relative path, as the archive spells it."""

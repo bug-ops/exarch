@@ -16,7 +16,6 @@ use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::source::FaultSlotReader;
 use crate::creation::source::copy_outcome;
-use crate::creation::source::source_error;
 use crate::creation::staged::ExcludedOutput;
 use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
@@ -87,9 +86,9 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                 &mut report,
                 guard.progress_mut(),
             )?,
-            EntryType::Directory => add_directory_to_tar(
+            EntryType::Directory { metadata } => add_directory_to_tar(
                 &mut builder,
-                &entry.path,
+                metadata,
                 &entry.archive_path,
                 config,
                 &mut report,
@@ -128,7 +127,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
 /// Adds a directory entry to the TAR archive.
 fn add_directory_to_tar<W: Write>(
     builder: &mut Builder<W>,
-    dir_path: &Path,
+    metadata: &std::fs::Metadata,
     archive_path: &Path,
     config: &CreationConfig,
     report: &mut CreationReport,
@@ -138,8 +137,7 @@ fn add_directory_to_tar<W: Write>(
     header.set_size(0);
 
     if config.permissions.preserves() {
-        let metadata = std::fs::metadata(dir_path).map_err(|e| source_error(dir_path, e))?;
-        set_permissions(&mut header, &metadata);
+        set_permissions(&mut header, metadata);
     } else {
         // Deterministic, traversable default (mirrors tar-rs's
         // `HeaderMode::Deterministic` and the `zip` crate's directory

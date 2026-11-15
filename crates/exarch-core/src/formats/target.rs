@@ -22,6 +22,7 @@ use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::refuse_hardlink_replace;
 use crate::mark::MarkRun;
 use crate::security::RawMode;
@@ -536,13 +537,14 @@ impl ExtractTarget for HostTarget<'_> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let action = tally.options.existing_files.on_occupant(
                     EntryShape::Link(LinkKind::Hardlink),
+                    link.as_path(),
                     || link_dir.probe(link_leaf),
                     || {
                         self.root
                             .created()
                             .created_here(&link_dir, link_leaf, link.as_path())
                     },
-                    |found| self.root.occupied(link.as_path(), found),
+                    OccupiedSite::Host(&self.root),
                 )?;
                 return match action {
                     OccupantAction::Skip => {
@@ -561,20 +563,16 @@ impl ExtractTarget for HostTarget<'_> {
                                     link.as_path(),
                                 )
                             },
-                            |found| self.root.occupied(link.as_path(), found),
+                            OccupiedSite::Host(&self.root),
                         ))
                     }
                 };
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
-        self.root.created().note_file(
-            tally.options.existing_files,
-            &link_file,
-            &link_dir,
-            link_leaf,
-            link.as_path(),
-        );
+        self.root
+            .created()
+            .note_file(&link_file, &link_dir, link_leaf, link.as_path());
         let cleanup_guard = TempFileGuard::new(&link_dir, link_leaf);
 
         // Every hardlink copies the target's real bytes to a new inode, so it

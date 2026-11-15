@@ -129,48 +129,70 @@ impl std::fmt::Display for RequestedLevel {
     }
 }
 
-/// The step of reaching a destination that failed.
-///
-/// [`ArchiveError::DestinationNotAccessible`] carries it so the message can say
-/// which step broke, since the destination path alone does not.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::DestinationStep;
-///
-/// assert_eq!(
-///     DestinationStep::Create.to_string(),
-///     "creating the directory"
-/// );
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DestinationStep {
-    /// Resolving the path to its canonical form.
-    Resolve,
-    /// Creating the destination directory or its parents.
-    Create,
-    /// Opening the destination directory.
-    Open,
-    /// Listing the entries of the destination directory.
-    List,
-    /// Checking that the destination directory is writable.
-    WriteAccess,
-    /// Reserving a staging directory beside the destination.
-    Stage,
+closed_enum! {
+    /// The step of reaching a destination that failed.
+    ///
+    /// [`ArchiveError::DestinationNotAccessible`] carries it so the message can
+    /// say which step broke, since the destination path alone does not. The
+    /// string form is the stable token every binding and the CLI `--json`
+    /// output expose as `step`; [`Self::phrase`] is the English text of the
+    /// message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DestinationStep;
+    ///
+    /// assert_eq!(DestinationStep::WriteAccess.to_string(), "write_access");
+    /// assert_eq!(
+    ///     DestinationStep::Create.phrase(),
+    ///     "creating the directory"
+    /// );
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum DestinationStep {
+        /// Resolving the path to its canonical form.
+        Resolve => "resolve",
+        /// Creating the destination directory or its parents.
+        Create => "create",
+        /// Opening the destination directory.
+        Open => "open",
+        /// Listing the entries of the destination directory.
+        List => "list",
+        /// Checking that the destination directory is writable.
+        WriteAccess => "write_access",
+        /// Reserving a staging directory beside the destination.
+        Stage => "stage",
+    }
 }
 
-impl std::fmt::Display for DestinationStep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl DestinationStep {
+    /// The human wording that reads after the destination path in a message,
+    /// for example `creating the directory`.
+    ///
+    /// Use it for text shown to a person. [`Self::as_str`] and `Display` are
+    /// the stable token for programs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DestinationStep;
+    ///
+    /// assert_eq!(DestinationStep::Resolve.phrase(), "resolving the path");
+    /// assert_eq!(DestinationStep::Resolve.to_string(), "resolve");
+    /// assert_eq!(DestinationStep::Resolve.as_str(), "resolve");
+    /// ```
+    #[must_use]
+    pub const fn phrase(self) -> &'static str {
+        match self {
             Self::Resolve => "resolving the path",
             Self::Create => "creating the directory",
             Self::Open => "opening the directory",
             Self::List => "listing its entries",
             Self::WriteAccess => "checking write access",
             Self::Stage => "reserving a staging directory",
-        })
+        }
     }
 }
 
@@ -715,7 +737,7 @@ pub enum ArchiveError {
     /// below a regular file, a missing directory, or one that is not
     /// writable). `error` keeps the cause; `path` is a host path and is
     /// redacted like any other.
-    #[error("destination is not accessible: {path}: {step}: {error}")]
+    #[error("destination is not accessible: {path}: {}: {error}", .step.phrase())]
     DestinationNotAccessible {
         /// The destination path.
         path: PathBuf,
@@ -783,7 +805,7 @@ pub enum ArchiveError {
         destination: Option<PathBuf>,
         /// The archive-relative paths that are occupied, each with the kind
         /// of occupant the refusal observed.
-        conflicts: Box<[OccupiedPath]>,
+        conflicts: OccupiedPaths,
         /// Who made the occupying entry.
         by: OccupiedBy,
     },
@@ -1422,21 +1444,52 @@ impl ArchiveError {
 }
 
 impl ArchiveError {
-    /// A [`Self::DestinationOccupied`] that says `by` made the occupant; any
-    /// other error is returned unchanged.
+    /// The occupancy detail of this error, looking through
+    /// [`Self::PartialExtraction`], or `None` for an error that names no
+    /// occupant.
+    ///
+    /// [`OccupancyDetail::Occupied`] is exactly [`Self::DestinationOccupied`].
+    /// [`OccupancyDetail::ExistingSymlink`] is a
+    /// [`Self::SecurityViolation`] of [`Violation::ReplacesSymlink`],
+    /// [`Violation::SymlinkParent`] or [`Violation::SymlinkComponent`]. The one
+    /// rule the bindings, the CLI and [`Self::into_ffi_message`] share.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::OccupancyDetail;
+    /// use exarch_core::OccupiedBy;
+    /// use exarch_core::Violation;
+    /// use std::assert_matches;
+    ///
+    /// let error: ArchiveError = Violation::ReplacesSymlink {
+    ///     rel: "l".into(),
+    ///     by: OccupiedBy::Existing,
+    /// }
+    /// .into();
+    /// assert_matches!(
+    ///     error.occupancy(),
+    ///     Some(OccupancyDetail::ExistingSymlink {
+    ///         by: OccupiedBy::Existing
+    ///     })
+    /// );
+    /// assert!(ArchiveError::Cancelled.occupancy().is_none());
+    /// ```
     #[must_use]
-    pub(crate) fn occupied_by(self, by: OccupiedBy) -> Self {
+    pub fn occupancy(&self) -> Option<OccupancyDetail<'_>> {
         match self {
-            Self::DestinationOccupied {
-                destination,
-                conflicts,
-                ..
-            } => Self::DestinationOccupied {
-                destination,
-                conflicts,
-                by,
-            },
-            other => other,
+            Self::DestinationOccupied { conflicts, by, .. } => {
+                Some(OccupancyDetail::Occupied { conflicts, by: *by })
+            }
+            Self::SecurityViolation {
+                kind:
+                    Violation::ReplacesSymlink { by, .. }
+                    | Violation::SymlinkParent { by, .. }
+                    | Violation::SymlinkComponent { by, .. },
+            } => Some(OccupancyDetail::ExistingSymlink { by: *by }),
+            Self::PartialExtraction(partial) => partial.cause().occupancy(),
+            _ => None,
         }
     }
 
@@ -1565,7 +1618,7 @@ impl ArchiveError {
 /// the redacted binding description share the wording and differ only in how
 /// the destination reads. One conflict names its occupant and entry; several
 /// are counted and the first is named.
-pub(crate) fn occupied_text(destination: Option<&str>, conflicts: &[OccupiedPath]) -> String {
+pub(crate) fn occupied_text(destination: Option<&str>, conflicts: &OccupiedPaths) -> String {
     let describe = |conflict: &OccupiedPath| {
         format!(
             "{} at {}",
@@ -1575,24 +1628,121 @@ pub(crate) fn occupied_text(destination: Option<&str>, conflicts: &[OccupiedPath
             super::redaction::format_entry_path_for_error(&conflict.path)
         )
     };
-    match conflicts {
-        [only] => {
-            let lead = destination.map_or_else(String::new, |d| format!("destination {d}: "));
-            format!("{lead}refusing to replace the existing {}", describe(only))
-        }
-        [first, ..] => {
-            let named = destination.map_or_else(String::new, |d| format!("{d} "));
-            format!(
-                "destination {named}already holds {} of the paths to extract, first: {}",
-                conflicts.len(),
-                describe(first)
-            )
-        }
-        [] => {
-            let named = destination.map_or_else(String::new, |d| format!("{d} "));
-            format!("destination {named}already holds 0 of the paths to extract")
+    if conflicts.rest.is_empty() {
+        let lead = destination.map_or_else(String::new, |d| format!("destination {d}: "));
+        format!(
+            "{lead}refusing to replace the existing {}",
+            describe(&conflicts.first)
+        )
+    } else {
+        let named = destination.map_or_else(String::new, |d| format!("{d} "));
+        format!(
+            "destination {named}already holds {} of the paths to extract, first: {}",
+            conflicts.len(),
+            describe(&conflicts.first)
+        )
+    }
+}
+
+/// The occupied paths of a refused destination: never empty.
+///
+/// A refusal that names no conflict is meaningless, so the type holds a first
+/// path and the rest and no constructor yields an empty list.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::OccupiedPath;
+/// use exarch_core::OccupiedPaths;
+/// use exarch_core::PathOccupant;
+///
+/// let paths = OccupiedPaths::one(OccupiedPath::new("a".into(), Some(PathOccupant::File)));
+/// assert_eq!(paths.len().get(), 1);
+/// assert!(OccupiedPaths::from_vec(Vec::new()).is_none());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccupiedPaths {
+    first: OccupiedPath,
+    rest: Box<[OccupiedPath]>,
+}
+
+impl OccupiedPaths {
+    /// A list of exactly `path`.
+    #[must_use]
+    pub fn one(path: OccupiedPath) -> Self {
+        Self {
+            first: path,
+            rest: Box::default(),
         }
     }
+
+    /// The list of `paths` in their order, or `None` when `paths` is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::OccupiedPath;
+    /// use exarch_core::OccupiedPaths;
+    ///
+    /// let paths = OccupiedPaths::from_vec(vec![
+    ///     OccupiedPath::new("b".into(), None),
+    ///     OccupiedPath::new("a".into(), None),
+    /// ])
+    /// .unwrap();
+    /// let names: Vec<_> = paths.iter().map(|p| p.path.to_str().unwrap()).collect();
+    /// assert_eq!(names, ["b", "a"]);
+    /// ```
+    #[must_use]
+    pub fn from_vec(paths: Vec<OccupiedPath>) -> Option<Self> {
+        let mut paths = paths.into_iter();
+        let first = paths.next()?;
+        Some(Self {
+            first,
+            rest: paths.collect(),
+        })
+    }
+
+    /// The paths, first to last.
+    pub fn iter(&self) -> impl Iterator<Item = &OccupiedPath> {
+        std::iter::once(&self.first).chain(self.rest.iter())
+    }
+
+    /// How many paths the list holds; at least one.
+    #[must_use]
+    pub fn len(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::MIN.saturating_add(self.rest.len())
+    }
+}
+
+/// The occupancy detail of an error: which paths an occupant blocked, or which
+/// existing symlink, and who made it.
+///
+/// Returned by [`ArchiveError::occupancy`]. Exhaustive on purpose: a new
+/// occupancy-bearing shape must fail to compile in every front end that
+/// renders it.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+/// use exarch_core::OccupancyDetail;
+///
+/// assert!(ArchiveError::Cancelled.occupancy().is_none());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccupancyDetail<'a> {
+    /// A destination that holds occupied paths.
+    Occupied {
+        /// The occupied paths.
+        conflicts: &'a OccupiedPaths,
+        /// Who made the occupying entry.
+        by: OccupiedBy,
+    },
+    /// An existing symlink that blocks an entry.
+    ExistingSymlink {
+        /// Who made the symlink.
+        by: OccupiedBy,
+    },
 }
 
 /// An occupied path of a refused destination and what occupies it.
@@ -1655,16 +1805,10 @@ mod tests {
 
     #[test]
     fn destination_steps_read_as_a_phrase_after_the_path() {
-        let texts: Vec<_> = [
-            DestinationStep::Resolve,
-            DestinationStep::Create,
-            DestinationStep::Open,
-            DestinationStep::List,
-            DestinationStep::WriteAccess,
-            DestinationStep::Stage,
-        ]
-        .map(|step| step.to_string())
-        .into();
+        let texts: Vec<_> = DestinationStep::ALL
+            .iter()
+            .map(|step| step.phrase())
+            .collect();
         assert_eq!(
             texts,
             [
@@ -2494,7 +2638,7 @@ mod tests {
             (
                 ArchiveError::DestinationOccupied {
                     destination: Some(path()),
-                    conflicts: Box::new([OccupiedPath::new(path(), None)]),
+                    conflicts: OccupiedPaths::one(OccupiedPath::new(path(), None)),
                     by: OccupiedBy::Existing,
                 },
                 Classes::NONE,

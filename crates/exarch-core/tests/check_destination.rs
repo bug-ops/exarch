@@ -170,17 +170,21 @@ mod symlinks {
     use super::*;
 
     #[test]
-    fn a_symlink_at_a_file_landing_is_a_typed_refusal_not_a_conflict() {
+    fn a_symlink_at_a_file_landing_is_a_conflict_when_vacant_and_a_refusal_when_replaceable() {
         let (_dir, _, listed) = listed(&[tar_file("f", b"x")], &SecurityConfig::default());
         let dest = TempDir::new().unwrap();
         symlink("elsewhere", dest.path().join("f")).unwrap();
 
-        let error = listed
+        let vacant = listed
             .check_destination(dest.path(), DestinationCheck::Vacant)
             .unwrap_err();
+        let replaceable = listed
+            .check_destination(dest.path(), DestinationCheck::Replaceable)
+            .unwrap_err();
 
+        assert_eq!(conflicts(&vacant), [Path::new("f")]);
         assert_matches!(
-            error,
+            replaceable,
             ArchiveError::SecurityViolation {
                 kind: Violation::ReplacesSymlink { .. },
                 ..

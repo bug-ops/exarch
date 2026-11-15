@@ -19,6 +19,7 @@ use crate::formats::common::is_extension_allowed;
 use crate::formats::common::open_archive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::occupant::tree_occupant_refusal;
 use crate::inspection::integrity::IntegrityOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::list::ListPass;
@@ -62,6 +63,7 @@ use crate::security::quota::QuotaTracker;
 use crate::security::validator::Gated;
 use crate::security::validator::route_validated;
 use crate::security::zipbomb::validate_entry_compression;
+use crate::selection::EntryShape;
 use crate::selection::IncludeHits;
 use crate::selection::LandingClaims;
 use crate::selection::SelectionRun;
@@ -710,6 +712,12 @@ fn placement_issue(
     let entry_path = Some(entry.path.clone());
     if let Some(blocked) = &conflict.blocked {
         return VerificationIssue::from_error(&blocked.error(), entry_path);
+    }
+    if let (ManifestEntryKind::Directory, Some(occupant @ Occupant::File)) =
+        (kind, conflict.occupant)
+        && let Some(refusal) = tree_occupant_refusal(EntryShape::Directory, occupant, rel)
+    {
+        return VerificationIssue::medium_refusal(&refusal, entry_path);
     }
     let error = match Placement::of(kind, &conflict) {
         Placement::RefusedUnderOverwrite(occupant) => {

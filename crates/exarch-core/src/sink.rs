@@ -39,6 +39,7 @@ use crate::formats::common;
 use crate::formats::io_marker::IoMarker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::refuse_hardlink_replace;
 use crate::formats::occupant::tree_occupant_refusal;
@@ -719,12 +720,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
 /// The refusal of a kept occupant in the sink tree, which holds only what the
 /// run delivered.
 fn kept_refusal(kept: KeptOccupant, rel: &Path) -> ArchiveError {
-    kept_occupant_refusal(
-        kept,
-        rel,
-        || true,
-        |found| common::occupied_without_destination(rel, found),
-    )
+    kept_occupant_refusal(kept, rel, || true, OccupiedSite::Detached)
 }
 
 /// What to do with a path the sink tree already holds.
@@ -739,9 +735,10 @@ fn occupied_action(
 ) -> Result<OccupantAction> {
     policy.on_occupant(
         arriving,
+        rel,
         || Ok(Some(occupant)),
         || true,
-        |found| common::occupied_without_destination(rel, found),
+        OccupiedSite::Detached,
     )
 }
 
@@ -1021,7 +1018,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                     Some(occupant),
                     link.as_path(),
                     || true,
-                    |found| common::occupied_without_destination(link.as_path(), found),
+                    OccupiedSite::Detached,
                 )),
             };
         }

@@ -2016,14 +2016,9 @@ fn test_conflict_precheck_follows_the_landing_of_every_entry_kind() {
             .arg(&archive)
             .arg(&out);
         if conflicts {
-            let expected = if occupant == "f" {
-                "refusing to replace the existing symlink"
-            } else {
-                "already exist"
-            };
             cmd.assert()
                 .code(1)
-                .stderr(predicates::str::contains(expected));
+                .stderr(predicates::str::contains("already exist"));
         } else {
             cmd.assert().success();
         }
@@ -3757,7 +3752,7 @@ fn test_extract_and_verify_refuse_an_entry_under_a_file_as_an_occupied_path() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "1 destination file already exists",
+            "1 entry of the archive conflicts with an earlier entry:\n  x (file)",
         ));
     let verify = exarch_cmd().arg("verify").arg(&archive).assert().failure();
     let output = verify.get_output();
@@ -6487,8 +6482,10 @@ fn test_extract_force_file_over_directory_names_the_entry() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("1 destination file already exists:\n  d")
-                .and(predicate::str::contains("os error").not()),
+            predicate::str::contains(
+                "1 entry of the archive conflicts with an earlier entry:\n  d (directory)",
+            )
+            .and(predicate::str::contains("os error").not()),
         );
 }
 
@@ -6549,8 +6546,10 @@ fn test_extract_force_symlink_over_directory_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("1 destination file already exists:\n  d")
-                    .and(predicate::str::contains("os error").not()),
+                predicate::str::contains(
+                    "1 entry of the archive conflicts with an earlier entry:\n  d (directory)",
+                )
+                .and(predicate::str::contains("os error").not()),
             );
     }
 }
@@ -6782,9 +6781,9 @@ fn test_extract_directory_over_file_names_the_entry() {
             .assert()
             .code(1)
             .stderr(
-                predicate::str::contains("1 destination file already exists")
+                predicate::str::contains("1 entry of the archive conflicts with an earlier entry")
                     .and(predicate::str::contains("os error").not())
-                    .and(predicate::str::is_match(r"(?m)^\s+x/?$").unwrap()),
+                    .and(predicate::str::is_match(r"(?m)^\s+x/? \(file\)$").unwrap()),
             );
     }
 
@@ -6792,10 +6791,91 @@ fn test_extract_directory_over_file_names_the_entry() {
         .arg("verify")
         .arg(&archive)
         .assert()
+        .code(0)
+        .stdout(
+            predicate::str::is_match(r"\[MEDIUM\] x/?: refusing to replace the existing file at x")
+                .unwrap(),
+        );
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strict")
+        .arg(&archive)
+        .assert()
+        .code(3);
+}
+
+/// Without `--force`, a file over an existing symlink is refused with the exact
+/// hint: `--force` never replaces a symlink, so the path is named, not guessed.
+#[cfg(unix)]
+#[test]
+fn test_extract_file_over_an_existing_symlink_hints_the_exact_path() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("x.tar");
+    tar_entries_archive(&archive, &[("x", tar::EntryType::Regular, "")]);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("destination");
+    std::fs::write(out.join("t"), "old").expect("target");
+    std::os::unix::fs::symlink("t", out.join("x")).expect("symlink");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
         .code(1)
-        .stdout(predicate::str::contains(
-            "refusing to replace the existing file at x",
-        ));
+        .stderr(
+            predicate::str::contains("--force does not replace x; remove it")
+                .and(predicate::str::contains("may not replace").not()),
+        );
+}
+
+/// #1196: a refusal of the run's own entries (`by` archive) never claims the
+/// destination held the path and never offers `--force`, in the text of a
+/// partial in-place run, for TAR and ZIP alike.
+#[test]
+fn test_extract_text_of_a_conflict_between_archive_entries_claims_no_existing_path() {
+    use std::io::Write;
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let tar = temp.path().join("d.tar");
+    tar_entries_archive(
+        &tar,
+        &[
+            ("ok", tar::EntryType::Regular, ""),
+            ("d/", tar::EntryType::Directory, ""),
+            ("d", tar::EntryType::Regular, ""),
+        ],
+    );
+    let zip = temp.path().join("d.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).expect("create"));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("ok", options).expect("file");
+    writer.write_all(b"x").expect("write");
+    writer.add_directory("d/", options).expect("dir");
+    writer.start_file("d", options).expect("file");
+    writer.finish().expect("finish");
+
+    for (index, archive) in [tar, zip].iter().enumerate() {
+        let output = exarch_cmd()
+            .arg("extract")
+            .arg(archive)
+            .arg(temp.path().join(format!("out_{index}")))
+            .assert()
+            .code(1)
+            .get_output()
+            .stderr
+            .clone();
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(
+            text.contains(
+                "1 entry of the archive conflicts with an earlier entry:\n  d (directory)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("already exist"), "{text}");
+        assert!(!text.contains("Use --force"), "{text}");
+        assert!(!text.contains("does not replace"), "{text}");
+    }
 }
 
 /// Regression test for #802: the occupant may be a file the destination

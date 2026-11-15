@@ -29,6 +29,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::formats::handle_resolution::LinkCursor;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::occupied_by;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
@@ -208,10 +209,11 @@ impl DirWalker {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::ensure_dir`]; a missing component is an I/O error of
-    /// kind `NotFound`.
-    pub(crate) fn vet_dir(self, root: &PinnedRoot, rel: &Path) -> Result<()> {
-        self.descend(root, rel, rel, Missing::Fail, Links::Policy)
+    /// Same as [`Self::ensure_dir`], with a blocking component reported against
+    /// `entry`, the entry that needs `rel`; a missing component is an I/O error
+    /// of kind `NotFound`.
+    pub(crate) fn vet_dir(self, root: &PinnedRoot, rel: &Path, entry: &Path) -> Result<()> {
+        self.descend(root, rel, entry, Missing::Fail, Links::Policy)
             .map(drop)
     }
 
@@ -385,15 +387,22 @@ impl DirWalker {
         entry: &Path,
         links: Links,
     ) -> Result<Hop<'r>> {
+        let LinkSite { parent, leaf, .. } = *site;
+        let made_by = || {
+            occupied_by(Some(Occupant::Symlink), || {
+                root.created().created_here(parent, leaf, walked)
+            })
+        };
         if links == Links::Strict {
-            return Err(ParentBlocker::Symlink.error(entry, walked));
+            return Err(ParentBlocker::Symlink.error(entry, walked, made_by()));
         }
         match (Followed::of(root, site), self.links) {
-            (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked)),
+            (Followed::Blocked(blocker), _) => Err(blocker.error(entry, walked, made_by())),
             (Followed::Failed(error), _) => Err(error),
             (Followed::Inside { .. }, LinkPolicy::Refuse) => {
                 Err(ArchiveError::from(Violation::SymlinkComponent {
                     walked: walked.display().to_string().into(),
+                    by: made_by(),
                 }))
             }
             (Followed::Inside { position, dir }, LinkPolicy::ContainedOnly) => {
@@ -428,11 +437,13 @@ fn file_parent(
     entry: &Path,
 ) -> ArchiveError {
     match missing {
-        Missing::Create => root
-            .occupied(walked, Some(Occupant::File))
-            .occupied_by(occupied_by(Some(Occupant::File), || {
+        Missing::Create => OccupiedSite::Host(root).refuse(
+            walked,
+            Some(Occupant::File),
+            occupied_by(Some(Occupant::File), || {
                 root.created().created_here(parent, leaf, walked)
-            })),
+            }),
+        ),
         Missing::Fail => ParentBlocker::file_io_error(entry, walked),
     }
 }
@@ -981,7 +992,7 @@ mod tests {
             err,
             ArchiveError::DestinationOccupied { destination: Some(_), by: OccupiedBy::Existing, conflicts }
                 if matches!(
-                    &*conflicts,
+                    conflicts.iter().collect::<Vec<_>>().as_slice(),
                     [OccupiedPath { path, occupant: Some(Occupant::File) }] if path == Path::new("f")
                 ),
             "{err}"
@@ -995,7 +1006,7 @@ mod tests {
 
         let rel = sp("f/x");
         let opened = walker(false).open_parent(&dest, rel.as_path());
-        let vetted = walker(false).vet_dir(&dest, Path::new("f/x"));
+        let vetted = walker(false).vet_dir(&dest, Path::new("f/x"), Path::new("f/x"));
 
         assert_matches!(opened, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);
         assert_matches!(vetted, Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory);

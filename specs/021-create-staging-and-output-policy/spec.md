@@ -26,6 +26,9 @@ related:
 
 # Feature: Create Staging and Output Policy
 
+> [!note] Revision 2026-11-14: directory metadata comes from the walk (#1214)
+> A directory entry keeps the metadata the walk used for its decision, so TAR and ZIP creation never re-read a directory by path (FR-053).
+
 > [!info] Metadata
 > **Subsystem**: exarch-core / `request` (`OutputFile`, `OutputPolicy`, `OutputFormat`, `CreateRequest`), `creation::staged`, `creation::filters`, `creation::walker`
 > **MSRV**: Rust 1.99.1
@@ -210,6 +213,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-045 | `collect_entries` SHALL refuse two entries that produce the same archive name, before any write, as `InvalidConfiguration { SourcePaths, EntryNameCollision { name, first, second } }`, for TAR and ZIP alike; two same-named directories collide as well; a directory source contributes its contents only, so `create out proj other` collides on equal file names; the comparison is case-sensitive, so `A.txt` and `a.txt` still pass on a case-insensitive extraction target (#970) | must |
 | FR-046 | A leftover output reservation SHALL be `ArchiveError::OutputReservationLeft { path, error }` (error code `IoError`, `path` redacted in binding release builds); `Durability::Synced` that cannot sync the parent directory SHALL push `CreationWarning::DirectoryNotSynced { io_kind }` into the report (`CreateRequest::create`), and `Durability` documents that Windows and WASI do not flush the directory and raise no warning (#976) | must |
 | FR-047 | `CreationConfig.permissions` is a `PermissionPolicy`; ZIP directory entries carry the source directory mode as TAR does ([[008-tar-empty-directory-preservation/spec]]); an invalid level is `InvalidCompressionLevel { level: RequestedLevel }` ([[003-config-api/spec]] FR-064) | must |
+| FR-053 | THE walker SHALL give every directory entry the metadata it used for the decision (walkdir's `DirEntry::metadata()`: `stat` of the object a followed link leads to under `follow_symlinks`, `lstat` otherwise), carried in the entry type as `EntryType::Directory { metadata: Box<Metadata> }` (boxed to keep the entry small; `EntryType` is no longer `PartialEq`), and TAR and ZIP creation SHALL take a directory entry's mode, owner and modification time from it and SHALL NOT call `std::fs::metadata` on the directory path at write time (`add_directory_to_tar`, the ZIP directory arm), so the recorded values describe the object the walk saw and a path that changes in between cannot change them, and one `stat` per directory is saved when permissions are preserved (live test neutral, cost of one boxed `Metadata` clone per directory); pinned by a walker test that changes the mode after the walk and by a TAR round-trip of a followed `0700` directory reached through a symlink (#1214) | must |
 
 ## 4. Non-Functional Requirements
 

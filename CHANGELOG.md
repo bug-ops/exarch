@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, and `Violation::SymlinkParent` and `SymlinkComponent` gain `by` (#1218).
+- Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` instead of `Box<[OccupiedPath]>` (#1218).
+- Extraction: a file or link landing on an existing symlink is refused with one typed kind in every format, 7z included: `EXISTING_SYMLINK` (`by` set) under `--force`, and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` under the default refuse mode, where it used to be a security violation (#1218).
+- `verify`: a directory entry over an earlier file entry is a Medium `InvalidArchive` finding, so the status is WARNING (exit 0, exit 3 with `--strict`) instead of FAIL (exit 1) (#1218).
+- Python: `Skip`, `Skipped` and `NameCollision` have public constructors, and the stub declares `step` (#1218).
+- Under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards, so an in-place run's memory stays flat (#1218).
 - Creation: a source that changed between the walk and the read fails with the new `ArchiveError::SourceChanged` (`SOURCE_CHANGED`, Python `SourceChangedError`, Node `SOURCE_CHANGED`), and FIFOs, sockets and devices are skipped as the new `SkipKind::SpecialFile` (`special_file`) (#1213).
 - Core API: `DestinationOccupied.conflicts` is `Box<[OccupiedPath]>` (path plus `Option<PathOccupant>`), `Violation::ReplacesSymlink` gains `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190).
 - Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
@@ -19,8 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
 - Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
 
+### Added
+
+- Core API: `OccupancyDetail` and `ArchiveError::occupancy()` expose the typed occupant details of a refusal (#1218).
+
 ### Fixed
 
+- Extraction: a destination below a file, a destination name that is too long under `--atomic` and a plain extraction into a destination without search permission are typed `DestinationNotAccessible` errors that name the destination, with `errno` and `filename` set in Python (#1218).
+- Node: a committed loader requires only bundled addons, and the release workflow checks the packed package layout (#1218).
+- Python: errors pickle and the stubtest gate passes (#1218).
+- CLI: occupied-destination refusals name the occupant kind and its maker, and `--json` carries the destination step (#1218).
+- Extraction: a landing on a symlink the archive made and an entry below a symlinked parent report the maker (`by`) correctly (#1218).
+- Creation: the walk's directory metadata is reused and the landing ancestor walk stops at the first known parent (#1218).
+- Build: the redundant `package.homepage` is dropped and `tests/data/tar-minefield/` is excluded from the package (#1218).
+- Tests: the tar-minefield corpus is replayed, regression cases for zip2 GHSA-66qv and cpython gh-161955 and gh-161945 are added, and macOS ACL tests cover the incomplete-mark warning (#1218).
 - Creation: each source file is opened relative to its pinned parent without following links, verified against the walk, and copied for exactly its header size, for TAR and ZIP (#1213).
 - Atomic `--force` extraction removes the replaced destination's backup through the pinned parent handle with an identity check, and reports the real cause of a failed removal (#1213).
 - A directory entry written as `l/.` over a symlink to a file is refused with `EXISTING_SYMLINK` like `l/`, and a directory over a file whose host path exceeds `PATH_MAX` is `DestinationOccupied` (#1217).

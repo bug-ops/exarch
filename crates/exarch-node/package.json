@@ -47,8 +47,9 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --release --no-const-enum",
-    "build:debug": "napi build --platform --no-const-enum",
+    "build": "napi build --platform --release --no-const-enum --no-js",
+    "build:debug": "napi build --platform --no-const-enum --no-js",
+    "check:package": "node scripts/check-package.mjs",
     "test": "node --test tests/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage tests/*.test.js",
     "format": "biome format --write .",

@@ -199,7 +199,7 @@ fn hardlink_below_dangling_symlink_is_a_security_finding() {
 #[test]
 fn directory_over_earlier_file_stays_a_structural_issue() {
     let outcome = run_verify_and_extract(&[file("a"), dir("a")], |_| {});
-    assert_eq!(outcome.status, VerificationStatus::Fail);
+    assert_eq!(outcome.status, VerificationStatus::Warning);
     assert!(
         !outcome.categories.contains(&IssueCategory::SecurityPolicy),
         "{:?}",

@@ -14,13 +14,14 @@ use super::redaction::sanitize_path_for_error;
 use super::replace::Restore;
 use super::replace::RestoreKind;
 use super::types::ArchiveError;
+use super::types::DestinationStep;
+use super::types::OccupancyDetail;
 use super::types::OccupiedBy;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
 use super::types::QuotaKind;
 use super::types::ReaderFormatError;
 use super::types::ZipBombScope;
-use super::violation::Violation;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -625,6 +626,11 @@ pub enum FfiDetail {
         /// Who made the symlink.
         by: OccupiedBy,
     },
+    /// The step that made a destination unreachable.
+    Destination {
+        /// The step that failed.
+        step: DestinationStep,
+    },
     /// What a failed whole-destination replace did to the original.
     Replace(FfiRestore),
     /// What makes the destination too important to replace.
@@ -641,6 +647,24 @@ pub enum FfiDetail {
         /// The path, lossily rendered.
         path: String,
     },
+}
+
+impl From<OccupancyDetail<'_>> for FfiDetail {
+    fn from(occupancy: OccupancyDetail<'_>) -> Self {
+        match occupancy {
+            OccupancyDetail::Occupied { conflicts, by } => Self::Occupied {
+                conflicts: conflicts
+                    .iter()
+                    .map(|conflict| FfiOccupiedPath {
+                        path: format_entry_path_for_error(&conflict.path),
+                        occupant: conflict.occupant,
+                    })
+                    .collect(),
+                by,
+            },
+            OccupancyDetail::ExistingSymlink { by } => Self::ExistingSymlink { by },
+        }
+    }
 }
 
 /// What became of the original destination after a failed replace, redacted
@@ -969,20 +993,11 @@ impl ArchiveError {
 
     /// The [`FfiErrorMessage::detail`] of a non-partial error.
     fn ffi_detail(&self) -> FfiDetail {
+        if let Some(occupancy) = self.occupancy() {
+            return occupancy.into();
+        }
         match self {
-            Self::DestinationOccupied { conflicts, by, .. } => FfiDetail::Occupied {
-                conflicts: conflicts
-                    .iter()
-                    .map(|conflict| FfiOccupiedPath {
-                        path: format_entry_path_for_error(&conflict.path),
-                        occupant: conflict.occupant,
-                    })
-                    .collect(),
-                by: *by,
-            },
-            Self::SecurityViolation {
-                kind: Violation::ReplacesSymlink { by, .. },
-            } => FfiDetail::ExistingSymlink { by: *by },
+            Self::DestinationNotAccessible { step, .. } => FfiDetail::Destination { step: *step },
             Self::ReplaceFailed(failure) => FfiDetail::Replace(match &failure.restore {
                 Restore::NotNeeded => FfiRestore::NotNeeded,
                 Restore::Restored => FfiRestore::Restored,
@@ -1059,7 +1074,7 @@ impl ArchiveError {
             | Self::SourceNotFound { .. }
             | Self::SourceNotAccessible { .. }
             | Self::SourceChanged { .. }
-            | Self::DestinationNotAccessible { .. }
+            | Self::DestinationOccupied { .. }
             | Self::OutputExists { .. }
             | Self::InvalidCompressionLevel { .. }
             | Self::UnknownFormat { .. }
@@ -1110,7 +1125,8 @@ impl ArchiveError {
                 super::types::occupied_text(destination.as_ref().map(|_| path.as_str()), conflicts)
             }
             Self::DestinationNotAccessible { step, error, .. } => format!(
-                "destination is not accessible: {path}: {step}: {}",
+                "destination is not accessible: {path}: {}: {}",
+                step.phrase(),
                 sanitize_io_error_for_error(error)
             ),
             Self::SourceNotFound { .. } => format!("source path not found: {path}"),
@@ -1291,7 +1307,10 @@ mod tests {
     fn test_occupied_without_destination_names_no_path() {
         let error = ArchiveError::DestinationOccupied {
             destination: None,
-            conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a"), None)]),
+            conflicts: crate::OccupiedPaths::one(crate::OccupiedPath::new(
+                PathBuf::from("a"),
+                None,
+            )),
             by: crate::OccupiedBy::Archive,
         };
         assert_eq!(
@@ -1474,7 +1493,10 @@ mod tests {
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
                 destination: Some(PathBuf::from("dest")),
-                conflicts: Box::new([crate::OccupiedPath::new(PathBuf::from("a"), None)]),
+                conflicts: crate::OccupiedPaths::one(crate::OccupiedPath::new(
+                    PathBuf::from("a"),
+                    None,
+                )),
                 by: crate::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
@@ -1636,7 +1658,10 @@ mod tests {
         assert!(
             path(ArchiveError::DestinationOccupied {
                 destination: Some("out".into()),
-                conflicts: Box::new([]),
+                conflicts: crate::OccupiedPaths::one(crate::OccupiedPath::new(
+                    PathBuf::from("a"),
+                    None
+                )),
                 by: crate::OccupiedBy::Existing,
             })
             .is_some()
@@ -1682,12 +1707,15 @@ mod tests {
 
     #[test]
     fn details_are_built_once_and_unwrapped_through_a_partial() {
+        let Some(conflicts) = crate::OccupiedPaths::from_vec(vec![
+            crate::OccupiedPath::new(PathBuf::from("b"), None),
+            crate::OccupiedPath::new(PathBuf::from("a"), None),
+        ]) else {
+            panic!("two paths are a non-empty list");
+        };
         let occupied = ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("dest")),
-            conflicts: Box::new([
-                crate::OccupiedPath::new(PathBuf::from("b"), None),
-                crate::OccupiedPath::new(PathBuf::from("a"), None),
-            ]),
+            conflicts,
             by: crate::OccupiedBy::Existing,
         }
         .rolled_back();

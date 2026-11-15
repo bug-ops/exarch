@@ -374,7 +374,7 @@ impl<P: ParentCheck> SafePath<P> {
                 Err(e)
                     if e.kind() == std::io::ErrorKind::NotFound
                         || defers_to_walker::<P>(&e)
-                        || file_parent_left_to_walker::<P, _>(view, root, &final_path) =>
+                        || parent_left_to_walker::<P, _>(view, root, &final_path) =>
                 {
                     if !paths_start_with(&resolved, dest) {
                         return Err(ArchiveError::PathTraversal {
@@ -451,20 +451,16 @@ fn defers_to_walker<P: ParentCheck>(err: &std::io::Error) -> bool {
     P::VETTING == ParentVetting::Walker && err.kind() == std::io::ErrorKind::InvalidFilename
 }
 
-/// Whether a file among the parents of `rel` is the reason a canonicalize
-/// failed and the walker decides it.
+/// Whether a file or a symlink among the parents of `rel` is the reason a
+/// canonicalize failed and the walker decides it.
 ///
-/// The walker's handle-relative walk refuses every file parent itself, with
-/// the destination and who made the file, which a path probe cannot know.
-fn file_parent_left_to_walker<P: ParentCheck, V: FsView>(
-    view: &V,
-    root: &V::Root,
-    rel: &Path,
-) -> bool {
+/// The walker's handle-relative walk refuses every such parent itself, with the
+/// destination and who made it, which a path probe cannot know.
+fn parent_left_to_walker<P: ParentCheck, V: FsView>(view: &V, root: &V::Root, rel: &Path) -> bool {
     P::VETTING == ParentVetting::Walker
         && matches!(
             first_blocking_ancestor(view, root, rel),
-            Some((_, ParentBlocker::File))
+            Some((_, ParentBlocker::File | ParentBlocker::Symlink))
         )
 }
 

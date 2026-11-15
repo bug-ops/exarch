@@ -233,9 +233,10 @@ fn assert_occupied(
     else {
         panic!("{context}: expected DestinationOccupied, got {error}");
     };
-    assert_eq!(conflicts.len(), 1, "{context}: {error}");
-    assert_eq!(conflicts[0].path, Path::new(path), "{context}");
-    assert_eq!(conflicts[0].occupant, Some(occupant), "{context}");
+    assert_eq!(conflicts.len().get(), 1, "{context}: {error}");
+    let only = conflicts.iter().next().unwrap();
+    assert_eq!(only.path, Path::new(path), "{context}");
+    assert_eq!(only.occupant, Some(occupant), "{context}");
     assert_eq!(*seen_by, by, "{context}");
     destination.clone()
 }
@@ -321,14 +322,13 @@ fn dir_over_a_file_of_the_run_is_one_typed_refusal_on_every_surface() {
                     ),
                     &context,
                 );
-                // Skip keeps no run record, so the maker of the file is
-                // unknown.
-                let maker = if policy == ExistingFiles::Skip {
-                    OccupiedBy::Existing
-                } else {
-                    OccupiedBy::Archive
-                };
-                let seen = assert_occupied(&written, "f", PathOccupant::File, maker, &context);
+                let seen = assert_occupied(
+                    &written,
+                    "f",
+                    PathOccupant::File,
+                    OccupiedBy::Archive,
+                    &context,
+                );
                 assert_caller_destination(seen, dest.path(), &context);
 
                 let sunk = refusal(sink(format, &members, policy, &config), &context);

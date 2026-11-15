@@ -160,14 +160,16 @@ impl<'a> FilteredWalker<'a> {
             let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
             EntryType::Symlink { target }
         } else if metadata.is_dir() {
-            EntryType::Directory
+            EntryType::Directory {
+                metadata: Box::new(metadata.clone()),
+            }
         } else {
             EntryType::File
         };
 
         // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
-        if entry_type == EntryType::File && !self.config.max_file_size.admits(size) {
+        if matches!(entry_type, EntryType::File) && !self.config.max_file_size.admits(size) {
             let shown = if relative.is_empty() { path } else { relative };
             return Ok(Some(WalkItem::Skipped(Skip::new(
                 SkipKind::OverMaxFileSize,
@@ -175,7 +177,11 @@ impl<'a> FilteredWalker<'a> {
             ))));
         }
 
-        let Some(archive_path) = entry_name(&path, &relative, entry_type == EntryType::Directory)?
+        let Some(archive_path) = entry_name(
+            &path,
+            &relative,
+            matches!(entry_type, EntryType::Directory { .. }),
+        )?
         else {
             return Ok(None);
         };
@@ -309,13 +315,19 @@ pub(crate) struct FilteredEntry {
 }
 
 /// Type of directory entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum EntryType {
     /// Regular file.
     File,
 
-    /// Directory.
-    Directory,
+    /// Directory with the metadata the walk used to classify it: `stat` of
+    /// the object a followed link leads to, `lstat` otherwise (boxed to keep
+    /// the entry small). Directory mode, owner and mtime are written from
+    /// this, never re-read by path.
+    Directory {
+        /// The walk's own metadata of the directory.
+        metadata: Box<Metadata>,
+    },
 
     /// Symbolic link with its target path.
     Symlink {
@@ -457,7 +469,7 @@ fn walked_if_opened(
     let opened = match entry_type {
         EntryType::File => true,
         EntryType::Symlink { .. } => config.follow_symlinks,
-        EntryType::Directory => false,
+        EntryType::Directory { .. } => false,
     };
     opened.then(|| WalkedSource::of(path, metadata)).transpose()
 }
@@ -502,6 +514,33 @@ mod tests {
                 WalkItem::Skipped(_) => None,
             })
             .collect()
+    }
+
+    /// #1214: a directory entry carries the metadata the walk saw, so a later
+    /// change of the path cannot alter what is archived.
+    #[test]
+    #[cfg(unix)]
+    fn test_directory_entry_keeps_the_metadata_of_the_walk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let config = CreationConfig::default();
+        let collected = collect_entries(&[temp.path()], &config, &ExcludedOutput::none()).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let metadata = collected
+            .entries
+            .iter()
+            .find_map(|e| match &e.entry_type {
+                EntryType::Directory { metadata } => Some(metadata),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }
 
     /// #916: the root's own ancestors used to match the exclude patterns, so
@@ -823,11 +862,13 @@ mod tests {
         let entry = FilteredEntry {
             path: PathBuf::from("/tmp/dir"),
             archive_path: ArchiveEntryName::from_relative(Path::new("dir")).unwrap(),
-            entry_type: EntryType::Directory,
+            entry_type: EntryType::Directory {
+                metadata: Box::new(std::fs::metadata(".").unwrap()),
+            },
             identity: None,
         };
 
-        assert_matches!(entry.entry_type, EntryType::Directory);
+        assert_matches!(entry.entry_type, EntryType::Directory { .. });
     }
 
     #[test]
@@ -847,29 +888,6 @@ mod tests {
             }
             _ => panic!("expected symlink"),
         }
-    }
-
-    #[test]
-    fn test_entry_type_equality() {
-        assert_eq!(EntryType::File, EntryType::File);
-        assert_eq!(EntryType::Directory, EntryType::Directory);
-        assert_eq!(
-            EntryType::Symlink {
-                target: PathBuf::from("a")
-            },
-            EntryType::Symlink {
-                target: PathBuf::from("a")
-            }
-        );
-        assert_ne!(EntryType::File, EntryType::Directory);
-        assert_ne!(
-            EntryType::Symlink {
-                target: PathBuf::from("a")
-            },
-            EntryType::Symlink {
-                target: PathBuf::from("b")
-            }
-        );
     }
 
     #[test]
@@ -1053,7 +1071,7 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].entry_type, EntryType::File);
+        assert_matches!(entries[0].entry_type, EntryType::File);
         assert!(
             entries[0]
                 .archive_path
@@ -1080,11 +1098,9 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].entry_type,
-            EntryType::Symlink {
-                target: target_path,
-            }
+        assert_matches!(
+            &entries[0].entry_type,
+            EntryType::Symlink { target } if *target == target_path
         );
         assert!(
             entries[0]
@@ -1111,11 +1127,9 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].entry_type,
-            EntryType::Symlink {
-                target: missing_target,
-            }
+        assert_matches!(
+            &entries[0].entry_type,
+            EntryType::Symlink { target } if *target == missing_target
         );
         assert!(
             entries[0]
@@ -1144,9 +1158,9 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].entry_type,
-            EntryType::Symlink { target: target_dir }
+        assert_matches!(
+            &entries[0].entry_type,
+            EntryType::Symlink { target } if *target == target_dir
         );
         assert!(
             entries[0]

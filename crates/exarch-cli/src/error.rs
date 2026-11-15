@@ -28,6 +28,7 @@ use exarch_core::ConfigSetting;
 use exarch_core::ExtractionReport;
 use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
+use exarch_core::PathOccupant;
 use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::ReplaceFailure;
@@ -40,6 +41,7 @@ use exarch_core::path_text;
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -557,7 +559,7 @@ pub enum Unreplaced {
     /// Not known: the re-check that would tell failed for another reason.
     Unknown,
     /// Exactly these paths, which existed before the run.
-    Only(Box<[PathBuf]>),
+    Only(exarch_core::OccupiedPaths),
 }
 
 /// What a destination conflict tells the user to do, which depends on the
@@ -574,38 +576,57 @@ pub enum ConflictAdvice {
 }
 
 impl Unreplaced {
-    fn hint(&self) -> Vec<Part> {
+    /// The hint for a refusal of `total` paths; `Only` names its own paths and
+    /// agrees with their number.
+    fn hint(&self, total: NonZeroUsize) -> Vec<Part> {
+        let count = match self {
+            Self::Only(paths) => paths.len(),
+            Self::All | Self::Unknown => total,
+        };
+        let single = count == NonZeroUsize::MIN;
         let mut parts = vec![Part::Lit(Flag::Force.long())];
         match self {
-            Self::All => parts.push(Part::Lit(" does not replace these paths")),
-            Self::Unknown => parts.push(Part::Lit(" may not replace every listed path")),
+            Self::All => parts.push(Part::Lit(if single {
+                " does not replace this path"
+            } else {
+                " does not replace these paths"
+            })),
+            Self::Unknown => parts.push(Part::Lit(if single {
+                " may not replace this path"
+            } else {
+                " may not replace every listed path"
+            })),
             Self::Only(paths) => {
                 parts.push(Part::Lit(" does not replace "));
-                for (index, path) in paths.iter().take(MAX_LISTED_CONFLICTS).enumerate() {
+                for (index, conflict) in paths.iter().take(MAX_LISTED_CONFLICTS).enumerate() {
                     if index > 0 {
                         parts.push(Part::Lit(", "));
                     }
-                    parts.push(Part::Entry(path.clone()));
+                    parts.push(Part::Entry(conflict.path.clone()));
                 }
-                let remaining = paths.len().saturating_sub(MAX_LISTED_CONFLICTS);
+                let remaining = count.get().saturating_sub(MAX_LISTED_CONFLICTS);
                 if remaining > 0 {
                     parts.push(Part::Text(format!(" and {remaining} more")));
                 }
             }
         }
-        parts.push(Part::Lit("; remove them or choose another destination."));
+        parts.push(Part::Lit(if single {
+            "; remove it or choose another destination."
+        } else {
+            "; remove them or choose another destination."
+        }));
         parts
     }
 }
 
 impl ConflictAdvice {
-    fn hint(&self) -> Vec<Part> {
+    fn hint(&self, total: NonZeroUsize) -> Vec<Part> {
         match self {
             Self::UseForce => vec![Part::Text(format!(
                 "Use {} to overwrite.",
                 Flag::Force.long()
             ))],
-            Self::ForceCannotReplace(unreplaced) => unreplaced.hint(),
+            Self::ForceCannotReplace(unreplaced) => unreplaced.hint(total),
             Self::ArchiveConflict => vec![Part::Lit(
                 "The archive writes more than one entry at a path where only one fits, such as \
                  a file or link where it also makes a directory; no flag allows that.",
@@ -619,6 +640,30 @@ impl ConflictAdvice {
 /// "... and N more" line.
 const MAX_LISTED_CONFLICTS: usize = 10;
 
+/// The occupant kind every conflict shares, or `None` when they differ or one
+/// is unknown.
+fn common_occupant(conflicts: &exarch_core::OccupiedPaths) -> Option<PathOccupant> {
+    let first = conflicts.iter().next()?.occupant?;
+    conflicts
+        .iter()
+        .all(|conflict| conflict.occupant == Some(first))
+        .then_some(first)
+}
+
+/// What the conflicts are called in the header: their shared kind, or `path`.
+const fn occupant_noun(common: Option<PathOccupant>, single: bool) -> &'static str {
+    match (common, single) {
+        (Some(PathOccupant::File), true) => "file",
+        (Some(PathOccupant::File), false) => "files",
+        (Some(PathOccupant::Directory), true) => "directory",
+        (Some(PathOccupant::Directory), false) => "directories",
+        (Some(PathOccupant::Symlink), true) => "symlink",
+        (Some(PathOccupant::Symlink), false) => "symlinks",
+        (_, true) => "path",
+        (_, false) => "paths",
+    }
+}
+
 /// The message for a destination that holds paths the archive would write.
 ///
 /// Caps the individually listed paths at [`MAX_LISTED_CONFLICTS`] so an
@@ -626,36 +671,58 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 /// cannot flood stderr with one line per conflict. `conflicts` arrives in the
 /// order core sorts it, so "first N shown" is the head of `error.conflicts`.
 ///
+/// The header names the occupant kind the conflicts share (`path` when they
+/// differ), and a conflict with an entry the run itself made is worded as a
+/// conflict between archive entries, since nothing existed before the run.
+/// A list of mixed kinds, and every archive conflict, marks each path with
+/// its kind.
+///
 /// The advice that depends on the write mode is the message's hint, never part
 /// of its text.
 fn occupied_message(
     destination: Option<&Path>,
-    conflicts: &[PathBuf],
+    conflicts: &exarch_core::OccupiedPaths,
+    by: OccupiedBy,
     advice: &ConflictAdvice,
 ) -> Message {
     let count = conflicts.len();
-    let noun = if count == 1 { "file" } else { "files" };
-    let verb = if count == 1 { "exists" } else { "exist" };
-
-    let remaining = count.saturating_sub(MAX_LISTED_CONFLICTS);
-    let mut message = if remaining == 0 {
-        Message::default()
-            .restating_source()
-            .text(format!("{count} destination {noun} already {verb}:"))
+    let single = count == NonZeroUsize::MIN;
+    let remaining = count.get().saturating_sub(MAX_LISTED_CONFLICTS);
+    let shown = if remaining == 0 {
+        String::new()
     } else {
-        Message::default().restating_source().text(format!(
-            "{count} destination {noun} already {verb}; first {MAX_LISTED_CONFLICTS} shown:"
-        ))
+        format!("; first {MAX_LISTED_CONFLICTS} shown")
     };
+    let common = common_occupant(conflicts);
+    let from_archive = by == OccupiedBy::Archive;
+    let header = if from_archive {
+        let (noun, verb) = if single {
+            ("entry", "conflicts")
+        } else {
+            ("entries", "conflict")
+        };
+        format!("{count} {noun} of the archive {verb} with an earlier entry{shown}:")
+    } else {
+        let noun = occupant_noun(common, single);
+        let verb = if single { "exists" } else { "exist" };
+        format!("{count} destination {noun} already {verb}{shown}:")
+    };
+    let mut message = Message::default().restating_source().text(header);
     // The destination keeps its native spelling; the entry part is rendered
     // the way the archive names it.
-    let destination = destination.map(|destination| destination.join(""));
-    for path in conflicts.iter().take(MAX_LISTED_CONFLICTS) {
+    let destination = destination
+        .filter(|_| !from_archive)
+        .map(|destination| destination.join(""));
+    let marked = from_archive || common.is_none();
+    for conflict in conflicts.iter().take(MAX_LISTED_CONFLICTS) {
         message = message.lit("\n  ");
         if let Some(destination) = &destination {
             message = message.path(destination);
         }
-        message = message.entry(path);
+        message = message.entry(&conflict.path);
+        if let Some(occupant) = conflict.occupant.filter(|_| marked) {
+            message = message.text(format!(" ({occupant})"));
+        }
     }
     if remaining > 0 {
         message = message
@@ -663,22 +730,12 @@ fn occupied_message(
             .text(remaining.to_string())
             .lit(" more");
     }
-    message.hint_parts(advice.hint())
-}
-
-/// The message of a refused occupied destination: the run's own entries name
-/// no destination and take the archive-conflict advice.
-fn occupied_context(
-    destination: Option<&Path>,
-    conflicts: &[exarch_core::OccupiedPath],
-    by: OccupiedBy,
-    advice: &ConflictAdvice,
-) -> Message {
-    let paths: Vec<PathBuf> = conflicts.iter().map(|c| c.path.clone()).collect();
-    match by {
-        OccupiedBy::Archive => occupied_message(None, &paths, &ConflictAdvice::ArchiveConflict),
-        _ => occupied_message(destination, &paths, advice),
-    }
+    let advice = if from_archive {
+        &ConflictAdvice::ArchiveConflict
+    } else {
+        advice
+    };
+    message.hint_parts(advice.hint(count))
 }
 
 /// `text` with its first letter in upper case.
@@ -1211,7 +1268,7 @@ fn dedicated_context(
             .restating_source()
             .lit("Destination is not accessible: ")
             .path(path)
-            .text(format!(": {step}: {error}")),
+            .text(format!(": {}: {error}", step.phrase())),
         ArchiveError::OutputExists { path } => message
             .restating_source()
             .lit("Output path already exists: ")
@@ -1224,7 +1281,7 @@ fn dedicated_context(
             destination,
             conflicts,
             by,
-        } => occupied_context(destination.as_deref(), conflicts, *by, advice),
+        } => occupied_message(destination.as_deref(), conflicts, *by, advice),
         ArchiveError::InvalidPermissions { mode, .. } => message.text(format!(
             "Invalid permissions {:#o}: blocked by security policy.",
             mode.get()
@@ -2285,7 +2342,10 @@ mod tests {
             ArchiveError::Cancelled,
             ArchiveError::DestinationOccupied {
                 destination: Some(path()),
-                conflicts: Box::new([exarch_core::OccupiedPath::new(path(), None)]),
+                conflicts: exarch_core::OccupiedPaths::one(exarch_core::OccupiedPath::new(
+                    path(),
+                    None,
+                )),
                 by: exarch_core::OccupiedBy::Existing,
             },
             ArchiveError::OutputReservationLeft {
@@ -2316,11 +2376,32 @@ mod tests {
         }
     }
 
+    const ONE: NonZeroUsize = NonZeroUsize::MIN;
+
+    fn many() -> NonZeroUsize {
+        ONE.saturating_add(1)
+    }
+
+    fn files(paths: &[PathBuf]) -> exarch_core::OccupiedPaths {
+        exarch_core::OccupiedPaths::from_vec(
+            paths
+                .iter()
+                .map(|path| exarch_core::OccupiedPath::new(path.clone(), Some(PathOccupant::File)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
     fn occupied_text(conflicts: &[PathBuf]) -> String {
         terminal(
-            &occupied_message(None, conflicts, &ConflictAdvice::UseForce)
-                .into_context()
-                .parts(),
+            &occupied_message(
+                None,
+                &files(conflicts),
+                OccupiedBy::Existing,
+                &ConflictAdvice::UseForce,
+            )
+            .into_context()
+            .parts(),
         )
     }
 
@@ -2345,6 +2426,73 @@ mod tests {
         assert_ne!(archive, existing);
         assert!(existing.contains("remove it"), "{existing}");
         assert!(!archive.contains("remove it"), "{archive}");
+    }
+
+    fn conflicts_of(kinds: &[(&str, Option<PathOccupant>)]) -> exarch_core::OccupiedPaths {
+        exarch_core::OccupiedPaths::from_vec(
+            kinds
+                .iter()
+                .map(|(path, kind)| exarch_core::OccupiedPath::new(PathBuf::from(path), *kind))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn message_of(conflicts: &exarch_core::OccupiedPaths, by: OccupiedBy) -> String {
+        terminal(
+            &occupied_message(None, conflicts, by, &ConflictAdvice::UseForce)
+                .into_context()
+                .parts(),
+        )
+    }
+
+    #[test]
+    fn the_occupied_header_names_the_shared_kind_and_calls_mixed_kinds_paths() {
+        let dirs = conflicts_of(&[("a", Some(PathOccupant::Directory))]);
+        assert!(
+            message_of(&dirs, OccupiedBy::Existing)
+                .starts_with("1 destination directory already exists:")
+        );
+        let links = conflicts_of(&[
+            ("a", Some(PathOccupant::Symlink)),
+            ("b", Some(PathOccupant::Symlink)),
+        ]);
+        assert!(
+            message_of(&links, OccupiedBy::Existing)
+                .starts_with("2 destination symlinks already exist:")
+        );
+        let mixed = conflicts_of(&[("a", Some(PathOccupant::Directory)), ("b", None)]);
+        let text = message_of(&mixed, OccupiedBy::Existing);
+        assert!(
+            text.starts_with("2 destination paths already exist:"),
+            "{text}"
+        );
+        assert!(text.contains("a (directory)"), "{text}");
+    }
+
+    #[test]
+    fn a_conflict_between_archive_entries_does_not_claim_the_destination_held_it() {
+        let conflicts = conflicts_of(&[("d", Some(PathOccupant::Directory))]);
+
+        let text = message_of(&conflicts, OccupiedBy::Archive);
+
+        assert!(!text.contains("already exist"), "{text}");
+        assert!(text.contains("d (directory)"), "{text}");
+    }
+
+    #[test]
+    fn the_force_hint_agrees_with_the_number_of_paths() {
+        let hint = |advice: ConflictAdvice, total| raw(&advice.hint(total));
+        let one = hint(ConflictAdvice::ForceCannotReplace(Unreplaced::All), ONE);
+        assert!(
+            one.contains("this path") && one.contains("remove it"),
+            "{one}"
+        );
+        let some = hint(ConflictAdvice::ForceCannotReplace(Unreplaced::All), many());
+        assert!(
+            some.contains("these paths") && some.contains("remove them"),
+            "{some}"
+        );
     }
 
     #[test]
@@ -2388,13 +2536,19 @@ mod tests {
     #[test]
     fn occupied_advice_is_the_hint_and_follows_the_write_mode() {
         let context = |advice: &ConflictAdvice| {
-            occupied_message(None, &[PathBuf::from("a")], advice).into_context()
+            occupied_message(
+                None,
+                &files(&[PathBuf::from("a")]),
+                OccupiedBy::Existing,
+                advice,
+            )
+            .into_context()
         };
         for advice in [
             ConflictAdvice::UseForce,
             ConflictAdvice::ForceCannotReplace(Unreplaced::All),
             ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown),
-            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(Box::new([PathBuf::from("a")]))),
+            ConflictAdvice::ForceCannotReplace(Unreplaced::Only(files(&[PathBuf::from("a")]))),
             ConflictAdvice::ArchiveConflict,
         ] {
             let context = context(&advice);
@@ -2404,12 +2558,12 @@ mod tests {
             );
             assert_eq!(
                 context.hint().map(|h| raw(&h)),
-                Some(raw(&advice.hint())),
+                Some(raw(&advice.hint(ONE))),
                 "{advice:?}"
             );
         }
         assert_eq!(
-            raw(&ConflictAdvice::UseForce.hint()),
+            raw(&ConflictAdvice::UseForce.hint(ONE)),
             "Use --force to overwrite."
         );
     }
@@ -2417,17 +2571,17 @@ mod tests {
     #[test]
     fn the_force_hint_is_neutral_and_names_only_the_paths_it_does_not_replace() {
         let hint = |paths: &[&str]| {
-            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Only(
-                paths.iter().map(PathBuf::from).collect(),
-            ))
-            .hint())
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Only(files(
+                &paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
+            )))
+            .hint(ONE))
         };
         assert_eq!(
-            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::All).hint()),
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::All).hint(many())),
             "--force does not replace these paths; remove them or choose another destination."
         );
         assert_eq!(
-            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown).hint()),
+            raw(&ConflictAdvice::ForceCannotReplace(Unreplaced::Unknown).hint(many())),
             "--force may not replace every listed path; remove them or choose another destination."
         );
         assert_eq!(
@@ -2446,7 +2600,10 @@ mod tests {
     fn a_conflict_with_an_entry_the_archive_made_names_the_entry_and_hints_no_flag() {
         let occupied = |by| ArchiveError::DestinationOccupied {
             destination: Some(PathBuf::from("/tmp/.exarch-mine")),
-            conflicts: Box::new([exarch_core::OccupiedPath::new(PathBuf::from("x"), None)]),
+            conflicts: exarch_core::OccupiedPaths::one(exarch_core::OccupiedPath::new(
+                PathBuf::from("x"),
+                None,
+            )),
             by,
         };
 
@@ -2459,7 +2616,7 @@ mod tests {
         assert!(!text.contains(".exarch-mine"), "{text}");
         assert!(text.ends_with("  x"), "{text}");
         let hints = chain_hints(&archive, raw);
-        assert_eq!(hints, [raw(&ConflictAdvice::ArchiveConflict.hint())]);
+        assert_eq!(hints, [raw(&ConflictAdvice::ArchiveConflict.hint(ONE))]);
         assert!(!hints[0].contains("--force"), "{hints:?}");
 
         let existing = convert_error(
@@ -2470,7 +2627,7 @@ mod tests {
         assert!(chain_text(&existing).contains(".exarch-mine"));
         assert_eq!(
             chain_hints(&existing, raw),
-            [raw(&ConflictAdvice::UseForce.hint())]
+            [raw(&ConflictAdvice::UseForce.hint(ONE))]
         );
     }
 

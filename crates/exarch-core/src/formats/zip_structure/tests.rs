@@ -149,6 +149,8 @@ fn data_end(entry: &RawEntry, local_offset: usize) -> usize {
     local_offset + LFH_FIXED_LEN + entry.name.len() + entry.local_extra.len() + entry.data.len()
 }
 
+/// Covers cpython gh-161945 (local header method differs from the central
+/// directory) through the `method` case.
 #[test]
 fn every_header_field_mismatch_is_named() {
     let cases: [(&str, usize, &[u8], ZipHeaderField); 8] = [

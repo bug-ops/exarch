@@ -450,7 +450,6 @@ jobs:
           name: bindings-${{ matrix.platform.name }}
           path: |
             crates/exarch-node/*.node
-            crates/exarch-node/index.js
             crates/exarch-node/index.d.ts
           retention-days: 7
 
@@ -496,13 +495,17 @@ jobs:
           for platform_dir in ../../bindings/bindings-*; do
             cp -v "$platform_dir"/*.node .
           done
-          cp -v ../../bindings/bindings-linux-x86_64/index.js ../../bindings/bindings-linux-x86_64/index.d.ts .
+          cp -v ../../bindings/bindings-linux-x86_64/index.d.ts .
 
-          ls -lh *.node index.js
+          ls -lh *.node index.js index.d.ts
 
       - name: Install dependencies
         working-directory: crates/exarch-node
         run: pnpm install --frozen-lockfile
+
+      - name: Check the npm package contents
+        working-directory: crates/exarch-node
+        run: node scripts/check-package.mjs
 
       - name: Check whether this version is already on npm
         id: npm-version

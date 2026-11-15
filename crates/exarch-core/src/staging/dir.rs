@@ -36,7 +36,7 @@ use crate::formats::file_identity::IdentityCheck;
 use crate::formats::output_root::StagedOutput;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
-use crate::formats::run_record::Recording;
+use crate::formats::run_record::RecordBudget;
 use crate::formats::run_record::RunRecord;
 
 const CREATE_ATTEMPTS: usize = 16;
@@ -367,14 +367,10 @@ impl<'p> StagingDir<'p> {
         Err(failure(io::Error::from(io::ErrorKind::AlreadyExists)))
     }
 
-    /// The ledger of a new staging directory. Only a rollback that sweeps
-    /// reads it, so only macOS pays for recording every entry.
+    /// The ledger of a new staging directory: a full record on every OS, since
+    /// the rollback that sweeps reads it whatever `ExistingFiles` says.
     fn new_ledger() -> Rc<RunRecord> {
-        Rc::new(RunRecord::new(if cfg!(target_os = "macos") {
-            Recording::Ledger
-        } else {
-            Recording::Duplicates
-        }))
+        Rc::new(RunRecord::new(RecordBudget::Full))
     }
 
     /// Takes the identity of the directory just made as `name` from one

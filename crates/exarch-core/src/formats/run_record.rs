@@ -1,18 +1,17 @@
 //! Which landings the current run created itself.
 //!
-//! Under [`ExistingFiles::Refuse`] an occupied landing is refused, except when
-//! the run made the occupant and it is a file or a symlink: a second archive
-//! entry for the same path is a duplicate and is skipped, as under
-//! [`ExistingFiles::Skip`]. A directory the run made is never a duplicate, but
-//! the record keeps it too, so a refusal can say that the archive itself made
-//! the occupant. The record tells an entry the run made from one it did not. It
-//! is kept per run, by the pinned destination; files are recorded under
-//! `Refuse` and `Overwrite`, never under `Skip`, directories always.
+//! Under [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) an occupied
+//! landing is refused, except when the run made the occupant and it is a file
+//! or a symlink: a second archive entry for the same path is a duplicate and is
+//! skipped, as under [`ExistingFiles::Skip`](crate::ExistingFiles::Skip). A
+//! directory the run made is never a duplicate, but the record keeps it too, so
+//! a refusal can say that the archive itself made the occupant. The record
+//! tells an entry the run made from one it did not. It is kept per run, by the
+//! pinned destination, and every entry the run creates is recorded whatever
+//! `ExistingFiles` says, up to the run's [`RecordBudget`].
 //!
-//! A staged run keeps a [`Recording::Ledger`] instead: every entry the run
-//! creates is recorded whatever `ExistingFiles` says, and the ledger outlives
-//! the extraction, so a rollback can tell what the run made from what it did
-//! not make.
+//! A staged run's record outlives the extraction, so a rollback can tell what
+//! the run made from what it did not make.
 //!
 //! A landing is keyed by file identity (device and file index of the entry
 //! itself, never of a symlink's target), which is exact on a case-insensitive
@@ -58,6 +57,42 @@ use crate::ExistingFiles;
 
 /// The most landings a run records (4 Mi keys).
 const RECORD_CAP: usize = 4 * 1024 * 1024;
+
+/// The most landings a [`RecordBudget::Diagnostic`] run records.
+///
+/// Under [`ExistingFiles::Skip`] the record is consulted only to attribute a
+/// refusal, never to decide a duplicate, so a large archive does not pay for
+/// it: attribution is exact for the first 16 Ki landings of a run and
+/// `existing` (maker unknown) afterwards.
+const DIAGNOSTIC_RECORD_CAP: usize = 16 * 1024;
+
+/// How much a [`RunRecord`] keeps before it saturates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordBudget {
+    /// Up to [`RECORD_CAP`] landings.
+    Full,
+    /// Up to [`DIAGNOSTIC_RECORD_CAP`] landings.
+    Diagnostic,
+}
+
+impl RecordBudget {
+    const fn cap(self) -> usize {
+        match self {
+            Self::Full => RECORD_CAP,
+            Self::Diagnostic => DIAGNOSTIC_RECORD_CAP,
+        }
+    }
+}
+
+impl ExistingFiles {
+    /// The budget of the record of an in-place run under this policy.
+    pub(crate) const fn record_budget(self) -> RecordBudget {
+        match self {
+            Self::Skip => RecordBudget::Diagnostic,
+            Self::Refuse | Self::Overwrite => RecordBudget::Full,
+        }
+    }
+}
 
 /// How a landing is recorded: by identity, or by path where the volume gives
 /// none (FAT, exFAT, and Windows volumes without `FileIdInfo`).
@@ -123,55 +158,28 @@ struct Created {
     saturated: bool,
 }
 
-/// What a [`RunRecord`] keeps.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Recording {
-    /// Files created under `ExistingFiles::Refuse` (the duplicate check) and
-    /// `Overwrite` (the maker named by a refused hardlink), never under `Skip`.
-    #[default]
-    Duplicates,
-    /// Every entry the run creates, under any `ExistingFiles`.
-    Ledger,
-}
-
-impl Recording {
-    const fn records(self, existing_files: ExistingFiles) -> bool {
-        match self {
-            Self::Ledger => true,
-            Self::Duplicates => !matches!(existing_files, ExistingFiles::Skip),
-        }
-    }
-}
-
 /// The landings a run created, consulted when one is found occupied.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RunRecord {
-    recording: Recording,
+    budget: RecordBudget,
     created: RefCell<Created>,
 }
 
 impl RunRecord {
-    /// An empty record that keeps what `recording` says.
-    pub(crate) fn new(recording: Recording) -> Self {
+    /// An empty record that saturates at `budget`.
+    pub(crate) fn new(budget: RecordBudget) -> Self {
         Self {
-            recording,
+            budget,
             created: RefCell::default(),
         }
     }
 
-    /// Records that the run just created `leaf` in `dir`, if `existing_files`
-    /// needs the record.
+    /// Records that the run just created `leaf` in `dir`.
     ///
     /// A key that cannot be read is not recorded, so a later duplicate is
     /// refused.
-    pub(crate) fn note(
-        &self,
-        existing_files: ExistingFiles,
-        dir: &VettedDir,
-        leaf: Leaf<'_>,
-        rel: &Path,
-    ) {
-        if self.recording.records(existing_files) {
+    pub(crate) fn note(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        if !self.is_saturated() {
             self.insert(key_of(dir, leaf, rel));
         }
     }
@@ -179,24 +187,18 @@ impl RunRecord {
     /// Records that the run just created the directory `leaf` in `dir`.
     ///
     /// A duplicate check never skips a directory, but a refusal asks whether
-    /// the run made the occupant, so directories are recorded under every
-    /// [`Recording`].
+    /// the run made the occupant.
     pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
-        self.insert(key_of(dir, leaf, rel));
+        if !self.is_saturated() {
+            self.insert(key_of(dir, leaf, rel));
+        }
     }
 
     /// Like [`note`](Self::note) for the file `leaf` the run just created and
     /// still holds open: keyed by its handle, so no lookup by name unless the
     /// handle gives no identity, which the lookup by name then classifies.
-    pub(crate) fn note_file(
-        &self,
-        existing_files: ExistingFiles,
-        file: &File,
-        dir: &VettedDir,
-        leaf: Leaf<'_>,
-        rel: &Path,
-    ) {
-        if !self.recording.records(existing_files) {
+    pub(crate) fn note_file(&self, file: &File, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        if self.is_saturated() {
             return;
         }
         match FileIdentity::of_file(file) {
@@ -205,12 +207,19 @@ impl RunRecord {
         }
     }
 
+    fn is_saturated(&self) -> bool {
+        self.created.borrow().saturated
+    }
+
+    /// Keeps `key`; reaching the budget saturates the record, so every occupant
+    /// counts as foreign (a refusal then says `existing`) and nothing more is
+    /// recorded.
     fn insert(&self, key: Option<LandingKey>) {
         let Some(key) = key else {
             return;
         };
         let mut created = self.created.borrow_mut();
-        if created.keys.len() >= RECORD_CAP {
+        if created.keys.len() >= self.budget.cap() {
             created.saturated = true;
         } else {
             created.keys.insert(key);
@@ -255,6 +264,8 @@ impl RunRecord {
 mod key_tests {
     use std::assert_matches;
 
+    use super::RecordBudget;
+
     use super::LandingKey;
     use super::RunRecord;
     use super::key_for;
@@ -262,7 +273,7 @@ mod key_tests {
 
     #[test]
     fn an_unknown_identity_is_keyed_by_the_path_as_spelled() {
-        let record = RunRecord::default();
+        let record = RunRecord::new(RecordBudget::Full);
         record.insert(Some(key_for(FileIdentity::Unknown, "dir/a".as_ref())));
 
         let created = |rel: &str| {
@@ -284,61 +295,36 @@ mod key_tests {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::RecordBudget;
     use super::RunRecord;
-    use crate::ExistingFiles;
     use crate::formats::pinned_dir::support::leaf;
     use crate::formats::pinned_dir::support::pinned_at;
 
     #[test]
-    fn skip_records_nothing_and_only_what_it_recorded_counts_as_created() {
+    fn only_what_was_noted_counts_as_created() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         std::fs::write(temp.path().join("foreign"), b"y").unwrap();
-        let record = RunRecord::default();
+        let record = RunRecord::new(RecordBudget::Full);
 
-        record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+        record.note(&dir, leaf("made"), "made".as_ref());
 
-        let overwriting = RunRecord::default();
-        overwriting.note(
-            ExistingFiles::Overwrite,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
-        assert!(overwriting.created_here(&dir, leaf("made"), "made".as_ref()));
-
-        record.note(ExistingFiles::Refuse, &dir, leaf("made"), "made".as_ref());
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
         assert!(!record.created_here(&dir, leaf("absent"), "absent".as_ref()));
     }
 
     #[test]
-    fn a_file_noted_by_its_handle_counts_as_created_except_under_skip() {
+    fn a_file_noted_by_its_handle_counts_as_created() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         let made = std::fs::File::create(temp.path().join("made")).unwrap();
         std::fs::write(temp.path().join("foreign"), b"y").unwrap();
-        let record = RunRecord::default();
+        let record = RunRecord::new(RecordBudget::Full);
 
-        record.note_file(
-            ExistingFiles::Skip,
-            &made,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
-        assert!(!record.created_here(&dir, leaf("made"), "made".as_ref()));
+        record.note_file(&made, &dir, leaf("made"), "made".as_ref());
 
-        record.note_file(
-            ExistingFiles::Refuse,
-            &made,
-            &dir,
-            leaf("made"),
-            "made".as_ref(),
-        );
         assert!(record.created_here(&dir, leaf("made"), "made".as_ref()));
         assert!(!record.created_here(&dir, leaf("foreign"), "foreign".as_ref()));
     }
@@ -348,8 +334,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
-        let record = RunRecord::default();
-        record.note(ExistingFiles::Refuse, &dir, leaf("made"), "made".as_ref());
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("made"), "made".as_ref());
 
         record.saturate();
 
@@ -362,15 +348,15 @@ mod tests {
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("target"), b"x").unwrap();
         std::os::unix::fs::symlink("target", temp.path().join("link")).unwrap();
-        let record = RunRecord::default();
-        record.note(ExistingFiles::Refuse, &dir, leaf("link"), "link".as_ref());
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("link"), "link".as_ref());
 
         assert!(record.created_here(&dir, leaf("link"), "link".as_ref()));
         assert!(!record.created_here(&dir, leaf("target"), "target".as_ref()));
     }
 
     #[test]
-    fn a_ledger_records_whatever_existing_files_says_and_a_duplicate_record_never_skip() {
+    fn files_and_directories_are_both_recorded_by_identity() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
@@ -379,33 +365,65 @@ mod tests {
             let stat = rustix::fs::stat(temp.path().join(name)).unwrap();
             crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap()
         };
-        let duplicates = RunRecord::default();
-        let ledger = RunRecord::new(super::Recording::Ledger);
+        let record = RunRecord::new(RecordBudget::Full);
 
-        for record in [&duplicates, &ledger] {
-            record.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-            record.note_directory(&dir, leaf("sub"), "sub".as_ref());
-        }
+        record.note(&dir, leaf("made"), "made".as_ref());
+        record.note_directory(&dir, leaf("sub"), "sub".as_ref());
 
-        assert!(!duplicates.created_with(key("made")));
-        assert!(duplicates.created_with(key("sub")));
-        assert!(ledger.created_with(key("made")));
-        assert!(ledger.created_with(key("sub")));
+        assert!(record.created_with(key("made")));
+        assert!(record.created_with(key("sub")));
     }
 
     #[test]
-    fn a_saturated_ledger_vouches_for_nothing() {
+    fn a_saturated_record_vouches_for_no_identity() {
         let temp = tempfile::tempdir().unwrap();
         let dir = pinned_at(temp.path());
         std::fs::write(temp.path().join("made"), b"x").unwrap();
         let stat = rustix::fs::stat(temp.path().join("made")).unwrap();
         let key = crate::formats::file_identity::IdentityKey::of_stat(&stat).unwrap();
-        let ledger = RunRecord::new(super::Recording::Ledger);
-        ledger.note(ExistingFiles::Skip, &dir, leaf("made"), "made".as_ref());
-        assert!(ledger.created_with(key));
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note(&dir, leaf("made"), "made".as_ref());
+        assert!(record.created_with(key));
 
-        ledger.saturate();
+        record.saturate();
 
-        assert!(!ledger.created_with(key));
+        assert!(!record.created_with(key));
+    }
+
+    #[test]
+    fn a_diagnostic_record_keeps_exactly_its_cap_and_saturates_on_the_next_landing() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = pinned_at(temp.path());
+        std::fs::write(temp.path().join("first"), b"x").unwrap();
+        let diagnostic = RunRecord::new(RecordBudget::Diagnostic);
+        let full = RunRecord::new(RecordBudget::Full);
+        diagnostic.note(&dir, leaf("first"), "first".as_ref());
+        full.note(&dir, leaf("first"), "first".as_ref());
+        let filler = |index: usize| Some(super::LandingKey::Path(format!("p{index}").into()));
+        assert_eq!(super::DIAGNOSTIC_RECORD_CAP, 16384);
+
+        for index in 1..super::DIAGNOSTIC_RECORD_CAP {
+            diagnostic.insert(filler(index));
+        }
+        assert!(diagnostic.created_here(&dir, leaf("first"), "first".as_ref()));
+
+        diagnostic.insert(filler(super::DIAGNOSTIC_RECORD_CAP));
+        for index in 1..=super::DIAGNOSTIC_RECORD_CAP {
+            full.insert(filler(index));
+        }
+
+        assert!(!diagnostic.created_here(&dir, leaf("first"), "first".as_ref()));
+        assert!(full.created_here(&dir, leaf("first"), "first".as_ref()));
+    }
+
+    #[test]
+    fn skip_is_diagnostic_and_the_other_policies_are_full() {
+        use crate::ExistingFiles;
+        assert_eq!(
+            ExistingFiles::Skip.record_budget(),
+            RecordBudget::Diagnostic
+        );
+        assert_eq!(ExistingFiles::Refuse.record_budget(), RecordBudget::Full);
+        assert_eq!(ExistingFiles::Overwrite.record_budget(), RecordBudget::Full);
     }
 }

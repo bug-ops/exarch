@@ -198,6 +198,7 @@ export interface ExarchInvalidArchiveDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -219,6 +220,7 @@ export interface ExarchSecurityViolationDetail {
   conflicts?: undefined
   /** Who made the symlink an `'EXISTING_SYMLINK'` refusal declined to replace: `'existing'` (there before the run, or its maker is unknown) or `'archive'` (an earlier entry of the same archive); absent on every other refusal. */
   by?: 'existing' | 'archive' | (string & {})
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -239,6 +241,7 @@ export interface ExarchInvalidConfigurationDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   /** Why a destination is too important to replace as a whole. */
   protectedPath?: ProtectedPath
   /** The two creation sources that map to one entry name. */
@@ -264,6 +267,8 @@ export interface ExarchIoDetail {
   backupPath?: string
   conflicts?: undefined
   by?: undefined
+  /** The step of reaching the destination that failed, set only for a destination that cannot be reached; it names the step in the same words on every front end. */
+  step?: DestinationStep
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -285,6 +290,7 @@ export interface ExarchQuotaDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -305,6 +311,7 @@ export interface ExarchZipBombDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -332,6 +339,7 @@ export interface ExarchSourceNotAccessibleDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -360,6 +368,7 @@ export interface ExarchOutputExistsDetail {
   conflicts?: Array<OccupiedPath>
   /** Who made the occupant of the first conflict: `'existing'` (there before the run, or its maker is unknown: removing it or choosing another destination helps, and overwrite replaces only a file occupant of a file or symlink entry) or `'archive'` (an earlier entry of the same archive, which no option resolves). */
   by?: 'existing' | 'archive' | (string & {})
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -378,6 +387,7 @@ export interface ExarchSourceNotFoundDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -398,6 +408,7 @@ export interface ExarchSourceChangedDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -429,6 +440,7 @@ export interface ExarchPlainCodeDetail {
   backupPath?: undefined
   conflicts?: undefined
   by?: undefined
+  step?: undefined
   protectedPath?: undefined
   collision?: undefined
   unmatchedPatterns?: undefined
@@ -605,14 +617,6 @@ export interface HeuristicIssueDetail {
  */
 export type VerificationIssue = VerificationIssueFields &
   (ExarchErrorCodeDetail | HeuristicIssueDetail)
-
-/**
- * Which binding artifact the generated loader actually loaded: `'native'` for
- * a native addon, otherwise the `platformArchABI` of the WASI flavor. Every
- * flavor napi-rs can build is listed, because `NAPI_RS_NATIVE_LIBRARY_PATH`
- * can point the loader at a WASI artifact this package does not build itself.
- */
-export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
 /**
  * Configuration for archive creation operations.
@@ -1762,6 +1766,12 @@ export type CreationWarningKind = 'zip_ratio_over_default_limit' | 'zip_ratio_ch
  * the archive's plaintext until the extraction ends.
  */
 export type DecodeReuseKind = 'off' | 'memory' | 'temp_file'
+
+/**
+ * The step of reaching an extraction destination that failed (the `step`
+ * property of an `IO_ERROR` raised for a destination that cannot be reached).
+ */
+export type DestinationStep = 'resolve' | 'create' | 'open' | 'list' | 'write_access' | 'stage'
 
 /** The `kind` of a [`MemoryDirectoryEntry`]. */
 export type DirectoryKind = 'directory'

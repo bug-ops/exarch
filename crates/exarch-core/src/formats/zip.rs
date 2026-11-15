@@ -927,7 +927,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let output = output.into();
+        let output = output
+            .into()
+            .with_record_budget(options.existing_files.record_budget());
         self.check_structure(config)?.extract_with(
             |config| HostTarget::create(output, config),
             SinkOptions::existing_files_of(options),

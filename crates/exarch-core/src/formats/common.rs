@@ -48,6 +48,7 @@ use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::kept_occupant_refusal;
 use crate::formats::occupant::occupied_by;
@@ -60,13 +61,10 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::mark::MarkRun;
-use crate::security::fs_view::HostFs;
 #[cfg(unix)]
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
-use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
-use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
@@ -404,8 +402,7 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     if replaced {
-        root.created()
-            .note(duplicates, &parent, leaf, safe_path.as_path());
+        root.created().note(&parent, leaf, safe_path.as_path());
     }
     guard.persist();
 
@@ -634,7 +631,7 @@ fn open_output_slot(
 ) -> Result<Option<OutputSlot>> {
     match create_file(dir, leaf, mode, timing) {
         Ok((file, pending)) => {
-            root.created().note_file(duplicates, &file, dir, leaf, rel);
+            root.created().note_file(&file, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
                 pending,
@@ -644,9 +641,10 @@ fn open_output_slot(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let action = duplicates.on_occupant(
                 EntryShape::File,
+                rel,
                 || dir.probe(leaf),
                 || root.created().created_here(dir, leaf, rel),
-                |found| root.occupied(rel, found),
+                OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
                 return Ok(None);
@@ -662,21 +660,6 @@ fn open_output_slot(
             }))
         }
         Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, root, e)),
-    }
-}
-
-/// The refusal of an occupied path for a run with no host destination (the
-/// in-memory sink and the `list` model); a host run uses
-/// [`PinnedRoot::occupied`].
-///
-/// Every site that decides what to do with an occupant must route `Refuse` to
-/// one of the two and never into an overwrite branch: a missed arm would
-/// replace a file the caller asked to keep.
-pub(crate) fn occupied_without_destination(rel: &Path, occupant: Option<Occupant>) -> ArchiveError {
-    ArchiveError::DestinationOccupied {
-        destination: None,
-        conflicts: Box::new([crate::OccupiedPath::at(rel, occupant)]),
-        by: crate::OccupiedBy::Existing,
     }
 }
 
@@ -728,7 +711,7 @@ pub(crate) fn kept_refusal_at(
         kept,
         rel,
         || root.created().created_here(dir, leaf, rel),
-        |found| root.occupied(rel, found),
+        OccupiedSite::Host(root),
     )
 }
 
@@ -765,7 +748,9 @@ pub(crate) fn create_directory<P: ParentCheck>(
     dirs: DirWalker,
 ) -> Result<()> {
     let rel = safe_path.as_path();
-    check_directory_occupant(root, rel, |occupant| maker_of(root, dirs, rel, occupant))?;
+    check_directory_occupant(root, dirs, rel, |occupant| {
+        maker_of(root, dirs, rel, occupant)
+    })?;
     dirs.ensure_dir(root, safe_path)?;
 
     report.directories_created = report.directories_created.saturating_add(1);
@@ -778,47 +763,73 @@ pub(crate) fn create_directory<P: ParentCheck>(
 /// not resolve to a directory inside the destination (a security violation,
 /// the category `verify` reports for it). `maker` says who made that occupant.
 ///
-/// The path-based `lstat` here only chooses the error message; the fd-relative
-/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again, and
-/// alone names a file parent, since only it can tell who made that file. A name
-/// the host cannot look up by path (too long, or invalid on Windows) is left to
-/// that walk, as a missing one is.
+/// A landing that is absent or already a directory, by one path `lstat`, is
+/// accepted at once: the lstat only chooses the error and never enforces, the
+/// fd-relative walk in [`DirWalker::ensure_dir`] does. Any other occupant, and
+/// a name the host cannot look up by path (too long), is read through its
+/// pinned parent, so the verdict does not depend on how long its host path
+/// is. A parent that cannot be opened is left
+/// to the walk in [`DirWalker::ensure_dir`], which refuses a blocking parent
+/// again and alone names a file parent, since only it can tell who made that
+/// file.
 pub(crate) fn check_directory_occupant(
     root: &PinnedRoot,
+    dirs: DirWalker,
     rel: &Path,
     maker: impl FnOnce(Occupant) -> OccupiedBy,
 ) -> Result<()> {
-    let dest = root.dest();
-    let probe = dest.probe(rel);
-    let file_type = match probe.lstat() {
-        Ok(metadata) => metadata.file_type(),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(e) => {
-            return match first_blocking_ancestor(&HostFs, dest, rel) {
-                Some((_, ParentBlocker::File)) => Ok(()),
-                Some((parent, blocker)) => Err(blocker.error(rel, &parent)),
-                None => Err(e.into()),
-            };
-        }
-    };
-    if file_type.is_dir() {
+    if landing_is_free_or_directory(root, rel) {
         return Ok(());
     }
-    if file_type.is_symlink() {
-        return probe
-            .lands_in_dir(dest)
-            .ok_or_else(|| replaces_symlink(rel, maker(Occupant::Symlink)));
+    let Ok((parent, leaf)) = dirs.open_parent(root, rel) else {
+        return Ok(());
+    };
+    match parent.probe(leaf) {
+        Ok(None | Some(Occupant::Directory)) | Err(_) => Ok(()),
+        Ok(Some(Occupant::File)) => {
+            Err(OccupiedSite::Host(root).refuse(rel, Some(Occupant::File), maker(Occupant::File)))
+        }
+        Ok(Some(Occupant::Symlink)) => {
+            refuse_unadmitted_symlink_landing(root, dirs, rel, || maker(Occupant::Symlink))
+        }
     }
-    Err(root
-        .occupied(rel, Some(Occupant::File))
-        .occupied_by(maker(Occupant::File)))
+}
+
+/// Whether one path `lstat` finds nothing, or a directory, at `rel`: the
+/// common landing of a directory entry, which needs no pinned probe.
+///
+/// The `lstat` follows symlinks in intermediate components, so this is not
+/// containment: `ensure_dir`'s fd-relative no-follow walk enforces. A `true`
+/// only spares the classification walk and never chooses an error.
+pub(crate) fn landing_is_free_or_directory(root: &PinnedRoot, rel: &Path) -> bool {
+    match root.dest().probe(rel).lstat() {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Fails with [`replaces_symlink`] when `rel` is a symlink that does not
+/// resolve to a directory inside the destination; every other outcome,
+/// including a policy refusal of an inside link, is left to the write phase.
+///
+/// The one rule for a directory entry over a symlink, shared by
+/// [`check_directory_occupant`] and the 7z pre-pass.
+pub(crate) fn refuse_unadmitted_symlink_landing(
+    root: &PinnedRoot,
+    dirs: DirWalker,
+    rel: &Path,
+    maker: impl FnOnce() -> OccupiedBy,
+) -> Result<()> {
+    match dirs.vet_dir(root, rel, rel) {
+        Err(
+            ArchiveError::SymlinkEscape { .. }
+            | ArchiveError::SecurityViolation {
+                kind: Violation::SymlinkParent { .. },
+                ..
+            },
+        ) => Err(replaces_symlink(rel, maker())),
+        Ok(()) | Err(_) => Ok(()),
+    }
 }
 
 /// Who made the `occupant` at `rel`: the run when its record confirms it, read
@@ -903,9 +914,10 @@ pub(crate) fn create_symlink<P: ParentCheck>(
             let link_path = safe_symlink.link().as_path();
             let action = duplicates.on_occupant(
                 EntryShape::Link(LinkKind::Symlink),
+                link_path,
                 || Ok(Some(existing)),
                 || root.created().created_here(&parent, leaf, link_path),
-                |found| root.occupied(link_path, found),
+                OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
                 return record_duplicate_skip(report, link_path);
@@ -941,7 +953,7 @@ pub(crate) fn create_symlink<P: ParentCheck>(
 
         parent.symlink(target_path, leaf)?;
         root.created()
-            .note(duplicates, &parent, leaf, safe_symlink.link().as_path());
+            .note(&parent, leaf, safe_symlink.link().as_path());
 
         report.symlinks_created = report.symlinks_created.saturating_add(1);
 
@@ -1275,7 +1287,12 @@ mod tests {
         assert!(!a.contains('\u{FFFD}'), "{a}");
 
         let occupant = |bytes: &[u8]| {
-            occupied_without_destination(Path::new(OsStr::from_bytes(bytes)), Some(Occupant::File))
+            OccupiedSite::Detached
+                .refuse(
+                    Path::new(OsStr::from_bytes(bytes)),
+                    Some(Occupant::File),
+                    crate::OccupiedBy::Existing,
+                )
                 .to_string()
         };
         assert_ne!(occupant(b"caf\xe9"), occupant(b"caf\xe8"));
@@ -2215,8 +2232,7 @@ mod refuse_probe_tests {
         let temp = TempDir::new().unwrap();
         let root = PinnedRoot::open_for_test(temp.path()).unwrap();
         std::fs::write(temp.path().join("f"), "ours").unwrap();
-        root.created()
-            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        root.created().note(root.dir(), leaf("f"), Path::new("f"));
         root.created().saturate();
 
         let outcome = open(&root, "f");
@@ -2230,8 +2246,7 @@ mod refuse_probe_tests {
         let temp = TempDir::new().unwrap();
         let root = PinnedRoot::open_for_test(temp.path()).unwrap();
         std::fs::write(temp.path().join("f"), "ours").unwrap();
-        root.created()
-            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        root.created().note(root.dir(), leaf("f"), Path::new("f"));
         std::fs::hard_link(temp.path().join("f"), temp.path().join("g")).unwrap();
 
         let outcome = open(&root, "g");
@@ -2245,8 +2260,7 @@ mod refuse_probe_tests {
         let temp = TempDir::new().unwrap();
         let root = PinnedRoot::open_for_test(temp.path()).unwrap();
         std::fs::write(temp.path().join("f"), "ours").unwrap();
-        root.created()
-            .note(ExistingFiles::Refuse, root.dir(), leaf("f"), Path::new("f"));
+        root.created().note(root.dir(), leaf("f"), Path::new("f"));
         std::fs::rename(temp.path().join("f"), temp.path().join("kept")).unwrap();
         std::fs::write(temp.path().join("f"), "foreign").unwrap();
 

@@ -249,6 +249,8 @@ pub enum Violation {
     SymlinkComponent {
         /// The walked path up to and including the symlink.
         walked: Box<str>,
+        /// Who made the symlink.
+        by: super::types::OccupiedBy,
     },
     /// A parent of the entry is a symlink that does not resolve to a
     /// directory.
@@ -257,6 +259,8 @@ pub enum Violation {
         entry: Box<str>,
         /// The blocking parent.
         parent: Box<str>,
+        /// Who made the symlink.
+        by: super::types::OccupiedBy,
     },
     /// The destination changed between the check that vetted it and the
     /// replace that acts on it.
@@ -585,10 +589,10 @@ impl fmt::Display for Violation {
                  Its target cannot be read due to sevenz-rust2 API limitations."
             ),
             Self::LinksNotAllowed(kind) => write!(f, "{kind}s not allowed"),
-            Self::SymlinkComponent { walked } => {
+            Self::SymlinkComponent { walked, .. } => {
                 write!(f, "path component is a symlink: {walked}")
             }
-            Self::SymlinkParent { entry, parent } => write!(
+            Self::SymlinkParent { entry, parent, .. } => write!(
                 f,
                 "refusing to create {entry} under the existing symlink at {parent}"
             ),
@@ -767,7 +771,10 @@ mod tests {
                 Some(PolicySetting::Hardlinks),
             ),
             (
-                Violation::SymlinkComponent { walked: text("w") },
+                Violation::SymlinkComponent {
+                    walked: text("w"),
+                    by: crate::OccupiedBy::Existing,
+                },
                 C::ExistingSymlink,
                 Some(PolicySetting::Symlinks),
             ),
@@ -775,6 +782,7 @@ mod tests {
                 Violation::SymlinkParent {
                     entry: text("e"),
                     parent: text("p"),
+                    by: crate::OccupiedBy::Existing,
                 },
                 C::ExistingSymlink,
                 None,

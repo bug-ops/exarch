@@ -349,7 +349,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             });
         }
         if let Some(error) = extraction_err {
-            json_error = json_error.with_occupancy(error);
+            json_error = json_error
+                .with_occupancy(error)
+                .with_destination_step(error);
         }
         json_error = json_error.with_leftover_path(leftover_path(error).map(HostPath::from));
         if let Some(kind) = &ffi_kind {

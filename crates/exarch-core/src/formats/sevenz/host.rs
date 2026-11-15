@@ -336,8 +336,11 @@ impl PrePass for HostPrePass<'_> {
     }
 
     fn directory(&mut self, landing: &SafePath) -> Result<()> {
-        let dirs = DirWalker::new(self.config);
         let rel = landing.as_path();
+        if common::landing_is_free_or_directory(self.root, rel) {
+            return Ok(());
+        }
+        let dirs = DirWalker::new(self.config);
         let held_by_symlink = dirs
             .open_parent(self.root, rel)
             .is_ok_and(|(parent, leaf)| matches!(parent.probe(leaf), Ok(Some(Occupant::Symlink))));

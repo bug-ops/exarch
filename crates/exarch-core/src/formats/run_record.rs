@@ -189,7 +189,9 @@ impl RunRecord {
     /// A duplicate check never skips a directory, but a refusal asks whether
     /// the run made the occupant.
     pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
-        self.insert(key_of(dir, leaf, rel));
+        if !self.is_saturated() {
+            self.insert(key_of(dir, leaf, rel));
+        }
     }
 
     /// Like [`note`](Self::note) for the file `leaf` the run just created and

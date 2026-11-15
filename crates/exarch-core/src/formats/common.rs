@@ -763,8 +763,12 @@ pub(crate) fn create_directory<P: ParentCheck>(
 /// not resolve to a directory inside the destination (a security violation,
 /// the category `verify` reports for it). `maker` says who made that occupant.
 ///
-/// The landing is read through its pinned parent, so the verdict does not
-/// depend on how long its host path is. A parent that cannot be opened is left
+/// A landing that is absent or already a directory, by one path `lstat`, is
+/// accepted at once: the lstat only chooses the error and never enforces, the
+/// fd-relative walk in [`DirWalker::ensure_dir`] does. Any other occupant, and
+/// a name the host cannot look up by path (too long), is read through its
+/// pinned parent, so the verdict does not depend on how long its host path
+/// is. A parent that cannot be opened is left
 /// to the walk in [`DirWalker::ensure_dir`], which refuses a blocking parent
 /// again and alone names a file parent, since only it can tell who made that
 /// file.
@@ -774,6 +778,9 @@ pub(crate) fn check_directory_occupant(
     rel: &Path,
     maker: impl FnOnce(Occupant) -> OccupiedBy,
 ) -> Result<()> {
+    if landing_is_free_or_directory(root, rel) {
+        return Ok(());
+    }
     let Ok((parent, leaf)) = dirs.open_parent(root, rel) else {
         return Ok(());
     };
@@ -785,6 +792,15 @@ pub(crate) fn check_directory_occupant(
         Ok(Some(Occupant::Symlink)) => {
             refuse_unadmitted_symlink_landing(root, dirs, rel, || maker(Occupant::Symlink))
         }
+    }
+}
+
+/// Whether one path `lstat` finds nothing, or a directory, at `rel`: the
+/// common landing of a directory entry, which needs no pinned probe.
+pub(crate) fn landing_is_free_or_directory(root: &PinnedRoot, rel: &Path) -> bool {
+    match root.dest().probe(rel).lstat() {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
 

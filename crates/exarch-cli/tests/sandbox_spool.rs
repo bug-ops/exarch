@@ -34,6 +34,20 @@ fn kernel_enforces() -> bool {
     ok
 }
 
+/// 64 KiB of xorshift output: deflate cannot shrink it, so the ratio check of
+/// the default `SecurityConfig` stays quiet.
+fn payload() -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    (0..64 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
 #[test]
 fn test_sandbox_require_with_temp_file_reuse_falls_back_and_extracts() {
     if !kernel_enforces() {
@@ -45,7 +59,7 @@ fn test_sandbox_require_with_temp_file_reuse_falls_back_and_extracts() {
     writer
         .start_file("a.txt", zip::write::SimpleFileOptions::default())
         .unwrap();
-    writer.write_all(&b"0123456789".repeat(1000)).unwrap();
+    writer.write_all(&payload()).unwrap();
     writer.finish().unwrap();
     let scratch = TempDir::new().unwrap();
     let out = dir.path().join("out");
@@ -65,9 +79,6 @@ fn test_sandbox_require_with_temp_file_reuse_falls_back_and_extracts() {
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        std::fs::read(out.join("a.txt")).unwrap(),
-        b"0123456789".repeat(1000)
-    );
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), payload());
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }

@@ -90,6 +90,12 @@ fn read_capped(reader: impl Read, origin: &str) -> Result<Vec<u8>> {
 
 fn read_file(path: &Path) -> Result<Vec<u8>> {
     let origin = path.display().to_string();
+    // Windows refuses to open a directory with an unrelated error; this
+    // pre-check only gives every platform the same message, and the check on
+    // the opened descriptor below stays authoritative.
+    if std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        bail!("the password file {origin} is not a regular file");
+    }
     let file =
         File::open(path).with_context(|| format!("failed to open the password file {origin}"))?;
     let metadata = file

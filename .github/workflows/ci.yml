@@ -356,6 +356,7 @@ jobs:
           EXARCH_REQUIRE_PRODUCERS: "1"
           EXARCH_REQUIRE_BSDTAR: "1"
           EXARCH_REQUIRE_PRIVILEGED_TESTS: "1"
+          EXARCH_REQUIRE_LANDLOCK: "1"
         run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
 
       - name: Run doctests

@@ -1,0 +1,33 @@
+---
+tags:
+  - sdd
+  - delta
+created: 2026-11-15
+status: open
+related:
+  - "[[005-cli/spec]]"
+---
+
+# Delta: CLI flags of the #1230 batch
+
+## ADDED
+
+### FR-147
+
+`extract`, `list` and `verify` SHALL accept `--repeated-paths <keep-first|refuse>` (default `keep-first`) mapped to `RepeatedPaths`, mirroring `--zip-consistency`; a refusal carries the hint `--repeated-paths keep-first`; JSON error `SECURITY_VIOLATION` / `REPEATED_PATH` (#1201, [[030-duplicate-entry-repeated-paths/spec]]).
+
+### FR-148
+
+`extract`, `list` and `verify` SHALL accept `--sandbox <best-effort|require>` (Linux, default off); the `--json` output carries a `sandbox` key; `--sandbox` with `--atomic` is a usage error and `create` has no such flag (#1025, [[025-cli-landlock-sandbox/spec]]). The startup order is argument parsing, destination precheck, `password::read`, destination creation, `sandbox::confine`, `interrupt::install`, the core call.
+
+### FR-149
+
+`extract`, `list` and `verify` SHALL accept the mutually exclusive `--password-file <PATH>`, `--password-fd <N>` (Unix) and `--password-prompt` (`rpassword`); there is no argv value, no environment variable and no `max_kdf_work` flag; a password given for an archive with no encrypted entry is ignored (#1023, [[024-encrypted-archive-support/spec]] FR-002).
+
+### FR-150
+
+`create --threads <N>` SHALL take a non-zero `u16` mapped to `Parallelism::Threads`; absent means sequential; the effective workers are clamped to `available_parallelism()` and the help says so (#1027, [[027-zip-parallel-compression/spec]] FR-011).
+
+### FR-151
+
+The CLI SHALL have a deterministic end-to-end test of the forced exit under a stalled read, using a `test-hooks` Cargo feature whose code is gated `cfg(all(feature = "test-hooks", debug_assertions))` and a test gated `cfg(all(unix, feature = "test-hooks", debug_assertions))`, so release-profile and `--all-features` release builds compile the hooks out (#1231).

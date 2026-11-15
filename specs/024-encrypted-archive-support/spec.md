@@ -11,8 +11,8 @@ tags:
   - parity
   - rust
 created: 2026-11-06
-updated: 2026-11-08
-status: draft
+updated: 2026-11-15
+status: ready
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -32,8 +32,8 @@ related:
 > **Subsystem**: exarch-core / `formats::{zip,sevenz}`, `config`, `request`, `security` (`QuotaTracker`, `validate_compression_ratio`), error classification; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.99.1
 > **Origin**: #1001 (competitive parity research, P4). Classification history: closed #83, #96, #171, #658.
-> **Status**: draft (spec-only change; it describes no behavior that is in the code), implementation-ready after the Ask First items in section 9 are resolved. It is NOT ready while any of them is open: the implementation PR must not start, and this status must not change, until the user has decided the three items of section 9 (prompt dependency, `zeroize`, `max_kdf_work` on the CLI).
-> **Decision**: implement (user decision, recorded in plan rev 2), read-only, not `wontfix`. The criteria of the research draft (DC-1 to DC-5) are replaced by the go/no-go criteria of section 7 that the implementation PR must meet.
+> **Status**: ready. The three Ask First items of section 9 were decided by the user on 2026-11-15. Implementation is part of the batch PR #1230 (branch `feat/1230-batch-11-issues`, issue #1023).
+> **Decision**: implement (user decision, recorded in plan rev 2; recommendations accepted 2026-11-15), read-only, not `wontfix`. The criteria of the research draft (DC-1 to DC-5) are replaced by the go/no-go criteria of section 7 that the implementation PR must meet.
 
 ## 1. Overview
 
@@ -180,8 +180,8 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | THE SYSTEM SHALL provide `Password` in exarch-core: bytes in a zeroizing buffer, redacted `Debug`, no `Display`, no `Clone` (shared as `Arc<Password>` where needed), a constructor that refuses empty and over-long input; it is passed per request (`with_password` on the extract, list and verify requests of [[020-reader-sink-and-in-memory-api/spec]]) and never stored in `SecurityConfig`, which is `Clone` and `Debug` | must |
-| FR-002 | THE CLI SHALL accept the password only from `--password-file <PATH>` (a regular file, first line, trailing `\n` or `\r\n` stripped, at most 1 KiB, refused on Unix when group- or world-readable), `--password-fd <N>` (Unix) or `--password-prompt` (no-echo TTY; non-interactive stdin is an error, never a hang); the flags are mutually exclusive; there SHALL be no argv value and no environment variable | must |
+| FR-001 | THE SYSTEM SHALL provide `Password` in exarch-core (using `zeroize`, a direct dependency of exarch-core behind the `encryption` feature): bytes in a zeroizing buffer, redacted `Debug`, no `Display`, no `Clone` (shared as `Arc<Password>` where needed), a constructor that refuses empty and over-long input; it is passed per request (`with_password` on the extract, list and verify requests of [[020-reader-sink-and-in-memory-api/spec]]) and never stored in `SecurityConfig`, which is `Clone` and `Debug` | must |
+| FR-002 | THE CLI SHALL accept the password only from `--password-file <PATH>` (a regular file, first line, trailing `\n` or `\r\n` stripped, at most 1 KiB, refused on Unix when group- or world-readable), `--password-fd <N>` (Unix) or `--password-prompt` (no-echo TTY through the `rpassword` crate, a dependency of exarch-cli only; non-interactive stdin is an error, never a hang); the flags are mutually exclusive; there SHALL be no argv value and no environment variable | must |
 | FR-003 | THE Python binding SHALL take `password: bytearray | None` and THE Node binding `password?: Buffer`; a `bytes`, `str` or string SHALL be refused with a typed error. exarch zeroizes its own copy; the caller wipes theirs (the docs show `password[:] = bytes(len(password))` and `buf.fill(0)`); zeroization across the binding boundary is best-effort and documented | must |
 | FR-004 | Encoding: ZIP SHALL use the password bytes as given; 7z SHALL use the UTF-16LE of the text, so a 7z password must be valid UTF-8 (typed refusal otherwise); there is no Unicode normalization (as 7-Zip) | must |
 | FR-005 | The password, derived keys and any key material SHALL NOT appear in argv, the environment, progress callbacks, reports, JSON, error messages, logs, `Debug` output or panic payloads; grep-style tests SHALL enforce it | must |
@@ -202,7 +202,7 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-020 | Errors SHALL be typed, in a `sub_code` family `ENCRYPTED`: `PasswordRequired` (no password; replaces today's `Violation::EncryptedArchive` and `EncryptedEntry` refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller | must |
+| FR-020 | Errors SHALL be typed as `Violation::Encryption(EncryptionRefusal)` (a `#[non_exhaustive]` enum), machine code `SECURITY_VIOLATION` with `sub_code` `ENCRYPTED` (the bindings' `SecurityViolationSubCode` stays stable; a plain `PasswordRequired` keeps `SECURITY_VIOLATION`), with these reasons: `PasswordRequired` (no password; replaces today's `Violation::EncryptedArchive` and `EncryptedEntry` refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller | must |
 
 ### KDF cost
 
@@ -210,7 +210,7 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 |----|------------|----------|
 | FR-030 | Per derivation, THE SYSTEM SHALL inherit sevenz-rust2 0.25's bound: `NumCyclesPower` above 24 (`MAX_AES_CYCLES_POWER`, `encryption/aes.rs`) is rejected upstream, at most 2^24 SHA-256 rounds, about 0.4 s. For a header-encrypted 7z the key is derived inside `Archive::read`, before exarch sees any coder, so v1 has no per-derivation knob; a test pins the upstream cap | must |
 | FR-031 | Power `0x3F` ("raw key" mode, no KDF) in a content coder SHALL be refused as `WeakEncryptionRefused`, detected from the coder properties during admission. It cannot be refused for an encrypted header before the header is read, because the key is built inside `Archive::read`, and after the read exarch no longer sees the header coder properties, so v1 has no check there and claims none; refusing it would need an upstream change (a hook or an error for raw-key mode in `Archive::read`). Raw-key mode runs no KDF, so it adds no CPU risk; it only means the header key is the password bytes themselves. This policy applies to content only | must |
-| FR-032 | `SecurityConfig::max_kdf_work` (`NonZeroU64`, SHA-256 rounds; default 2^27) SHALL bound the total key-derivation work of one operation. Accounting (below) is charged at admission, before any content block is decoded; over budget is `KdfCostExceeded`. Admission SHALL refuse any power above 24 (power `0x3F` as `WeakEncryptionRefused` per FR-031, powers 25 to 62 as `KdfCostExceeded`) before computing `2^power`, and SHALL sum with saturating addition | must |
+| FR-032 | `SecurityConfig::max_kdf_work` (a Rust, Python and Node setting; the CLI has no flag for it) (`NonZeroU64`, SHA-256 rounds; default 2^27) SHALL bound the total key-derivation work of one operation. Accounting (below) is charged at admission, before any content block is decoded; over budget is `KdfCostExceeded`. Admission SHALL refuse any power above 24 (power `0x3F` as `WeakEncryptionRefused` per FR-031, powers 25 to 62 as `KdfCostExceeded`) before computing `2^power`, and SHALL sum with saturating addition | must |
 | FR-033 | ZIP AES uses PBKDF2-HMAC-SHA1 at a fixed 1000 iterations per entry; its cost is bounded by `max_file_count`, stated in the docs and not charged against `max_kdf_work` | must |
 | FR-034 | WHILE a 7z has AES blocks THE SYSTEM SHALL decode those blocks sequentially (no parallel decode of encrypted blocks), so the order of derivations is the archive order the accounting assumes | must |
 
@@ -230,7 +230,7 @@ Consequences:
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-040 | sevenz-rust2 keeps the last derived key in a `static Mutex<Option<..>>` without zeroizing it and calls `.unwrap()` on the lock. The implementation PR SHALL NOT merge before an upstream issue or PR exists (zeroize on replace; a per-reader cache instead of a process-global one, without `unwrap`) | must |
+| FR-040 | sevenz-rust2 keeps the last derived key in a `static Mutex<Option<..>>` without zeroizing it and calls `.unwrap()` on the lock. The implementation PR SHALL carry a local upstream-report draft (zeroize on replace; a per-reader cache instead of a process-global one, without `unwrap`); filing it upstream is an outward action that needs the user's go | must |
 | FR-041 | Until that ships, THE DOCS SHALL state the residual: the last 7z key stays in process memory until the next derivation or process exit. The zeroization requirement of FR-001 and FR-005 is scoped to buffers exarch owns (its password copy). The lock can be poisoned only by a panic inside `derive_key`, which has none, and the bindings' panic boundary covers it anyway. The zip crate wipes AES round keys and key streams on drop (zip 9.x, PRs 1196 and 1204) | must |
 | FR-042 | The zip dependency floor SHALL include the fixes for GHSA-8hxf-qr8p-62x4 (patched 9.0.0), GHSA-c9rm-qm35-rhqf (9.0.1) and GHSA-v59p-pxfc-8xvf (9.0.5): zip at least 9.0.5 | must |
 
@@ -245,7 +245,7 @@ Consequences:
 | NFR-005 | Performance | The throughput of unencrypted archives regresses by less than 10%; the decryption overhead target is not set (Q6) |
 | NFR-006 | Compatibility | Interoperable with 7-Zip and libarchive archives for the supported methods |
 | NFR-007 | Maintainability | All security logic stays in `exarch-core`; bindings only map types and errors |
-| NFR-008 | Dependencies | `cargo deny --all-features check` is clean; new direct dependencies follow the Ask First rule (section 9) |
+| NFR-008 | Dependencies | `cargo deny --all-features check` is clean; the direct dependencies `zeroize` (core) and `rpassword` (cli) are the decided additions of section 9; any other new one is Ask First |
 | NFR-009 | Testing | Correct and wrong password, truncated and bit-flipped ciphertext, forged sizes, traversal and bomb payloads inside encrypted entries, mixed-entry archives, KDF-bomb archives (distinct salt per block, power above 24, power `0x3F`), per format |
 
 ## 5. Data Model
@@ -293,7 +293,7 @@ The implementation PR meets all of these or does not merge:
 |----|-----------|
 | GN-1 | zip at least 9.0.5 (GHSA-8hxf-qr8p-62x4, GHSA-c9rm-qm35-rhqf, GHSA-v59p-pxfc-8xvf) |
 | GN-2 | `max_kdf_work` enforced before the first content derivation, with the run accounting of FR-032 and sequential AES decode (FR-034) |
-| GN-3 | The upstream sevenz-rust2 key-cache issue is filed (FR-040) |
+| GN-3 | The upstream sevenz-rust2 key-cache report (FR-040) is prepared as a local draft with no project names, paths or advisory references; nothing is filed without the user's go |
 | GN-4 | No password in argv, environment, logs, `Debug`, errors or JSON (grep tests) |
 | GN-5 | Plaintext-twin property test: an encrypted archive extracts to exactly what its plaintext twin extracts to, including a many-file non-solid 7z written by the local `7z` (well beyond 224 files) |
 | GN-6 | Unencrypted throughput regression under 10% |
@@ -316,7 +316,6 @@ The implementation PR meets all of these or does not merge:
 - Update `skills/exarch-cli/SKILL.md` when flags, exit codes or JSON change, verified against the running binary.
 
 ### Ask First
-- The three items of section 9.
 - Enabling any new zip feature beyond `aes-crypto`, or changing zip or sevenz-rust2 versions or features.
 - Allowing ZipCrypto in any form.
 - Changing the public error taxonomy or the `max_kdf_work` default.
@@ -330,20 +329,19 @@ The implementation PR meets all of these or does not merge:
 
 ## 9. Open Questions
 
-> [!warning] Ask First items: block the implementation and the "ready" status
-> Each needs the user's decision before the implementation PR starts. This spec stays "draft" until all three are resolved.
-> 1. **Prompt dependency**: `rpassword` in exarch-cli only, or rustix termios plus a Windows console path. The latter needs `unsafe` on Windows, which the workspace denies.
-> 2. **`zeroize`** as a new direct dependency of exarch-core (not in the dependency tree today).
-> 3. **`max_kdf_work` on the CLI**: whether it gets a flag (and its name), or stays a Rust, Python and Node setting only.
+> [!success] Ask First items resolved (user, 2026-11-15)
+> 1. **Prompt dependency**: `rpassword` in exarch-cli only (no `unsafe` on Windows).
+> 2. **`zeroize`**: a new direct dependency of exarch-core, behind the `encryption` feature.
+> 3. **`max_kdf_work` on the CLI**: no flag; it stays a Rust, Python and Node setting.
 
-> [!question] Left open by the plan
+> [!question] Left open by the plan (Q8 and Q11 decided below)
 > - **Q4**: the `max_kdf_work` default (2^27) is confirmed only against the local `7z`, which writes one salt (empty) per archive. Confirm against other 7z writers that use a salt per file, or accept the documented cliff.
 > - **Q5**: how exarch detects an encrypted 7z header (for the 2^24 reservation of FR-032) and how a failed header decryption with a wrong password is classified (`WrongPasswordOrCorrupt` is stated for content only).
 > - **Q6**: the decryption overhead target and the `Password` maximum length are not set (the file limit is 1 KiB).
 > - **Q7**: the typed reason for admission refusing powers 25 to 62 (this spec uses `KdfCostExceeded`; the plan names none).
-> - **Q8**: behavior when a password is supplied for an archive with no encrypted entries (ignore, or warn); the research draft left it open and the plan is silent.
+> - **Q8 (decided)**: a password supplied for an archive with no encrypted entries is ignored.
 > - **Q9**: whether `list` without a password should also work for header-encrypted 7z (the plan says `PasswordRequired`, so no).
-> - **Q11**: today `ENCRYPTED` is one `sub_code` of `SECURITY_VIOLATION` (`Violation::EncryptedArchive`, `EncryptedEntry`). FR-020 describes a family of six reasons under that name; decide whether they stay `Violation` variants with sub-code `ENCRYPTED` (keeping the bindings' `SecurityViolationSubCode` stable) or become a new error code, and whether a plain `PasswordRequired` keeps `SECURITY_VIOLATION` for callers that match it today.
+> - **Q11 (decided)**: the reasons stay `Violation` variants under `SECURITY_VIOLATION` with sub-code `ENCRYPTED`, as the typed `EncryptionRefusal` (FR-020); a plain `PasswordRequired` keeps `SECURITY_VIOLATION`.
 > - **Q10**: how the `max_kdf_work` accounting covers the several passes over the blocks (charge per pass, or arrange that derivations are shared); found when aligning this spec with the code on 2026-11-07, not covered by the plan.
 
 ## 10. See Also

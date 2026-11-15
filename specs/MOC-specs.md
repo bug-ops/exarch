@@ -39,8 +39,14 @@ status: moc
 | 021 | [[021-create-staging-and-output-policy/spec\|Create Staging and Output Policy]] | specify | implemented (0.9.0, #931, #915, #916; typed source errors and durability, #956, #953, #961) | n/a (specify-only) |
 | 022 | [[022-extract-entry-selection/spec\|Extract Entry Selection and Path Stripping]] | tasks | implemented (#967, #981 batch; grammar replaced by globs in #1024, see 023; synced through #1167) | [[022-extract-entry-selection/tasks\|22 done]] |
 | 023 | [[023-entry-selection-glob-patterns/spec\|Glob Patterns for Entry Selection and Create Excludes]] | specify | implemented (#1024, closes #1000; supersedes 021 FR-019 to FR-021) | n/a (specify-only) |
-| 024 | [[024-encrypted-archive-support/spec\|Encrypted Archive Support]] | specify | draft (#1001; encrypted archives are still refused with `SECURITY_VIOLATION` / `ENCRYPTED`; implementation-ready only after the Ask First items in section 9 are resolved) | n/a (specify-only) |
+| 024 | [[024-encrypted-archive-support/spec\|Encrypted Archive Support]] | specify | ready (#1001, #1023; Ask First items decided 2026-11-15: rpassword, direct zeroize, no `max_kdf_work` CLI flag, typed `EncryptionRefusal`; implementation in the #1230 batch PR) | n/a (specify-only) |
+| 025 | [[025-cli-landlock-sandbox/spec\|CLI Landlock Sandbox]] | plan | ready (#1025; Linux only, opt-in `--sandbox`, no READ_DIR, confine after `password::read` and before `interrupt::install`; #1230 batch PR) | n/a (batch PR) |
 | 026 | [[026-mark-of-the-web-propagation/spec\|Download-Origin Mark Propagation]] | specify | implemented (#1026; opt-in `MarkPropagation`, macOS verified, Windows runs on CI only; `MarkState` tokens, #1158; no-stream volume, #1150; last synced for #1165, `mark_incomplete` JSON warning #1165) | n/a (specify-only) |
+| 027 | [[027-zip-parallel-compression/spec\|ZIP Parallel Compression]] | plan | ready (#1027; byte identity across thread counts, `create --threads`; #1230 batch PR) | n/a (batch PR) |
+| 030 | [[030-duplicate-entry-repeated-paths/spec\|Opt-in Refusal of Repeated Archive Paths]] | plan | ready (#1201; opt-in `RepeatedPaths::Refuse`, default unchanged, fail-closed maker; #1230 batch PR) | n/a (batch PR) |
+
+> [!info] Open deltas
+> Amendments of the #1230 batch live in `changes/` of specs 001, 003, 005, 006, 007, 019, 021 and 022 and are merged at spec sync.
 
 ## Completed Specs
 

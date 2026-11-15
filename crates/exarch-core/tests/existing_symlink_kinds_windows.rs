@@ -8,6 +8,7 @@
 mod sink_support;
 
 use std::os::windows::fs::symlink_dir;
+use std::os::windows::fs::symlink_file;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,6 +32,7 @@ use tempfile::TempDir;
 enum LinkKind {
     Junction,
     DirSymlink,
+    FileSymlink,
 }
 
 fn config() -> SecurityConfig {
@@ -50,6 +52,7 @@ fn plant(kind: LinkKind, link: &Path, target: &Path) -> bool {
             .output()
             .is_ok_and(|out| out.status.success()),
         LinkKind::DirSymlink => symlink_dir(target, link).is_ok(),
+        LinkKind::FileSymlink => symlink_file(target, link).is_ok(),
     }
 }
 
@@ -88,7 +91,11 @@ fn run(archive: &Path, dest: &Path, policy: ExistingFiles) -> Result<(), Archive
 }
 
 fn for_each_leaf_link(name: &str, check: impl Fn(&Path, &Path, &Path, ExistingFiles)) {
-    for kind in [LinkKind::Junction, LinkKind::DirSymlink] {
+    for kind in [
+        LinkKind::Junction,
+        LinkKind::DirSymlink,
+        LinkKind::FileSymlink,
+    ] {
         for policy in [
             ExistingFiles::Skip,
             ExistingFiles::Refuse,
@@ -102,7 +109,13 @@ fn for_each_leaf_link(name: &str, check: impl Fn(&Path, &Path, &Path, ExistingFi
                 std::fs::create_dir(&dest).unwrap();
                 std::fs::create_dir(&outside).unwrap();
                 std::fs::create_dir_all(dest.join(name).parent().unwrap()).unwrap();
-                if !plant(kind, &dest.join(name), &outside) {
+                let victim = root.path().join("victim.txt");
+                std::fs::write(&victim, b"keep").unwrap();
+                let target = match kind {
+                    LinkKind::FileSymlink => victim.as_path(),
+                    LinkKind::Junction | LinkKind::DirSymlink => outside.as_path(),
+                };
+                if !plant(kind, &dest.join(name), target) {
                     assert!(
                         !required(),
                         "{kind:?} not creatable but EXARCH_REQUIRE_PRIVILEGED_TESTS is set"
@@ -110,6 +123,12 @@ fn for_each_leaf_link(name: &str, check: impl Fn(&Path, &Path, &Path, ExistingFi
                     return;
                 }
                 check(&archive, &dest, &outside, policy);
+                assert_eq!(
+                    std::fs::read(&victim).unwrap(),
+                    b"keep",
+                    "{kind:?} {policy:?} {}: wrote through the link",
+                    archive.display()
+                );
             }
         }
     }

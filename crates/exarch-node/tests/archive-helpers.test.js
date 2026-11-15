@@ -51,7 +51,10 @@ describe('shared archive builders (#1234)', () => {
 
   it('zipArchive stores entries with their crc32 and ends with an end-of-central-directory record', () => {
     const data = Buffer.from('payload');
-    const archive = zipArchive([{ name: 'p.txt', data }, { name: 'd/', data: Buffer.alloc(0), dir: true }]);
+    const archive = zipArchive([
+      { name: 'p.txt', data },
+      { name: 'd/', data: Buffer.alloc(0), dir: true },
+    ]);
     assert.strictEqual(archive.readUInt32LE(0), 0x04034b50);
     assert.strictEqual(archive.readUInt32LE(14), crc32(data));
     assert.strictEqual(archive.readUInt32LE(archive.length - 22), 0x06054b50);

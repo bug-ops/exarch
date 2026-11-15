@@ -147,6 +147,7 @@ fn the_file_size_limit_skips_the_same_entries_in_every_mode() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_earliest_failing_entry_is_the_one_reported_in_every_mode() {
     use std::os::unix::fs::PermissionsExt;

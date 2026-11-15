@@ -61,6 +61,7 @@ fn tree() -> TempDir {
         bytes
     })
     .unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink("compressible.txt", root.join("link")).unwrap();
     src
 }
@@ -115,6 +116,7 @@ fn create_other_formats_ignore_parallelism() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn create_zip_unreadable_source_is_the_same_error_in_every_mode() {
     use std::os::unix::fs::PermissionsExt;

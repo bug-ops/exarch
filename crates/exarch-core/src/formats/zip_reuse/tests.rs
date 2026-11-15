@@ -17,6 +17,7 @@ use crate::ExtractionOptions;
 use crate::NoopProgress;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
+use crate::encryption::Credentials;
 use crate::formats::zip::ZipArchive;
 use crate::formats::zip::ZipMethod;
 use crate::sink::SinkUsage;
@@ -311,7 +312,7 @@ fn open(bytes: &[u8], reuse: DecodeReuse) -> Opened {
         read: Arc::clone(&read),
     };
     Opened {
-        archive: ZipArchive::for_extraction(reader, &config, reuse).unwrap(),
+        archive: ZipArchive::for_extraction(reader, &config, reuse, Credentials::NONE).unwrap(),
         read,
         config,
     }
@@ -431,8 +432,13 @@ fn an_archive_opened_for_another_policy_is_not_served() {
     let ignoring =
         SecurityConfig::default().with_zip_consistency(crate::ZipConsistencyPolicy::Ignore);
     let config = SecurityConfig::default();
-    let skipped =
-        ZipArchive::for_extraction(Cursor::new(bytes), &ignoring, DecodeReuse::Off).unwrap();
+    let skipped = ZipArchive::for_extraction(
+        Cursor::new(bytes),
+        &ignoring,
+        DecodeReuse::Off,
+        Credentials::NONE,
+    )
+    .unwrap();
     assert!(skipped.serves(&ignoring));
     assert!(!skipped.serves(&config));
 }
@@ -469,7 +475,7 @@ fn a_source_fault_while_opening_keeps_its_errno() {
             reads_left,
         };
         if let Err(crate::ArchiveError::Io(error)) =
-            ZipArchive::for_extraction(reader, &config, DecodeReuse::Off)
+            ZipArchive::for_extraction(reader, &config, DecodeReuse::Off, Credentials::NONE)
         {
             assert_eq!(error.raw_os_error(), Some(5), "after {reads_left} reads");
             seen = true;
@@ -565,6 +571,7 @@ fn nothing_is_kept_when_the_policy_skips_the_stream_checks() {
         Cursor::new(deflated_zip(3)),
         &config,
         DecodeReuse::Memory(ReuseLimit::DEFAULT),
+        Credentials::NONE,
     )
     .unwrap();
     assert!(archive.structure_mut().reuse_mut().is_none());

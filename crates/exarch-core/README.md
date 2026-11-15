@@ -97,6 +97,26 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 > [!CAUTION]
 > Default configuration blocks symlinks and hardlinks. Enable only when you trust the archive source.
 
+## Encrypted Archives
+
+With the `encryption` feature, ZIP archives that use WinZip AES and 7z archives that use AES-256 (content or header) are read through a `Password`. It is passed per request with `with_password` on `ExtractRequest`, `ListRequest`, `VerifyRequest` and `SinkExtractRequest`, never stored in `SecurityConfig`, wiped on drop, and printed as `Password(..)`.
+
+```rust
+use std::sync::Arc;
+
+use exarch_core::ExtractRequest;
+use exarch_core::Password;
+use exarch_core::SecurityConfig;
+
+let config = SecurityConfig::default();
+let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+ExtractRequest::new(&config)
+    .with_password(password)
+    .extract("secret.zip", "out")?;
+```
+
+Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: `sevenz-rust2` keeps the last derived 7z key in process memory until the next derivation or exit, and a 7z password is converted for `sevenz-rust2` without being wiped there. `max_kdf_work` charges each derivation run once, at admission; a block that is read in a second pass (the link pre-pass, then extraction) can derive its key again when salts alternate.
+
 ## Archive Creation
 
 Create archives with secure defaults:
@@ -158,7 +178,7 @@ The output is staged in a temporary file in its directory (which must be writabl
 > ZIP-family formats share the ZIP container but add extra structure — signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) — which exarch-core doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can state `CreatableFormat::Zip` with `OutputFile::with_format`.
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.
+> 7z creation is not yet supported. Solid 7z archives are rejected for security reasons. Password-protected ZIP (WinZip AES) and 7z (AES-256) archives are read when a `Password` is supplied (feature `encryption`); ZipCrypto is refused as too weak. A 7z archive holding a Windows reparse point is refused as a whole; a Unix `S_IFLNK` symlink is read and validated through the symlink policy, so it is created only with symlinks allowed, and a 7z FIFO, socket or device node is refused.
 
 > [!NOTE]
 > `detect_format` falls back to magic-byte inspection when the file extension is absent, unrecognised, or contradicts the file content. When magic bytes and extension disagree, magic bytes take precedence. Archive creation always uses extension-only detection.

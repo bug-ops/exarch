@@ -42,6 +42,7 @@ use crate::creation::staged::StagedOutput;
 use crate::creation::tar::write_tar;
 use crate::creation::zip::warn_on_extraction_ratio;
 use crate::creation::zip::write_zip;
+use crate::encryption::Credentials;
 use crate::formats::detect::CreatableFormat;
 use crate::formats::detect::CreationFamily;
 use crate::inspection::ArchiveManifest;
@@ -95,6 +96,17 @@ impl<'a, C, O> Carrier<'a, C, O> {
     fn with_password(mut self, password: Arc<Password>) -> Self {
         self.password = Some(password);
         self
+    }
+
+    fn credentials(&self) -> Credentials {
+        #[cfg(feature = "encryption")]
+        {
+            Credentials::new(self.password.clone())
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            Credentials::NONE
+        }
     }
 
     fn with_options(mut self, options: O) -> Self {
@@ -199,6 +211,7 @@ impl<'a> ExtractRequest<'a> {
         output_dir: impl AsRef<Path>,
     ) -> Result<ExtractionReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
             extract_staged(
                 output_dir.as_ref(),
@@ -207,7 +220,14 @@ impl<'a> ExtractRequest<'a> {
                 Some(archive.as_ref()),
                 progress,
                 |dir, options, progress| {
-                    extract_validated(archive.as_ref(), dir, config, options, progress)
+                    extract_validated(
+                        archive.as_ref(),
+                        dir,
+                        config,
+                        options,
+                        progress,
+                        credentials.clone(),
+                    )
                 },
             )
         })
@@ -288,8 +308,15 @@ impl<'a> ListRequest<'a> {
     /// See [`ListRequest`].
     pub fn list(self, archive: impl AsRef<Path>) -> Result<ArchiveManifest> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            crate::inspection::list_archive_with_progress(archive, config, options, progress)
+            crate::inspection::list_archive_with_progress(
+                archive,
+                config,
+                options,
+                progress,
+                credentials,
+            )
         })
     }
 
@@ -300,10 +327,13 @@ impl<'a> ListRequest<'a> {
     /// See [`ListRequest`].
     pub fn list_reader(self, reader: ArchiveReader<'_>) -> Result<ArchiveManifest> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
             let manifest = reader.list(
                 config,
-                &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
+                &mut ListPass::strict_with(options.stored_targets)
+                    .with_credentials(credentials)
+                    .with_progress(progress),
             )?;
             progress.on_complete();
             Ok(manifest)
@@ -359,8 +389,16 @@ impl<'a> ListRequest<'a> {
         reuse: DecodeReuse,
     ) -> Result<ListedArchive> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            ListedArchive::list(archive.as_ref(), config, options, reuse, Some(progress))
+            ListedArchive::list(
+                archive.as_ref(),
+                config,
+                options,
+                reuse,
+                Some(progress),
+                credentials,
+            )
         })
     }
 }
@@ -444,8 +482,15 @@ impl<'a> VerifyRequest<'a> {
     /// See [`VerifyRequest`].
     pub fn verify(self, archive: impl AsRef<Path>) -> Result<VerificationReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            crate::inspection::verify_archive_with_progress(archive, config, options, progress)
+            crate::inspection::verify_archive_with_progress(
+                archive,
+                config,
+                options,
+                progress,
+                credentials,
+            )
         })
     }
 
@@ -457,8 +502,9 @@ impl<'a> VerifyRequest<'a> {
     /// See [`VerifyRequest`].
     pub fn verify_reader(self, reader: ArchiveReader<'_>) -> Result<VerificationReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            let report = reader.verify(config, options, progress)?;
+            let report = reader.verify(config, options, progress, credentials)?;
             progress.on_complete();
             Ok(report)
         })
@@ -531,6 +577,18 @@ impl<'a> SinkExtractRequest<'a> {
         Self(self.0.with_options(options))
     }
 
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
+    }
+
     /// Reports progress to `progress`.
     #[must_use]
     pub fn with_progress(self, progress: &'a mut dyn ProgressCallback) -> Self {
@@ -548,8 +606,9 @@ impl<'a> SinkExtractRequest<'a> {
         sink: &mut S,
     ) -> Result<ExtractionReport> {
         let Self(request) = self;
+        let credentials = request.credentials();
         request.run(|config, options, progress| {
-            extract_to_sink_reusing(reader, sink, config, options, progress, None)
+            extract_to_sink_reusing(reader, sink, config, options, progress, None, credentials)
         })
     }
 }

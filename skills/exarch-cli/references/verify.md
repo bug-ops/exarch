@@ -45,7 +45,7 @@
 
 Reasons an item is unverified: budget exhausted, quota/ratio/decoder-memory limit, solid 7z without `--allow-solid-archives`, an uncovered 7z block checksum, unsupported 7z coder, a TAR stream with no end-of-archive marker, an entry dropped for an over-long path, and an unsearched ZIP data-descriptor tail.
 
-`--json` adds `data.integrity_gaps` (`null` without the flag): `counts` maps each reason (`over_budget`, `resource_limit`, `solid_policy`, `size_ceiling`, `uncovered_block_crc`, `not_decodable`, `no_end_marker`, `path_too_long`, `descriptor_tail`) to a number; `entries` lists up to 256 `{path, reason}`; `omitted` counts the rest. `no_end_marker` and `path_too_long` have counts but no path.
+`--json` adds `data.integrity_gaps` (`null` without the flag): `counts` maps each reason (`over_budget`, `resource_limit`, `solid_policy`, `size_ceiling`, `uncovered_block_crc`, `not_decodable`, `no_end_marker`, `path_too_long`, `encrypted`, `descriptor_tail`) to a number; `entries` lists up to 256 `{path, reason}`; `omitted` counts the rest. `no_end_marker` and `path_too_long` have counts but no path.
 
 What `OK` covers:
 

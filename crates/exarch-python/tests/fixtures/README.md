@@ -107,3 +107,11 @@ These fixtures ensure that exarch:
 - [CVE-2025-48387](https://nvd.nist.gov/vuln/detail/CVE-2025-48387) - Node.js tar-fs hardlink traversal
 - [CWE-22](https://cwe.mitre.org/data/definitions/22.html) - Path Traversal
 - [CWE-59](https://cwe.mitre.org/data/definitions/59.html) - Improper Link Resolution Before File Access
+
+---
+
+### encrypted-aes256.zip, encrypted-header.7z
+
+**Purpose:** password handling of #1023 (`test_encrypted_archives.py`)
+
+**Contents:** `hello.txt` ("hello encrypted\n") and `dir/inner.txt` ("inner payload\n"). `encrypted-aes256.zip` is WinZip AES-256; `encrypted-header.7z` is non-solid with an encrypted header and content. The password of both is `correct-horse`. Copies of `aes256.zip` and `header.7z` in `crates/exarch-core/tests/data/encryption`.

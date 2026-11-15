@@ -140,6 +140,30 @@ an end-of-archive marker); it comes with a Medium issue, so `status` is at least
 `'WARNING'`. With the check on, a TAR entry whose content fails to decode rejects
 the promise.
 
+### Password-Protected Archives
+
+ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
+a `Buffer` as the `password` argument of `extractArchive`,
+`extractArchiveSync`, `extractArchiveWithProgress`, `listArchive`,
+`listArchiveSync`, `verifyArchive` or `verifyArchiveSync`. A string is refused
+because it cannot be wiped; exarch wipes its own copy and you wipe yours.
+
+```javascript
+const { extractArchiveSync } = require('exarch');
+
+const password = Buffer.from('correct-horse');
+try {
+  extractArchiveSync('secret.zip', 'out', null, null, password);
+} finally {
+  password.fill(0); // best effort: wipe your copy
+}
+```
+
+A missing, wrong or weak (ZipCrypto) password throws a `SECURITY_VIOLATION`
+error with `subCode === 'ENCRYPTED'`; a password for an archive that is not
+encrypted is ignored. `SecurityConfig.maxKdfWork` bounds the key-derivation work
+of one 7z operation. Zeroization across the binding boundary is best effort.
+
 ### Archives in Memory
 
 `listArchiveBytes`, `verifyArchiveBytes` and `extractArchiveToMemory` (each with

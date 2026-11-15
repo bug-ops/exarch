@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SEEDS="$REPO_ROOT/fuzz/seeds"
 CORPUS="$REPO_ROOT/fuzz/corpus"
 
-for target in tar zip sevenz safe_path extract_archive sink detect glob; do
+for target in tar zip sevenz safe_path extract_archive sink detect glob encrypted; do
   mkdir -p "$SEEDS/$target"
   # cargo-fuzz requires an explicitly-passed corpus dir to already exist; it
   # only auto-creates the default (no-arg) path. Without this, every matrix
@@ -51,6 +51,11 @@ if [[ -f "$REPO_ROOT/crates/exarch-cli/tests/fixtures/symlink.zip" ]]; then
   copy_seed "$REPO_ROOT/crates/exarch-cli/tests/fixtures/symlink.zip" zip
   copy_seed "$REPO_ROOT/crates/exarch-cli/tests/fixtures/symlink.zip" extract_archive
 fi
+
+for f in "$REPO_ROOT"/crates/exarch-core/tests/data/encryption/*.zip \
+         "$REPO_ROOT"/crates/exarch-core/tests/data/encryption/*.7z; do
+  copy_seed "$f" encrypted
+done
 
 for name in cve-2025-48387-hardlink.tar cve-2024-12905-symlink-escape.tar; do
   f="$REPO_ROOT/crates/exarch-python/tests/fixtures/$name"
@@ -91,7 +96,7 @@ done
 # against a generated one, and copy_seed()'s fail-loud check enforces that a
 # collision is never resolved silently either way -- it errors instead, so a
 # clashing slug must be renamed rather than accidentally dropping a seed.
-for target in tar zip sevenz safe_path extract_archive sink detect glob; do
+for target in tar zip sevenz safe_path extract_archive sink detect glob encrypted; do
   for f in "$REPO_ROOT"/crates/exarch-core/tests/fixtures/fuzz/"$target"/*.bin; do
     copy_seed "$f" "$target"
   done

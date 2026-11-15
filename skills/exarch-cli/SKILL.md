@@ -55,6 +55,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--strip-components <N>` / `--flatten` | off | Drop leading path components / land files at top level (mutually exclusive). |
 | `--allowed-extensions <EXT>` | all | Extract only matching regular files (`txt,pdf`). |
 | `--max-files` / `--max-total-size` / `--max-file-size` | 10000 / 500 MiB / 50 MiB | Hard quotas; size values take `K`/`M`/`G`/`T`. `0` is refused. `--max-files` counts every entry (directories, links, skipped entries included). |
+| `--password-file <PATH>` / `--password-fd <N>` / `--password-prompt` | none | Password of an encrypted ZIP (WinZip AES) or 7z; one source at most, also on `list` and `verify`. Never an argument value or an environment variable. See [references/formats.md](references/formats.md). |
 | `--max-compression-ratio` | 100 | Zip-bomb threshold (ZIP and non-solid 7z). |
 | `--max-path-depth` | 32 | Max path components per entry. |
 | `--preserve-permissions` | off | Keep archive modes (setuid/setgid always stripped). |

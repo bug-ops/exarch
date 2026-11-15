@@ -2,6 +2,6 @@ Encrypted fixtures for the #1023 acceptance tests, generated with `7z` (p7zip 17
 
 - `aes256.zip`: WinZip AES-256 (`-mem=AES256`)
 - `zipcrypto.zip`: legacy ZipCrypto (`-mem=ZipCrypto`)
-- `content.7z`: 7z, encrypted content (`-p`)
-- `header.7z`: 7z, encrypted header and content (`-mhe=on`)
-- `plain.zip`, `plain.7z`: unencrypted twins
+- `content.7z`: 7z, non-solid (`-ms=off`), encrypted content, plain header (`-p`, `-mhc=off`)
+- `header.7z`: 7z, non-solid (`-ms=off`), encrypted header and content (`-mhe=on`)
+- `plain.zip`, `plain.7z` (non-solid, `-ms=off`): unencrypted twins

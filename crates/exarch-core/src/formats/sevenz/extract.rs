@@ -301,6 +301,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let is_solid = self.header.is_solid();
         let tap = SourceTap::default();
         let faults = ReadFaults::new(ReadFamily::SevenZ, Some(&tap));
+        let faults = if self.header.content_encrypted() {
+            faults.decrypting(crate::EncryptionRefusal::WrongPasswordOrCorrupt)
+        } else {
+            faults
+        };
 
         let mut each = |entry: &sevenz_rust2::ArchiveEntry,
                         reader: &mut dyn Read|

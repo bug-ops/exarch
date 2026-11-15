@@ -23,6 +23,7 @@ use crate::ReaderFormatError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
+use crate::encryption::Credentials;
 use crate::formats::SevenZArchive;
 use crate::formats::TarArchive;
 use crate::formats::ZipArchive;
@@ -359,7 +360,8 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::new(reader, config)?.list_with(config, listing),
+            } => ZipArchive::open(reader, config, listing.credentials().clone())?
+                .list_with(config, listing),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
@@ -372,6 +374,7 @@ impl<'a> ArchiveReader<'a> {
         config: &SecurityConfig,
         options: VerificationOptions,
         progress: &mut dyn ProgressCallback,
+        credentials: Credentials,
     ) -> Result<VerificationReport> {
         let format = self.format();
         match self.source {
@@ -385,13 +388,13 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::new(reader, config)?.verify_with_progress(config, options, progress),
+            } => ZipArchive::open(reader, config, credentials)?
+                .verify_with_progress(config, options, progress),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
-            } => {
-                SevenZArchive::new(reader, config)?.verify_with_progress(config, options, progress)
-            }
+            } => SevenZArchive::open(reader, config, &credentials)?
+                .verify_with_progress(config, options, progress),
         }
     }
 }

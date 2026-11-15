@@ -24,6 +24,7 @@ use super::io_marker::IoMarker;
 use super::tar_metadata_limit::budget_violation;
 use crate::ArchiveError;
 use crate::Malformation;
+use crate::Violation;
 use crate::copy::CopyError;
 
 /// The decoder family that reads an entry's bytes, which decides how a failed
@@ -52,6 +53,7 @@ pub(crate) enum ReadFamily {
 pub(crate) struct ReadFaults<'a> {
     tap: Option<&'a SourceTap>,
     family: ReadFamily,
+    encrypted: Option<crate::EncryptionRefusal>,
 }
 
 impl<'a> ReadFaults<'a> {
@@ -59,7 +61,20 @@ impl<'a> ReadFaults<'a> {
     /// has one.
     #[must_use]
     pub(crate) const fn new(family: ReadFamily, tap: Option<&'a SourceTap>) -> Self {
-        Self { tap, family }
+        Self {
+            tap,
+            family,
+            encrypted: None,
+        }
+    }
+
+    /// The faults of an entry that is decrypted while it is read: a decoder
+    /// verdict on its bytes (checksum, truncation, malformed data) is then
+    /// `reason`, since tampered or wrongly decrypted data fails that way.
+    #[must_use]
+    pub(crate) const fn decrypting(mut self, reason: crate::EncryptionRefusal) -> Self {
+        self.encrypted = Some(reason);
+        self
     }
 
     /// The decoder family of the entry being read.
@@ -133,6 +148,7 @@ impl<'a> ReadFaults<'a> {
     #[must_use]
     pub(crate) fn classify_symlink_read(self, error: io::Error) -> ArchiveError {
         match classify_decoder_read(error, self.pending_fault(), self.family).into_decoder_error() {
+            Ok(error) if self.encrypted.is_some() => self.unreadable(error),
             Ok(error) => ArchiveError::from(Malformation::SymlinkTargetUnreadable {
                 detail: error.to_string().into(),
             }),
@@ -141,6 +157,9 @@ impl<'a> ReadFaults<'a> {
     }
 
     fn unreadable(self, error: io::Error) -> ArchiveError {
+        if let Some(reason) = self.encrypted {
+            return Violation::Encrypted { reason, name: None }.into();
+        }
         let detail: Box<str> = error.to_string().into();
         match self.family {
             ReadFamily::Opaque => ArchiveError::Io(error),

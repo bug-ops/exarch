@@ -6,6 +6,7 @@ use super::header::BlockIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
+use crate::EncryptionRefusal;
 use crate::EntryCompression;
 use crate::Limit;
 use crate::Malformation;
@@ -15,6 +16,9 @@ use crate::SolidArchives;
 use crate::SolidBlock;
 use crate::SolidMemoryScope;
 use crate::Violation;
+use crate::encryption::Credentials;
+use crate::encryption::kdf::KdfRefusal;
+use crate::encryption::kdf::KdfRuns;
 use crate::error::QuotaResource;
 use crate::formats::common;
 use crate::formats::le;
@@ -403,13 +407,16 @@ pub(super) fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
     declared_size: Option<u64>,
     config: &SecurityConfig,
+    credentials: &Credentials,
+    kdf: &mut KdfRuns,
 ) -> std::result::Result<(), Refused> {
     let not_decodable = |error| Refused::new(UnverifiedReason::NotDecodable, error);
     let output = block_charge(block).max(declared_size.unwrap_or_default());
     let mut memory: u64 = 0;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
-            return Err(not_decodable(common::encrypted_archive_error()));
+            admit_aes_coder(coder, credentials, kdf).map_err(not_decodable)?;
+            continue;
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
             not_decodable(ArchiveError::from(Malformation::SevenZUnsupportedCoder))
@@ -432,6 +439,27 @@ pub(super) fn admit_sevenz_block(
         )));
     }
     Ok(())
+}
+
+/// Admits the AES coder of a block: a usable password must be supplied and the
+/// key derivation of the block must fit what is left of `max_kdf_work`.
+fn admit_aes_coder(
+    coder: &sevenz_rust2::Coder,
+    credentials: &Credentials,
+    kdf: &mut KdfRuns,
+) -> std::result::Result<(), ArchiveError> {
+    let encrypted = |reason| ArchiveError::from(Violation::Encrypted { reason, name: None });
+    if !credentials.is_supplied() {
+        return Err(common::encrypted_archive_error());
+    }
+    if credentials.sevenz_secret().is_err() {
+        return Err(encrypted(EncryptionRefusal::WrongPasswordOrCorrupt));
+    }
+    kdf.admit(coder.properties())
+        .map_err(|refusal| match refusal {
+            KdfRefusal::Malformed => ArchiveError::from(Malformation::SevenZUnsupportedCoder),
+            KdfRefusal::Refused(reason) => encrypted(reason),
+        })
 }
 
 /// Part of a 7z archive that a policy refuses to decode.
@@ -492,10 +520,17 @@ pub(crate) fn iter_sevenz_refusals<'a>(
     .err()
     .map(|refused| SevenZRefusal::new(RefusalScope::Archive, refused));
     let sizes = declared_sizes(header);
+    let mut kdf = KdfRuns::new(config.max_kdf_work, header.header_encrypted());
     let blocks = header.block_indices().filter_map(move |index| {
-        admit_sevenz_block(header.block(index), sizes[index], config)
-            .err()
-            .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
+        admit_sevenz_block(
+            header.block(index),
+            sizes[index],
+            config,
+            header.credentials(),
+            &mut kdf,
+        )
+        .err()
+        .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
     });
     solid.into_iter().chain(blocks)
 }

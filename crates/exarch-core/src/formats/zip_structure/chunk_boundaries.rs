@@ -74,7 +74,8 @@ fn archive(prefix: &[u8], between: &[u8], before_directory: Vec<u8>) -> Vec<u8> 
 }
 
 fn findings_at(bytes: &[u8], chunks: ChunkSizes) -> Option<Vec<ZipInconsistency>> {
-    let (_, structure) = open_chunked(Cursor::new(bytes.to_vec()), chunks).ok()?;
+    let (_, structure) =
+        open_chunked(Cursor::new(bytes.to_vec()), &Credentials::default(), chunks).ok()?;
     Some(structure.findings().to_vec())
 }
 

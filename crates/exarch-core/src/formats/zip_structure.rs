@@ -113,7 +113,6 @@ use super::chunk_search::ChunkPlan;
 use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
-use super::common;
 use super::le::le16;
 use super::le::le32;
 use super::le::le64;
@@ -124,7 +123,7 @@ use super::source_fault::FaultSlot;
 use super::source_fault::SourceTap;
 use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
-use super::zip::is_password_required;
+use super::zip::encryption_refusal;
 use super::zip_reuse::RetainKey;
 use super::zip_reuse::ReusePlan;
 use super::zip_reuse::ReuseStore;
@@ -144,6 +143,7 @@ use crate::Limit;
 use crate::Malformation;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
+use crate::encryption::Credentials;
 use crate::error::CentralRecordOrdinal;
 use crate::error::EndRecordKind;
 use crate::error::HiddenRegion;
@@ -596,6 +596,7 @@ pub(crate) struct ZipStructure {
     recheck_allowance: u64,
     reuse: Option<ReuseStore>,
     source: SourceTap,
+    first_encrypted: Option<Box<str>>,
     #[cfg(test)]
     gap_reads: usize,
     #[cfg(test)]
@@ -603,6 +604,12 @@ pub(crate) struct ZipStructure {
 }
 
 impl ZipStructure {
+    /// The name of the first encrypted entry, or `None` when no entry is
+    /// encrypted.
+    pub(crate) fn first_encrypted(&self) -> Option<&str> {
+        self.first_encrypted.as_deref()
+    }
+
     /// A structure with no findings, for tests that bypass the census.
     #[cfg(test)]
     pub(crate) fn unchecked(central_entries: usize) -> Self {
@@ -615,6 +622,7 @@ impl ZipStructure {
             recheck_allowance: CENSUS_DECODE_BUDGET,
             reuse: None,
             source: SourceTap::default(),
+            first_encrypted: None,
             gap_reads: 0,
             zstd_census_decodes: 0,
         }
@@ -793,9 +801,11 @@ pub(super) fn open_with<R: Read + Seek>(
     quota: Limit<NonZeroU64>,
     census_window: ZstdWindowLog,
     reuse: ReusePlan,
+    credentials: &Credentials,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     open_chunked(
         reader,
+        credentials,
         ChunkSizes {
             stream_checks: checks,
             recheck: recheck_allowance_for(quota),
@@ -838,11 +848,13 @@ impl StreamChecks {
 
 fn open_chunked<R: Read + Seek>(
     reader: R,
+    credentials: &Credentials,
     chunks: ChunkSizes,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     let shared = Shared::new(reader);
     let mut archive = open_reader(shared.clone()).map_err(|e| reader_fault(&shared, e))?;
-    let scan = scan_entries(&mut archive, &shared).map_err(|e| reader_fault(&shared, e))?;
+    let scan =
+        scan_entries(&mut archive, &shared, credentials).map_err(|e| reader_fault(&shared, e))?;
     let map = DirectoryMap::of(&archive).map_err(|e| reader_fault(&shared, e))?;
 
     let zstd_ranges = scan
@@ -881,6 +893,7 @@ fn open_chunked<R: Read + Seek>(
             recheck_allowance: chunks.recheck,
             reuse: census.reuse.take(),
             source: SourceTap::over(shared.fault_slot()),
+            first_encrypted: scan.first_encrypted,
             #[cfg(test)]
             gap_reads: census.gap_reads,
             #[cfg(test)]
@@ -920,6 +933,15 @@ struct Scan {
     layouts: Vec<EntryLayout>,
     findings: Findings,
     crate_duplicates: bool,
+    first_encrypted: Option<Box<str>>,
+}
+
+impl Scan {
+    fn note_encrypted<R: Read>(&mut self, file: &zip::read::ZipFile<'_, R>) {
+        if file.encrypted() && self.first_encrypted.is_none() {
+            self.first_encrypted = Some(crate::bytes_text(file.name_raw()).into());
+        }
+    }
 }
 
 /// Opens every entry once with the crate's header-consistency check.
@@ -935,6 +957,7 @@ struct Scan {
 fn scan_entries<R: Read + Seek>(
     archive: &mut ZipReader<Shared<R>>,
     shared: &Shared<R>,
+    credentials: &Credentials,
 ) -> Result<Scan> {
     let mut budget = DeclaredCompressedBudget::new(archive.central_directory_start());
     let mut scan = Scan {
@@ -949,16 +972,25 @@ fn scan_entries<R: Read + Seek>(
                 .by_index_raw(index)
                 .map_err(|e| entry_unreadable(index, &e))?;
             admit_zip_entry(&file, &mut budget)?;
+            scan.note_encrypted(&file);
             scan.layouts.push(layout_of(&file, index)?);
             continue;
         }
 
+        let encrypted = archive
+            .by_index_raw(index)
+            .map_err(|e| entry_unreadable(index, &e))?
+            .encrypted();
+        let checkable = !scan.crate_duplicates && (!encrypted || credentials.is_supplied());
         let mut mismatch = None;
-        if !scan.crate_duplicates {
-            let options = ZipReadOptions::new().enforce_header_consistency(true);
+        if checkable {
+            let options = ZipReadOptions::new()
+                .enforce_header_consistency(true)
+                .password(credentials.zip_secret());
             match archive.by_index_with_options(index, options) {
                 Ok(file) => {
                     admit_zip_entry(&file, &mut budget)?;
+                    scan.note_encrypted(&file);
                     scan.layouts.push(layout_of(&file, index)?);
                     continue;
                 }
@@ -966,19 +998,23 @@ fn scan_entries<R: Read + Seek>(
                     if let Some(fault) = shared.take_fault() {
                         return Err(ArchiveError::Io(fault));
                     }
-                    mismatch = Some(e);
+                    // A wrong password says nothing about the headers; the
+                    // entry is refused when it is read.
+                    if encryption_refusal(&e, credentials).is_none() {
+                        mismatch = Some(e);
+                    }
                 }
             }
         }
 
-        let file = archive.by_index(index).map_err(|e| {
-            if is_password_required(&e) {
-                common::encrypted_archive_error()
-            } else {
-                entry_unreadable(index, &e)
-            }
-        })?;
+        let file = if encrypted {
+            archive.by_index_raw(index)
+        } else {
+            archive.by_index(index)
+        }
+        .map_err(|e| entry_unreadable(index, &e))?;
         admit_zip_entry(&file, &mut budget)?;
+        scan.note_encrypted(&file);
         scan.layouts.push(layout_of(&file, index)?);
         if let Some(error) = mismatch {
             scan.findings.push_with(Slot::Mismatch, || {
@@ -1008,9 +1044,7 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
         end: data_start
             .checked_add(file.compressed_size())
             .ok_or_else(invalid)?,
-        descriptor: file
-            .flags()
-            .is_using_data_descriptor()
+        descriptor: (file.flags().is_using_data_descriptor() && !file.encrypted())
             .then(|| DescriptorExit::of(file.compression())),
         compressed: file.compressed_size(),
         size: file.size(),
@@ -1022,9 +1056,13 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
             file.external_attributes(),
             file.name_raw(),
         ),
-        stream: ZipMethod::try_from(file.compression())
-            .ok()
-            .and_then(Compressed::of),
+        stream: if file.encrypted() {
+            None
+        } else {
+            ZipMethod::try_from(file.compression())
+                .ok()
+                .and_then(Compressed::of)
+        },
     })
 }
 

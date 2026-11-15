@@ -344,6 +344,16 @@ pub(crate) fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
     tar
 }
 
+/// What a `ZipCrypto` entry is refused as: too weak where decryption is built
+/// in, password-required where it is not.
+pub(crate) const fn legacy_cipher_refusal() -> crate::EncryptionRefusal {
+    if cfg!(feature = "encryption") {
+        crate::EncryptionRefusal::WeakEncryptionRefused
+    } else {
+        crate::EncryptionRefusal::PasswordRequired
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

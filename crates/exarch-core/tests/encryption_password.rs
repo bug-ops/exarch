@@ -233,19 +233,26 @@ fn list_and_verify_with_the_right_password_work_like_the_twin() {
 }
 
 #[test]
-fn list_without_a_password_is_password_required() {
-    let config = SecurityConfig::default();
-    for archive in ["aes256.zip", "content.7z", "header.7z"] {
-        let error = ListRequest::new(&config)
-            .list(fixture(archive))
-            .unwrap_err();
+fn list_of_an_encrypted_zip_without_a_password_shows_the_plaintext_names() {
+    let listed = ListRequest::new(&SecurityConfig::default())
+        .list(fixture("aes256.zip"))
+        .unwrap();
 
-        assert_eq!(
-            refusal(&error),
-            EncryptionRefusal::PasswordRequired,
-            "{archive}"
-        );
-    }
+    assert!(
+        listed
+            .entries()
+            .iter()
+            .any(|e| e.path.ends_with("inner.txt"))
+    );
+}
+
+#[test]
+fn list_of_a_header_encrypted_sevenz_without_a_password_is_password_required() {
+    let error = ListRequest::new(&SecurityConfig::default())
+        .list(fixture("header.7z"))
+        .unwrap_err();
+
+    assert_eq!(refusal(&error), EncryptionRefusal::PasswordRequired);
 }
 
 #[test]

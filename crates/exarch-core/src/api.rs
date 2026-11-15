@@ -16,6 +16,7 @@ use crate::SecurityConfig;
 use crate::config::ExtractionOptions;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
+use crate::encryption::Credentials;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::open_archive;
@@ -87,6 +88,7 @@ pub(crate) fn extract_validated<P: AsRef<Path>>(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: Credentials,
 ) -> Result<ExtractionReport> {
     let archive_path = archive_path.as_ref();
 
@@ -98,12 +100,22 @@ pub(crate) fn extract_validated<P: AsRef<Path>>(
         FormatFamily::Tar(codec) => {
             extract_tar(archive_path, output_dir, config, options, progress, codec)
         }
-        FormatFamily::Seekable(SeekableFormat::Zip) => {
-            extract_zip(archive_path, output_dir, config, options, progress)
-        }
-        FormatFamily::Seekable(SeekableFormat::SevenZ) => {
-            extract_7z(archive_path, output_dir, config, options, progress)
-        }
+        FormatFamily::Seekable(SeekableFormat::Zip) => extract_zip(
+            archive_path,
+            output_dir,
+            config,
+            options,
+            progress,
+            credentials,
+        ),
+        FormatFamily::Seekable(SeekableFormat::SevenZ) => extract_7z(
+            archive_path,
+            output_dir,
+            config,
+            options,
+            progress,
+            &credentials,
+        ),
     }
 }
 
@@ -159,12 +171,13 @@ fn extract_zip(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: Credentials,
 ) -> Result<ExtractionReport> {
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
     let file = open_archive(archive_path)?;
     let scope = MarkScope::open(options.mark_propagation, &file);
-    let archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
+    let archive = ZipArchive::for_extraction(file, config, options.decode_reuse, credentials)?;
     scope.around(|mark| archive.extract(output_dir.with_mark(mark), options, progress))
 }
 
@@ -174,12 +187,13 @@ fn extract_7z(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: &Credentials,
 ) -> Result<ExtractionReport> {
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
     let file = open_archive(archive_path)?;
     let scope = MarkScope::open(options.mark_propagation, &file);
-    let archive = SevenZArchive::new(file, config)?;
+    let archive = SevenZArchive::open(file, config, credentials)?;
     scope.around(|mark| archive.extract(output_dir.with_mark(mark), options, progress))
 }
 
@@ -392,6 +406,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
     options: SinkOptions,
     progress: &mut dyn ProgressCallback,
     reuse: Option<SinkReuse>,
+    credentials: Credentials,
 ) -> Result<ExtractionReport> {
     match reader.into_source() {
         Source::Tar { stream, codec } => {
@@ -404,8 +419,10 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
             format: SeekableFormat::Zip,
         } => {
             let mut archive = match reuse {
-                Some(reuse) => ZipArchive::for_sink(reader, config, &reuse)?,
-                None => ZipArchive::for_extraction(reader, config, options.decode_reuse)?,
+                Some(reuse) => ZipArchive::for_sink(reader, config, &reuse, credentials)?,
+                None => {
+                    ZipArchive::for_extraction(reader, config, options.decode_reuse, credentials)?
+                }
             };
             archive.check_structure(config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
@@ -417,7 +434,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
             reader,
             format: SeekableFormat::SevenZ,
         } => {
-            let mut archive = SevenZArchive::new(reader, config)?;
+            let mut archive = SevenZArchive::open(reader, config, &credentials)?;
             archive.admit(config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
                 options,

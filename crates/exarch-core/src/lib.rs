@@ -36,7 +36,6 @@ mod config;
 pub(crate) mod copy;
 mod creation;
 mod destination_state;
-#[cfg(feature = "encryption")]
 mod encryption;
 mod error;
 mod formats;

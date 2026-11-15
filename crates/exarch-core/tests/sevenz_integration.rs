@@ -6,10 +6,12 @@
 mod common;
 
 use exarch_core::ArchiveError;
+use exarch_core::EncryptionRefusal;
 use exarch_core::ExistingFiles;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
+use exarch_core::Violation;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use std::assert_matches;
@@ -122,19 +124,20 @@ fn test_7z_encrypted_archive_rejected_on_extract() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert_matches!(err, ArchiveError::SecurityViolation { .. });
+    assert_matches!(
+        err,
+        ArchiveError::SecurityViolation {
+            kind: Violation::Encrypted {
+                reason: EncryptionRefusal::PasswordRequired,
+                ..
+            },
+            ..
+        }
+    );
 
-    // Verify error message is helpful
     let msg = err.to_string();
     assert!(msg.contains("encrypted"), "error should mention encryption");
-    assert!(
-        msg.contains("not supported"),
-        "error should say not supported"
-    );
-    assert!(
-        msg.contains("Decrypt") || msg.contains("decrypt"),
-        "error should suggest decrypting externally"
-    );
+    assert!(msg.contains("password"), "error should ask for a password");
 }
 
 /// Regression test for #397 / upstream sevenz-rust2 issue #127: a malformed

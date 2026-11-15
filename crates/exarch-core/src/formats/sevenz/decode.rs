@@ -13,7 +13,6 @@ use crate::ParallelDecode;
 use crate::formats::bounded_read::read_prefix;
 use crate::formats::source_fault::is_sevenz_checksum;
 use sevenz_rust2::BlockDecoder;
-use sevenz_rust2::Password;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::io;
@@ -113,7 +112,7 @@ fn sequential_block<R: Read + Seek>(
     block_index: BlockIndex,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
-    let password = Password::empty();
+    let password = header.block_password();
     let mismatch = RefCell::new(None);
     let callback_failed = Cell::new(false);
     let last_entry = Cell::new(0);
@@ -184,7 +183,7 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
-    let password = Password::empty();
+    let password = header.block_password();
     let archive = header.archive();
     let span = block_span(header, block_index);
     let (first, count) = (span.start, span.len());

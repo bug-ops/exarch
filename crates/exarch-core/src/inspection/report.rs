@@ -414,6 +414,10 @@ closed_enum! {
         /// host limits.
         PathTooLong => "path_too_long",
 
+        /// The entry is encrypted and no password was supplied, so its
+        /// content was not decrypted.
+        Encrypted => "encrypted",
+
         /// The data-descriptor tail of a ZIP entry was not searched.
         DescriptorTail => "descriptor_tail",
     }
@@ -432,6 +436,7 @@ impl UnverifiedReason {
             Self::NotDecodable => "not decodable",
             Self::NoEndMarker => "no end-of-archive marker",
             Self::PathTooLong => "path too long for the host",
+            Self::Encrypted => "encrypted, no password supplied",
             Self::DescriptorTail => {
                 "data-descriptor tail not searched (budget, or raw decode disagrees with the zip crate)"
             }

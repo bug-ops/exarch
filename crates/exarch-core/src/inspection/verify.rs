@@ -13,6 +13,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::Violation;
+use crate::encryption::Credentials;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::common::check_entry_name_limits;
@@ -275,6 +276,7 @@ pub(crate) fn verify_archive<P: AsRef<Path>>(
         config,
         VerificationOptions::default(),
         &mut NoopProgress,
+        Credentials::NONE,
     )
 }
 
@@ -299,17 +301,20 @@ pub(crate) fn verify_archive_with_progress<P: AsRef<Path>>(
     config: &SecurityConfig,
     options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
+    credentials: Credentials,
 ) -> Result<VerificationReport> {
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = open_archive(archive_path)?;
-            ZipArchive::new(file, config)?.verify_with_progress(config, options, progress)?
+            ZipArchive::open(file, config, credentials)?
+                .verify_with_progress(config, options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = open_archive(archive_path)?;
-            SevenZArchive::new(file, config)?.verify_with_progress(config, options, progress)?
+            SevenZArchive::open(file, config, &credentials)?
+                .verify_with_progress(config, options, progress)?
         }
         FormatFamily::Tar(_) => verify_with(config, options, progress, |listing| {
             list_detected(archive_path, format, config, listing)

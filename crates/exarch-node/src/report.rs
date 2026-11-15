@@ -323,6 +323,9 @@ pub enum UnverifiedReason {
     /// limits.
     #[napi(value = "path_too_long")]
     PathTooLong,
+    /// The entry is encrypted and no password was supplied.
+    #[napi(value = "encrypted")]
+    Encrypted,
     /// The data-descriptor tail of a ZIP entry was not searched.
     #[napi(value = "descriptor_tail")]
     DescriptorTail,
@@ -341,6 +344,7 @@ mirror_from_core!(
         NotDecodable,
         NoEndMarker,
         PathTooLong,
+        Encrypted,
         DescriptorTail
     ]
 );

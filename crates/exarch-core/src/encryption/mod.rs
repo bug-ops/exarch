@@ -49,6 +49,13 @@ impl Credentials {
     }
 
     /// Whether a password was supplied.
+    #[cfg_attr(
+        not(feature = "encryption"),
+        expect(
+            clippy::unused_self,
+            reason = "without the feature there is no password to read, but callers are the same"
+        )
+    )]
     pub(crate) const fn is_supplied(&self) -> bool {
         #[cfg(feature = "encryption")]
         {
@@ -61,6 +68,13 @@ impl Credentials {
     }
 
     /// The password bytes as ZIP uses them: as given.
+    #[cfg_attr(
+        not(feature = "encryption"),
+        expect(
+            clippy::unused_self,
+            reason = "without the feature there is no password to read, but callers are the same"
+        )
+    )]
     pub(crate) fn zip_secret(&self) -> Option<&[u8]> {
         #[cfg(feature = "encryption")]
         {
@@ -79,6 +93,14 @@ impl Credentials {
     ///
     /// [`UnusablePassword`] when the bytes are not valid UTF-8, so no 7z
     /// archive can have been encrypted with them.
+    #[cfg_attr(
+        not(feature = "encryption"),
+        expect(
+            clippy::unused_self,
+            clippy::unnecessary_wraps,
+            reason = "without the feature there is no password to read, but callers are the same"
+        )
+    )]
     pub(crate) fn sevenz_secret(&self) -> Result<Option<sevenz_rust2::Password>, UnusablePassword> {
         #[cfg(feature = "encryption")]
         {

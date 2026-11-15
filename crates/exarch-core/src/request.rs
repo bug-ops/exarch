@@ -98,6 +98,13 @@ impl<'a, C, O> Carrier<'a, C, O> {
         self
     }
 
+    #[cfg_attr(
+        not(feature = "encryption"),
+        expect(
+            clippy::unused_self,
+            reason = "without the feature there is no password to read, but callers are the same"
+        )
+    )]
     fn credentials(&self) -> Credentials {
         #[cfg(feature = "encryption")]
         {

@@ -61,7 +61,9 @@ fn read_all(data: &[u8], archive_type: ArchiveType) {
         if with_password {
             let _ = list.with_password(password()).list_reader(reader());
             let _ = verify.with_password(password()).verify_reader(reader());
-            let _ = extract.with_password(password()).extract(reader(), &mut sink);
+            let _ = extract
+                .with_password(password())
+                .extract(reader(), &mut sink);
         } else {
             let _ = list.list_reader(reader());
             let _ = verify.verify_reader(reader());

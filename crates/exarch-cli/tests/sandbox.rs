@@ -312,6 +312,8 @@ fn test_sandbox_best_effort_probe_is_denied_when_enforced() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_sandbox_require_with_a_password_file_outside_the_destination_matches_the_plain_run() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     if !kernel_enforces() {
         return;
     }
@@ -320,6 +322,7 @@ fn test_sandbox_require_with_a_password_file_outside_the_destination_matches_the
         .join("../exarch-core/tests/data/encryption/aes256.zip");
     let password_file = dir.path().join("pw");
     std::fs::write(&password_file, b"correct-horse\n").unwrap();
+    std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let plain_out = dir.path().join("plain");
     let boxed_out = dir.path().join("boxed");
 

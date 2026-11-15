@@ -255,3 +255,28 @@ fn missing_and_existing_directory_landings_extract() {
 
     assert!(dest.join("new").is_dir() && dest.join("old").is_dir());
 }
+
+#[test]
+fn a_directory_entry_under_an_escaping_symlink_whose_target_already_holds_it_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let archive = write(&dir, "d.tar", &tar_archive(&[tar_dir("x/sub/")]));
+    for allow in [false, true] {
+        let (_root, dest, outside) = destination_with_escaping_link("x");
+        std::fs::create_dir(outside.join("sub")).unwrap();
+
+        let error = ExtractRequest::new(&SecurityConfig::default().with_allow_symlinks(allow))
+            .extract(&archive, &dest)
+            .unwrap_err();
+
+        // With symlinks allowed the full-path canonicalize sees the escape
+        // first (`PathTraversal`, unchanged); otherwise the walk does.
+        assert!(
+            matches!(
+                error,
+                ArchiveError::SymlinkEscape { .. } | ArchiveError::PathTraversal { .. }
+            ),
+            "{allow}: {error}"
+        );
+        assert_eq!(std::fs::read_dir(outside.join("sub")).unwrap().count(), 0);
+    }
+}

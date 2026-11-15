@@ -31,6 +31,28 @@ pub(crate) use super::parent_check::Resolved;
 #[cfg(any(unix, target_os = "wasi"))]
 pub(crate) use super::parent_check::Walked;
 
+/// The refusal for an entry whose probed parent escapes the root.
+///
+/// An existing symlink among the parents that resolves outside the root is the
+/// same refusal as the walker gives (`SymlinkEscape` naming that link), so the
+/// kind does not depend on the format or host; any other escape stays a
+/// `PathTraversal`.
+fn escape_refusal<V: FsView>(
+    view: &V,
+    root: &V::Root,
+    final_path: &Path,
+    path: &Path,
+) -> ArchiveError {
+    match first_blocking_ancestor(view, root, final_path) {
+        Some((parent, ParentBlocker::Escape)) => {
+            ParentBlocker::Escape.error(final_path, &parent, view.occupant_maker())
+        }
+        _ => ArchiveError::PathTraversal {
+            path: path.to_path_buf(),
+        },
+    }
+}
+
 /// A validated path that is safe for extraction.
 ///
 /// `SafePath` represents a path that has been validated to not contain:
@@ -135,6 +157,8 @@ impl SafePath {
     ///   paths when the flag is not set
     /// - `ArchiveError::SecurityViolation` for banned components or excessive
     ///   depth
+    /// - `ArchiveError::SymlinkEscape` when an existing parent symlink resolves
+    ///   outside the destination
     ///
     /// # Examples
     ///
@@ -346,9 +370,7 @@ impl<P: ParentCheck> SafePath<P> {
             match view.canonicalize(parent, root) {
                 Ok(Containment::Within(_)) => {}
                 Ok(Containment::Escapes) => {
-                    return Err(ArchiveError::PathTraversal {
-                        path: path.to_path_buf(),
-                    });
+                    return Err(escape_refusal(view, root, &final_path, path));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -375,9 +397,7 @@ impl<P: ParentCheck> SafePath<P> {
                     if ctx.leaf_symlink() == LeafSymlink::Defer
                         && leaf_symlink_in_vetted_parent(view, root, &resolved) => {}
                 Ok(Containment::Escapes) => {
-                    return Err(ArchiveError::PathTraversal {
-                        path: path.to_path_buf(),
-                    });
+                    return Err(escape_refusal(view, root, &final_path, path));
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::NotFound
@@ -1192,7 +1212,7 @@ mod tests {
 
         assert_matches!(
             SafePath::validate_in(Path::new("up/f"), &dest, &config, &tree),
-            Err(ArchiveError::PathTraversal { .. })
+            Err(ArchiveError::SymlinkEscape { .. })
         );
         assert!(SafePath::validate_in(Path::new("ok/f"), &dest, &config, &tree).is_ok());
     }
@@ -1325,7 +1345,7 @@ mod tests {
         let result = SafePath::validate(&malicious_path, &dest, &config);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "symlink in parent chain should be detected and rejected"
         );
     }
@@ -1353,7 +1373,7 @@ mod tests {
         let result = SafePath::validate(&malicious_path, &dest, &config);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "symlink in middle of path should be detected"
         );
     }
@@ -1443,7 +1463,7 @@ mod tests {
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "symlink attack must be caught even with context: {result:?}"
         );
     }
@@ -1473,7 +1493,7 @@ mod tests {
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "parent canonicalization must catch symlink even in fast path: {result:?}"
         );
 
@@ -1484,7 +1504,7 @@ mod tests {
             SafePath::validate_with_context(&path, &dest, &config, &ctx_with_symlink);
         assert_matches!(
             result_with_symlink,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "symlink attack must also be caught with symlink_seen=true: {result_with_symlink:?}"
         );
     }
@@ -1609,7 +1629,7 @@ mod tests {
         let result = SafePath::validate_with_context(&evil_path, &dest, &config, &ctx);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "symlink escape must be caught with symlinks_allowed: {result:?}"
         );
     }
@@ -1867,7 +1887,7 @@ mod tests {
         let result = SafePath::validate_with_context(Path::new("d1/d2/f"), &dest, &config, &ctx);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "{result:?}"
         );
     }
@@ -1929,7 +1949,7 @@ mod tests {
             SafePath::validate_with_context(Path::new("link/f"), &dest, &default_config(), &ctx);
         assert_matches!(
             result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "{result:?}"
         );
     }
@@ -1977,7 +1997,7 @@ mod tests {
             &config,
             &ValidationContext::<HostFs>::new(false),
         );
-        assert_matches!(probed, Err(ArchiveError::PathTraversal { .. }));
+        assert_matches!(probed, Err(ArchiveError::SymlinkEscape { .. }));
 
         let root = PinnedRoot::open_for_test(&base.join("dest")).expect("setup");
         let deferred =

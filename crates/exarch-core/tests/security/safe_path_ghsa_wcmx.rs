@@ -54,7 +54,7 @@ fn ghsa_wcmx_sibling_reached_via_symlink_is_rejected() {
 
     assert_matches!(
         result,
-        Err(ArchiveError::PathTraversal { .. }),
+        Err(ArchiveError::SymlinkEscape { .. }),
         "sibling directory reached via symlink and sharing a name prefix with \
          the destination root must be rejected, got: {result:?}"
     );

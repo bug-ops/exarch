@@ -408,7 +408,7 @@ fn nested_file_over_an_escaping_existing_symlink_is_the_occupant_kind_in_every_f
 }
 
 #[test]
-fn file_under_an_escaping_parent_symlink_stays_a_traversal_in_every_format() {
+fn file_under_an_escaping_parent_symlink_is_a_symlink_escape_in_every_format() {
     for policy in POLICIES {
         let dir = TempDir::new().unwrap();
         for archive in archives_of(&dir, "d/l") {
@@ -422,9 +422,9 @@ fn file_under_an_escaping_parent_symlink_stays_a_traversal_in_every_format() {
 
             let error = extract(&archive, &dest, policy, &config()).unwrap_err();
 
-            assert_matches!(
+            assert_eq!(
                 error.error_code(),
-                ErrorCode::PathTraversal | ErrorCode::SymlinkEscape,
+                ErrorCode::SymlinkEscape,
                 "{policy:?} {}: {error}",
                 archive.display()
             );

@@ -497,7 +497,7 @@ mod tests {
         let escape_result = SafePath::validate(&PathBuf::from("out/loot.txt"), &dest, &config);
         assert_matches!(
             escape_result,
-            Err(ArchiveError::PathTraversal { .. }),
+            Err(ArchiveError::SymlinkEscape { .. }),
             "non-lexical escape via nested symlink must still be rejected: {escape_result:?}"
         );
     }

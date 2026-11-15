@@ -197,14 +197,14 @@ fn sevenz_directory_then_file_over_an_escaping_symlink_is_replaces_symlink_in_ev
 }
 
 #[test]
-fn sevenz_file_below_an_escaping_symlink_without_a_directory_entry_stays_path_traversal() {
+fn sevenz_file_below_an_escaping_symlink_without_a_directory_entry_is_symlink_escape() {
     let dir = TempDir::new().unwrap();
     let archive = sevenz(&dir, &[("x/a", false)]);
     let (_root, dest, outside) = destination_with_escaping_link("x");
 
     let error = extract(&archive, &dest, ExistingFiles::Refuse).unwrap_err();
 
-    assert_matches!(error, ArchiveError::PathTraversal { .. }, "{error}");
+    assert_matches!(error, ArchiveError::SymlinkEscape { .. }, "{error}");
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
 }
 

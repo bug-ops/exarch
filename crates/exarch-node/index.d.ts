@@ -1881,8 +1881,8 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -1957,8 +1957,8 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2264,8 +2264,8 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2460,8 +2460,8 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2642,8 +2642,8 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -3231,8 +3231,8 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -3409,8 +3409,8 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  *   cannot be wiped; an empty or over-long (more than 1024 bytes) password is
  *   `InvalidArg`. A password for an archive that is not encrypted is ignored.
  *   exarch wipes its own copy; wipe yours with `buf.fill(0)`. A missing, wrong
- *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`,
- *   `subCode` `'ENCRYPTED'` and a `reason`
+ *   or weak (ZipCrypto) password rejects with `SECURITY_VIOLATION`, `subCode`
+ *   `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *

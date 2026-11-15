@@ -62,7 +62,7 @@ describe('encrypted archives', () => {
         (err) =>
           err.code === 'SECURITY_VIOLATION' &&
           err.subCode === 'ENCRYPTED' &&
-          err.reason === 'password_required',
+          err.reason === 'password_required'
       );
       assert.ok(!fs.existsSync(path.join(tempDir, 'out', 'hello.txt')));
     });
@@ -80,7 +80,7 @@ describe('encrypted archives', () => {
         (err) =>
           err.subCode === 'ENCRYPTED' &&
           err.reason === WRONG_REASON[name] &&
-          !`${err.message}${JSON.stringify(err)}`.includes('s3cr3t'),
+          !`${err.message}${JSON.stringify(err)}`.includes('s3cr3t')
       );
     });
 

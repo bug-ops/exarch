@@ -359,7 +359,7 @@ mod tests {
         fs::create_dir(&subdir).expect("failed to create subdir");
 
         // Use a path with . in it
-        let path_with_dot = subdir.join(".").join("..");
+        let path_with_dot = subdir.join("./..");
         let dest = DestDir::new(path_with_dot).expect("should create dest dir");
 
         // Should be canonicalized to absolute path

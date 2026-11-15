@@ -15,7 +15,7 @@ const {
   SinkOptions,
 } = require('../index.js');
 
-const FIXTURES = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures');
+const FIXTURES = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures');
 
 function rawTar(nameBytes, content) {
   const header = Buffer.alloc(512);

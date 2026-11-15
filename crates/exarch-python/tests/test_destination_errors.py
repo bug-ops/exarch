@@ -158,7 +158,7 @@ def test_overwrite_over_a_symlink_occupant_is_an_existing_symlink_violation(temp
     assert (destination / "link_entry").is_symlink()
 
 
-_SIMPLE_7Z = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "simple.7z"
+_SIMPLE_7Z = pathlib.Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures" / "simple.7z"
 
 
 def _escaping_link_archive(temp_dir, kind, name):

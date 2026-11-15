@@ -12,7 +12,7 @@ const os = require('node:os');
 const zlib = require('node:zlib');
 const { extractArchiveSync, SecurityConfig, ExtractionOptions } = require('../index.js');
 
-const FIXTURES = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures');
+const FIXTURES = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures');
 
 function tarEntry({ name, type = '0', data = Buffer.alloc(0) }) {
   const header = Buffer.alloc(512);

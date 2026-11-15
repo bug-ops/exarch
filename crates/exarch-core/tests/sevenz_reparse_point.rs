@@ -156,8 +156,8 @@ fn assert_listed_as_symlinks_and_refused(archive: &Path) {
 /// directory symlink; see `tests/fixtures/PROVENANCE.md`.
 #[test]
 fn windows_7zip_snl_fixture_is_listed_as_symlinks_and_refused() {
-    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/symlink-7zip-windows-snl.7z");
+    let archive =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/symlink-7zip-windows-snl.7z");
     assert_listed_as_symlinks_and_refused(&archive);
 }
 

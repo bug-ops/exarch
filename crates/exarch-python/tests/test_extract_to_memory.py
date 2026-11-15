@@ -9,7 +9,7 @@ import pytest
 
 import exarch
 
-SOLID_7Z = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "solid.7z"
+SOLID_7Z = Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures" / "solid.7z"
 
 
 def _tar(entries, mode: str = "w") -> bytes:

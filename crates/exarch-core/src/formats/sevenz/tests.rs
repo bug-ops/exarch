@@ -374,10 +374,6 @@ fn unix_mode_is_ignored_without_windows_attributes() {
 pub(super) fn load_fixture(name: &str) -> Vec<u8> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let fixture_path = std::path::PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
         .join("tests/fixtures")
         .join(name);
 
@@ -768,7 +764,7 @@ fn test_empty_archive() {
 
 #[test]
 fn test_empty_archive_extract() {
-    let path = std::path::Path::new("../../tests/fixtures/empty.7z");
+    let path = std::path::Path::new("tests/fixtures/empty.7z");
     let file = std::fs::File::open(path).unwrap();
     let config = SecurityConfig::default();
     let archive = SevenZArchive::new(file, &config).unwrap();

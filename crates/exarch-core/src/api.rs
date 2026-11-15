@@ -892,7 +892,7 @@ mod tests {
         }
 
         let fixture =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/simple.7z");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple.7z");
 
         let dest = tempfile::TempDir::new().unwrap();
         let mut progress = TrackingProgress {
@@ -1037,7 +1037,7 @@ mod tests {
         }
 
         let fixture =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/simple.7z");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple.7z");
 
         let dest = tempfile::TempDir::new().unwrap();
         let mut progress = ByteTracker { total: 0 };

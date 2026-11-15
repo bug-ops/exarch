@@ -1422,7 +1422,7 @@ fn test_verify_rejects_removed_check_security_flag() {
 
 fn workspace_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("../exarch-core/tests/fixtures")
         .join(name)
 }
 
@@ -6274,7 +6274,7 @@ fn write_tar_with_fifo(path: &std::path::Path, name: &str) {
 
 fn repo_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("../exarch-core/tests/fixtures")
         .join(name)
 }
 

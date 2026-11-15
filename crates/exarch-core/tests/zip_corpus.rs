@@ -472,7 +472,7 @@ fn java_and_windows_producers_have_no_structural_findings() {
 #[test]
 fn windows_explorer_fixture_has_no_structural_findings_and_extracts() {
     let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/zip-family/explorer-windows.zip");
+        .join("tests/fixtures/zip-family/explorer-windows.zip");
     assert_no_structural_finding(&archive, "explorer-windows.zip");
 
     let out = TempDir::new().unwrap();
@@ -506,7 +506,7 @@ fn winrar_fixtures_have_no_structural_findings_and_extract() {
         ("time-winrar.zip", "test.txt"),
     ] {
         let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/zip-family")
+            .join("tests/fixtures/zip-family")
             .join(fixture);
         assert_no_structural_finding(&archive, fixture);
 
@@ -530,8 +530,8 @@ fn winrar_fixtures_have_no_structural_findings_and_extract() {
 /// `tests/fixtures/PROVENANCE.md`. Covers `WinRAR`'s real deflate output.
 #[test]
 fn winrar_deflate_fixture_has_no_structural_findings_extracts_and_verifies() {
-    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/zip-family/deflate-winrar.zip");
+    let archive =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zip-family/deflate-winrar.zip");
     assert_no_structural_finding(&archive, "deflate-winrar.zip");
 
     let config = SecurityConfig::default();

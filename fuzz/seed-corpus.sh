@@ -5,7 +5,7 @@
 # gitignored and generated-only -- this script is the sole assembler, so
 # fixture bytes live in git exactly once (see fuzz/README.md).
 set -euo pipefail
-# nullglob: a pattern with no matches (e.g. tests/fixtures/fuzz/<target>/*.bin
+# nullglob: a pattern with no matches (e.g. crates/exarch-core/tests/fixtures/fuzz/<target>/*.bin
 # before any crash has been minimized into that dir) expands to nothing
 # instead of the literal pattern, which would otherwise fail under `set -e`.
 shopt -s nullglob
@@ -38,12 +38,12 @@ copy_seed() {
 }
 
 # (a) Copy existing binary fixtures already committed to the repo.
-for f in "$REPO_ROOT"/tests/fixtures/*.7z; do
+for f in "$REPO_ROOT"/crates/exarch-core/tests/fixtures/*.7z; do
   copy_seed "$f" sevenz
   copy_seed "$f" extract_archive
 done
 
-for f in "$REPO_ROOT"/tests/fixtures/zip-family/*.{jar,whl,apk,epub,vsix}; do
+for f in "$REPO_ROOT"/crates/exarch-core/tests/fixtures/zip-family/*.{jar,whl,apk,epub,vsix}; do
   copy_seed "$f" zip
   copy_seed "$f" extract_archive
 done
@@ -71,7 +71,7 @@ fi
 
 # (b) Dump the programmatically-generated adversarial archives that only
 # exist as pub(crate) generators in exarch-core's test_utils.
-(cd "$REPO_ROOT" && cargo test -p exarch-core --lib -- --ignored dump_fuzz_seeds)
+(cd "$REPO_ROOT" && EXARCH_FUZZ_SEEDS_DIR="$SEEDS" cargo test -p exarch-core --lib -- --ignored dump_fuzz_seeds)
 
 # The dump writes directly into seeds/tar and seeds/zip; also seed
 # extract_archive with the same valid archives (detectable by magic bytes).
@@ -84,7 +84,7 @@ for src in tar zip; do
 done
 
 # Minimized crash reproducers committed per the crash-to-regression-test
-# workflow (fuzz/README.md). Convention: tests/fixtures/fuzz/<target>/<slug>.bin.
+# workflow (fuzz/README.md). Convention: crates/exarch-core/tests/fixtures/fuzz/<target>/<slug>.bin.
 # This directory normally does not exist until the first crash is minimized --
 # nullglob above keeps that the no-op it should be. Run LAST, after (b)'s
 # dump: a committed regression seed must always win a basename collision

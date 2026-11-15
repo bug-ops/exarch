@@ -167,11 +167,11 @@ a regression test.
 
 ### Test Fixtures
 
-7z fixtures in `tests/fixtures/` are generated, not hand-edited:
+7z fixtures in `crates/exarch-core/tests/fixtures/` are generated, not hand-edited:
 
-- `tests/fixtures/generate_7z_fixtures.sh` needs `p7zip` (`7z`); the
+- `crates/exarch-core/tests/fixtures/generate_7z_fixtures.sh` needs `p7zip` (`7z`); the
   `symlink-snl.7z` step also needs `7zz` from 7-Zip 26.05.
-- `tests/fixtures/generate_7z_p7zip_fixture.sh` needs Docker; it builds
+- `crates/exarch-core/tests/fixtures/generate_7z_p7zip_fixture.sh` needs Docker; it builds
   `symlink-p7zip.7z` and `symlink-p7zip-dir.7z` with a pinned p7zip 16.02.
 
 ### Writing Tests

@@ -658,7 +658,7 @@ fn zip_duplicates_and_extension_filter() {
 }
 
 fn sevenz_fixtures() -> Vec<(String, Vec<u8>)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut fixtures: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())

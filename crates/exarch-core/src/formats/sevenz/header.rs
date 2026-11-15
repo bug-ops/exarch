@@ -542,9 +542,14 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
 
-    const NO_FILES_INFO: &[u8] =
-        include_bytes!("../../../../../tests/fixtures/streams-without-files-info.7z");
-    const SIMPLE: &[u8] = include_bytes!("../../../../../tests/fixtures/simple.7z");
+    const NO_FILES_INFO: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streams-without-files-info.7z"
+    ));
+    const SIMPLE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/simple.7z"
+    ));
 
     fn header_with_blocks(count: usize) -> SevenZHeader {
         let mut archive = Archive::default();
@@ -724,7 +729,10 @@ mod tests {
 
     #[test]
     fn read_header_opens_the_empty_archive() {
-        let bytes = include_bytes!("../../../../../tests/fixtures/empty.7z");
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/empty.7z"
+        ));
         let header =
             read_sevenz_header(&mut Cursor::new(&bytes[..]), HeaderLimit::UNLIMITED).unwrap();
         assert!(header.files().is_empty());

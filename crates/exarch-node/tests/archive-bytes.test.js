@@ -17,7 +17,7 @@ const {
   VerificationOptions,
 } = require('../index.js');
 
-const FIXTURES = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures');
+const FIXTURES = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures');
 const EXTENSIONS = {
   Tar: 'tar',
   TarGz: 'tar.gz',

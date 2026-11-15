@@ -2000,7 +2000,7 @@ mod tests {
         // Cover the encrypted entry check at list.rs line 260
         // (entry.encrypted() == true). ZipCrypto entries succeed at
         // by_index() time but are flagged as encrypted by the entry
-        // metadata, triggering SecurityViolation::EncryptedArchive.
+        // metadata, triggering the `PasswordRequired` refusal.
         use std::io::Write;
         use zip::ZipWriter;
         use zip::unstable::write::FileOptionsExt;
@@ -2065,7 +2065,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_simple() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2079,7 +2079,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_empty() {
-        let path = std::path::Path::new("../../tests/fixtures/empty.7z");
+        let path = std::path::Path::new("tests/fixtures/empty.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert_eq!(
@@ -2096,7 +2096,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_nested_dirs() {
-        let path = std::path::Path::new("../../tests/fixtures/nested-dirs.7z");
+        let path = std::path::Path::new("tests/fixtures/nested-dirs.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(manifest.total_entries() > 0);
@@ -2109,7 +2109,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_encrypted_rejected() {
-        let path = std::path::Path::new("../../tests/fixtures/encrypted.7z");
+        let path = std::path::Path::new("tests/fixtures/encrypted.7z");
         let config = SecurityConfig::default();
         let result = list_archive(path, &config);
         assert!(result.is_err(), "encrypted archive should return an error");
@@ -2124,7 +2124,7 @@ mod tests {
     fn test_list_sevenz_solid() {
         // Solid archives are safe to list (no decompression needed for
         // metadata).
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(manifest.total_entries() > 0, "solid.7z should have entries");
@@ -2132,7 +2132,7 @@ mod tests {
 
     #[test]
     fn test_verify_sevenz_simple() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(
@@ -2144,7 +2144,7 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_format_field() {
-        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let path = std::path::Path::new("tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert_eq!(
@@ -2238,7 +2238,7 @@ mod tests {
     #[test]
     fn test_list_sevenz_hardlink_reported_as_file() {
         // 7z has no hardlink concept — entries appear as regular files.
-        let path = std::path::Path::new("../../tests/fixtures/hardlink.7z");
+        let path = std::path::Path::new("tests/fixtures/hardlink.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2259,7 +2259,7 @@ mod tests {
         // Entries in solid archives should not have compressed_size=Some(0)
         // with size>0. That combination would trigger a false positive
         // in zip bomb detection.
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         for entry in manifest.entries() {
@@ -2369,7 +2369,7 @@ mod tests {
     fn test_list_sevenz_regular_mode_entry_reported_as_file() {
         // The fixture's link.txt has a regular-file Unix mode, so it is
         // reported as ManifestEntryType::File.
-        let path = std::path::Path::new("../../tests/fixtures/symlink-unix.7z");
+        let path = std::path::Path::new("tests/fixtures/symlink-unix.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
@@ -2392,7 +2392,7 @@ mod tests {
     fn test_verify_sevenz_solid_no_false_positive() {
         use crate::inspection::report::IssueSeverity;
 
-        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let path = std::path::Path::new("tests/fixtures/solid.7z");
         let config = SecurityConfig::default().with_allow_solid_archives(true);
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(

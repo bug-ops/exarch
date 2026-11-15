@@ -21,10 +21,6 @@ use tempfile::TempDir;
 
 fn load_fixture(name: &str) -> Vec<u8> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
         .join("tests/fixtures")
         .join(name);
     std::fs::read(&path).expect("fixture should exist")

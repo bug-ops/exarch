@@ -127,7 +127,7 @@ describe('verifyArchive integrity check', () => {
   });
 
   it('reports INCOMPLETE for a solid 7z until solid archives are allowed', async () => {
-    const solid = path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'solid.7z');
+    const solid = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures', 'solid.7z');
     const options = new VerificationOptions().withIntegrityCheck();
 
     const report = await verifyArchive(solid, null, options);

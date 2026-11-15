@@ -1064,7 +1064,7 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
 #[test]
 fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
     const REPARSE_POINT: u32 = 0x0400;
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-snl.7z");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/symlink-snl.7z");
 
     let archive = Archive::read(
         &mut Cursor::new(std::fs::read(&path).unwrap()),
@@ -1397,8 +1397,7 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
 #[cfg(unix)]
 #[test]
 fn a_link_found_by_p7zip_16_02_in_a_directory_is_a_unix_symlink() {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-p7zip-dir.7z");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/symlink-p7zip-dir.7z");
 
     let archive = Archive::read(
         &mut Cursor::new(std::fs::read(&path).unwrap()),
@@ -1454,7 +1453,7 @@ fn a_link_found_by_p7zip_16_02_in_a_directory_is_a_unix_symlink() {
 /// p7zip itself. The link found in a directory is the case above.
 #[test]
 fn a_link_written_by_p7zip_16_02_is_a_regular_file() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-p7zip.7z");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/symlink-p7zip.7z");
 
     let archive = Archive::read(
         &mut Cursor::new(std::fs::read(&path).unwrap()),

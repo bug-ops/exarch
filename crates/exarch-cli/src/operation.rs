@@ -71,6 +71,9 @@ impl Operation {
             | Flag::Flatten => {
                 matches!(self, Self::Extract | Self::List | Self::Verify)
             }
+            Flag::PasswordFd => {
+                cfg!(unix) && matches!(self, Self::Extract | Self::List | Self::Verify)
+            }
             Flag::Exclude | Flag::MaxFileSize => true,
             Flag::AllowedExtensions | Flag::Atomic | Flag::BannedComponent | Flag::MaxPathDepth => {
                 matches!(self, Self::Extract)
@@ -101,6 +104,7 @@ closed_list! {
         MaxFileSize => "--max-file-size",
         MaxPathDepth => "--max-path-depth",
         MaxTotalSize => "--max-total-size",
+        PasswordFd => "--password-fd",
         PasswordFile => "--password-file",
         PasswordPrompt => "--password-prompt",
         Sandbox => "--sandbox",

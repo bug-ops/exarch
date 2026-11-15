@@ -19,6 +19,10 @@ const {
 const ARCHIVES = ['encrypted-aes256.zip', 'encrypted-header.7z'].map((name) =>
   path.join(__dirname, 'fixtures', name),
 );
+const WRONG_REASON = {
+  'encrypted-aes256.zip': 'wrong_password',
+  'encrypted-header.7z': 'wrong_password_or_corrupt',
+};
 const password = () => Buffer.from('correct-horse');
 
 describe('encrypted archives', () => {
@@ -58,7 +62,10 @@ describe('encrypted archives', () => {
     it(`${name}: without a password is a typed security violation`, () => {
       assert.throws(
         () => extractArchiveSync(archive, path.join(tempDir, 'out')),
-        (err) => err.code === 'SECURITY_VIOLATION' && err.subCode === 'ENCRYPTED',
+        (err) =>
+          err.code === 'SECURITY_VIOLATION' &&
+          err.subCode === 'ENCRYPTED' &&
+          err.reason === 'password_required',
       );
       assert.ok(!fs.existsSync(path.join(tempDir, 'out', 'hello.txt')));
     });
@@ -74,7 +81,9 @@ describe('encrypted archives', () => {
             Buffer.from('s3cr3t-wrong'),
           ),
         (err) =>
-          err.subCode === 'ENCRYPTED' && !`${err.message}${JSON.stringify(err)}`.includes('s3cr3t'),
+          err.subCode === 'ENCRYPTED' &&
+          err.reason === WRONG_REASON[name] &&
+          !`${err.message}${JSON.stringify(err)}`.includes('s3cr3t'),
       );
     });
 

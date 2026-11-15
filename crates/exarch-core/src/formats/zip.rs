@@ -1196,9 +1196,14 @@ impl ZipEntryAdapter {
         #[allow(clippy::cast_possible_truncation)]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file
-            .take(common::MAX_STORED_SYMLINK_TARGET)
+            .take(common::MAX_STORED_SYMLINK_TARGET + 1)
             .read_to_end(&mut target_bytes)
             .map_err(|e| faults.classify_symlink_read(e))?;
+        // Reading past the declared size reaches the entry's end, so the CRC or
+        // the AES authentication code is checked even for a full-length target.
+        if target_bytes.len() as u64 > size {
+            return Err(common::symlink_target_too_large(target_bytes.len() as u64));
+        }
 
         common::symlink_target_from_bytes(&target_bytes)
     }

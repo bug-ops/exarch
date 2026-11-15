@@ -164,6 +164,8 @@ error with `subCode === 'ENCRYPTED'`; a password for an archive that is not
 encrypted is ignored. `SecurityConfig.maxKdfWork` bounds the key-derivation work
 of one 7z operation. Zeroization across the binding boundary is best effort.
 
+**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation requests.
+
 ### Archives in Memory
 
 `listArchiveBytes`, `verifyArchiveBytes` and `extractArchiveToMemory` (each with

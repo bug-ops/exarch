@@ -1198,12 +1198,19 @@ fn refusal_hint(kind: &Violation) -> Option<String> {
     }
 }
 
-/// The hint of an encryption refusal; none of them is relaxed by a policy flag.
+/// The hint of an encryption refusal. Only the refusals no input of the user
+/// can lift (weak encryption, the key-derivation budget) state that no policy
+/// flag relaxes them; a missing or wrong password is fixed by the password.
 fn encryption_hint(reason: EncryptionRefusal) -> String {
+    let policy_note = matches!(
+        reason,
+        EncryptionRefusal::WeakEncryptionRefused | EncryptionRefusal::KdfCostExceeded
+    );
     let advice = match reason {
         EncryptionRefusal::PasswordRequired => format!(
-            "Supply the password with {} <PATH> or {}.",
+            "Supply the password with {} <PATH>, {} <FD> (Unix) or {}.",
             Flag::PasswordFile.long(),
+            Flag::PasswordFd.long(),
             Flag::PasswordPrompt.long(),
         ),
         EncryptionRefusal::WrongPassword | EncryptionRefusal::WrongPasswordOrCorrupt => {
@@ -1224,7 +1231,11 @@ fn encryption_hint(reason: EncryptionRefusal) -> String {
         }
         _ => String::new(),
     };
-    format!("{UNRELAXABLE_HINT} {advice}").trim_end().to_owned()
+    if policy_note {
+        format!("{UNRELAXABLE_HINT} {advice}").trim_end().to_owned()
+    } else {
+        advice
+    }
 }
 
 fn security_violation(message: Message, archive: &Path, hint: String) -> Message {
@@ -1703,6 +1714,30 @@ mod tests {
             1,
             "reason should appear exactly once, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_encryption_hint_states_the_policy_only_where_no_input_lifts_the_refusal() {
+        use exarch_core::EncryptionRefusal as Reason;
+
+        for (reason, policy_note) in [
+            (Reason::PasswordRequired, false),
+            (Reason::WrongPassword, false),
+            (Reason::WrongPasswordOrCorrupt, false),
+            (Reason::AuthenticationFailed, false),
+            (Reason::WeakEncryptionRefused, true),
+            (Reason::KdfCostExceeded, true),
+        ] {
+            let hint = encryption_hint(reason);
+            assert_eq!(
+                hint.contains("cannot be relaxed"),
+                policy_note,
+                "{reason:?}: {hint}"
+            );
+        }
+        let required = encryption_hint(Reason::PasswordRequired);
+        assert!(required.starts_with("Supply the password"), "{required}");
+        assert!(required.contains("--password-fd"), "{required}");
     }
 
     // Regression test for issue #520: the GHSA-5j8q-wxg5-hj4r forged-size

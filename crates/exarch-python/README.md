@@ -134,6 +134,8 @@ with `sub_code == "ENCRYPTED"`; a password for an archive that is not encrypted
 is ignored. `SecurityConfig.max_kdf_work` bounds the key-derivation work of one
 7z operation. Zeroization across the binding boundary is best effort.
 
+**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation requests.
+
 ### Archives in Memory
 
 `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory`

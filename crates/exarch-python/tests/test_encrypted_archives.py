@@ -11,6 +11,10 @@ import exarch
 FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures"
 ARCHIVES = ["encrypted-aes256.zip", "encrypted-header.7z"]
 PASSWORD = b"correct-horse"
+WRONG_REASON = {
+    "encrypted-aes256.zip": "wrong_password",
+    "encrypted-header.7z": "wrong_password_or_corrupt",
+}
 
 
 def _password():
@@ -33,6 +37,7 @@ def test_extract_without_a_password_is_a_typed_security_violation(temp_dir, name
         exarch.extract_archive(FIXTURES / name, temp_dir / "out")
 
     assert caught.value.sub_code == "ENCRYPTED"
+    assert caught.value.reason == "password_required"
     assert not (temp_dir / "out" / "hello.txt").exists()
 
 
@@ -44,6 +49,7 @@ def test_a_wrong_password_is_refused_and_never_quoted(temp_dir, name):
         )
 
     assert caught.value.sub_code == "ENCRYPTED"
+    assert caught.value.reason == WRONG_REASON[name]
     assert "s3cr3t" not in str(caught.value) + repr(caught.value)
 
 

@@ -1166,6 +1166,7 @@ struct ErrorProps {
     code: JsCode,
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
+    reason: Option<&'static str>,
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<exarch_core::IoKind>,
     source_fault: Option<SourceFault>,
@@ -1184,6 +1185,7 @@ impl ErrorProps {
             code,
             relaxable_by: None,
             sub_code: None,
+            reason: None,
             setting: None,
             io_kind: None,
             source_fault: None,
@@ -1204,6 +1206,9 @@ struct Described {
 }
 
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
+    let reason = err
+        .encryption_refusal()
+        .map(exarch_core::EncryptionRefusal::as_str);
     let FfiErrorMessage {
         kind,
         description,
@@ -1231,6 +1236,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
     );
     props.relaxable_by = kind.relaxable_by();
     props.sub_code = kind.sub_code();
+    props.reason = reason;
     props.setting = kind.setting();
     props.io_kind = kind.io_kind().map(exarch_core::IoKind::from);
     props.source_fault = source_fault;
@@ -1358,6 +1364,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(sub_code) = props.sub_code {
         set_property(&mut obj, "subCode", sub_code.as_str());
+    }
+    if let Some(reason) = props.reason {
+        set_property(&mut obj, "reason", reason);
     }
     if let Some(setting) = props.setting {
         set_property(&mut obj, "setting", setting.as_str());

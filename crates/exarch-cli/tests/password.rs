@@ -128,6 +128,7 @@ fn extract_without_a_password_reports_password_required_in_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["error"]["kind"], "SecurityViolation", "{json}");
     assert_eq!(json["error"]["sub_code"], "ENCRYPTED", "{json}");
+    assert_eq!(json["error"]["reason"], "password_required", "{json}");
     assert!(
         json["error"]["hint"]
             .as_str()
@@ -163,6 +164,7 @@ fn a_wrong_password_is_refused_and_never_echoed() {
     assert!(!everything.contains("s3cr3t"), "{everything}");
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["error"]["sub_code"], "ENCRYPTED", "{json}");
+    assert_eq!(json["error"]["reason"], "wrong_password", "{json}");
     assert!(files_under(&out).is_empty());
 }
 

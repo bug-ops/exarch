@@ -19,6 +19,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use exarch_core::Password;
+use zeroize::Zeroizing;
 
 /// The most bytes a password source may hold: the length cap of a core
 /// [`Password`].
@@ -76,7 +77,7 @@ fn first_line(bytes: &mut Vec<u8>) {
 fn read_capped(reader: impl Read, origin: &str) -> Result<Vec<u8>> {
     // Fixed capacity so the buffer never reallocates and leaves a copy of the
     // secret behind.
-    let mut bytes = Vec::with_capacity(MAX_SOURCE_BYTES + 1);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_SOURCE_BYTES + 1));
     reader
         .take(MAX_SOURCE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -84,7 +85,7 @@ fn read_capped(reader: impl Read, origin: &str) -> Result<Vec<u8>> {
     if bytes.len() > MAX_SOURCE_BYTES {
         bail!("the password source {origin} holds more than {MAX_SOURCE_BYTES} bytes");
     }
-    Ok(bytes)
+    Ok(std::mem::take(&mut *bytes))
 }
 
 fn read_file(path: &Path) -> Result<Vec<u8>> {
@@ -102,7 +103,10 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
         use std::os::unix::fs::PermissionsExt as _;
 
         if metadata.permissions().mode() & 0o077 != 0 {
-            bail!("the password file {origin} is readable by group or others; run chmod 600");
+            bail!(
+                "the password file {origin} is accessible to group or others (mode {:o}); run chmod 600",
+                metadata.permissions().mode() & 0o777
+            );
         }
     }
     read_capped(file, &origin)
@@ -126,9 +130,11 @@ fn prompt() -> Result<Vec<u8>> {
              --password-fd instead"
         );
     }
-    let typed = rpassword::prompt_password("Password: ")
-        .context("failed to read the password from the terminal")?;
-    Ok(typed.into_bytes())
+    let mut typed = Zeroizing::new(
+        rpassword::prompt_password("Password: ")
+            .context("failed to read the password from the terminal")?,
+    );
+    Ok(std::mem::take(&mut *typed).into_bytes())
 }
 
 #[cfg(test)]

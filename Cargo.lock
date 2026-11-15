@@ -701,6 +701,7 @@ dependencies = [
  "signal-hook",
  "tar",
  "tempfile",
+ "zeroize",
  "zip",
 ]
 

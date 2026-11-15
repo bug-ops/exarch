@@ -1830,6 +1830,15 @@ def extract_archive(
         archive_path: Path to the archive file (str or pathlib.Path)
         output_dir: Directory where files will be extracted (str or pathlib.Path)
         config: Optional SecurityConfig (uses secure defaults if None)
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ExtractionReport with extraction statistics
@@ -1887,6 +1896,15 @@ def extract_archive_with_progress(
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional ExtractionOptions, as in extract_archive
         progress: Optional callback function for progress updates
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ExtractionReport with extraction statistics
@@ -2055,6 +2073,15 @@ def list_archive(
         destination: Optional directory extraction would write to; its volume
             decides whether a repeated name is listed as a duplicate skip or
             as refused in ``ArchiveManifest.dispositions``. Nothing is created
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         ArchiveManifest with entry metadata
@@ -2081,6 +2108,15 @@ def verify_archive(
         options: Optional VerificationOptions; pass
             ``VerificationOptions().with_integrity_check()`` to decode the
             payload and verify checksums
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
+            ``str`` raise ``TypeError`` because immutable objects cannot be
+            wiped. An empty or over-long (more than 1024 bytes) password raises
+            ``ValueError``. A password for an archive that is not encrypted is
+            ignored. exarch wipes its own copy; wipe yours afterwards with
+            ``password[:] = bytes(len(password))``. A missing, wrong or weak
+            (ZipCrypto) password raises ``SecurityViolationError`` with
+            ``sub_code == "ENCRYPTED"`` and ``reason`` set.
 
     Returns:
         VerificationReport with validation results
@@ -2847,6 +2883,13 @@ class SecurityViolationError(ArchiveError):
         sub_code: The family of the refusal, set on every violation raised by the
             core (``"PATH_NAME"``, ``"LINK_TARGET"``, ``"ENCRYPTED"``,
             ``"TAR_TRAILER"``, ...); ``None`` only on the class itself.
+        reason: With ``sub_code == "ENCRYPTED"``, why the encrypted archive or
+            entry was refused: ``"password_required"``, ``"wrong_password"``,
+            ``"authentication_failed"`` (tampered or damaged data),
+            ``"wrong_password_or_corrupt"`` (7z has no verifier),
+            ``"weak_encryption_refused"`` (ZipCrypto, 7z raw key) or
+            ``"kdf_cost_exceeded"``; a future core value reads as a plain
+            ``str``; ``None`` for every other violation.
         by: With ``sub_code == "EXISTING_SYMLINK"`` when an entry refused to
             replace a symlink, who made it: ``"existing"`` (there before the run,
             or its maker is unknown) or ``"archive"`` (an earlier entry of the
@@ -2861,6 +2904,7 @@ class SecurityViolationError(ArchiveError):
     warnings: list[AnyExtractionWarning]
     relaxable_by: _PolicySetting | None
     sub_code: _SecurityViolationSubCode | None
+    reason: str | None
     by: _OccupiedBy | str | None
 
 class UnsupportedFormatError(ArchiveError):

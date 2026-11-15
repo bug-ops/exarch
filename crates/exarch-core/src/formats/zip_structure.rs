@@ -1044,8 +1044,15 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
         end: data_start
             .checked_add(file.compressed_size())
             .ok_or_else(invalid)?,
-        descriptor: (file.flags().is_using_data_descriptor() && !file.encrypted())
-            .then(|| DescriptorExit::of(file.compression())),
+        // A reader that cannot decrypt scans an encrypted entry's ciphertext
+        // for the descriptor, as it does stored data.
+        descriptor: file.flags().is_using_data_descriptor().then(|| {
+            if file.encrypted() {
+                DescriptorExit::Scan
+            } else {
+                DescriptorExit::of(file.compression())
+            }
+        }),
         compressed: file.compressed_size(),
         size: file.size(),
         method: file.compression(),

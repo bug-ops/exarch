@@ -187,6 +187,25 @@ impl<'a> ExtractRequest<'a> {
     /// An archive with no encrypted entry behaves as if no password was
     /// given. The secret is held only by this request and never reaches
     /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::ExtractRequest;
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = ExtractRequest::new(&config)
+    ///     .with_password(password)
+    ///     .extract("secret.zip", "out")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
@@ -288,6 +307,25 @@ impl<'a> ListRequest<'a> {
     /// An archive with no encrypted entry behaves as if no password was
     /// given. The secret is held only by this request and never reaches
     /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::ListRequest;
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = ListRequest::new(&config)
+    ///     .with_password(password)
+    ///     .list("secret.zip")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
@@ -462,6 +500,25 @@ impl<'a> VerifyRequest<'a> {
     /// An archive with no encrypted entry behaves as if no password was
     /// given. The secret is held only by this request and never reaches
     /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::VerifyRequest;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _ = VerifyRequest::new(&config)
+    ///     .with_password(password)
+    ///     .verify("secret.zip")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
@@ -582,6 +639,23 @@ impl<'a> SinkExtractRequest<'a> {
     /// An archive with no encrypted entry behaves as if no password was
     /// given. The secret is held only by this request and never reaches
     /// [`SecurityConfig`], reports or errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::Password;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::SinkExtractRequest;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SecurityConfig::default();
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let _request = SinkExtractRequest::new(&config).with_password(password);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]

@@ -410,3 +410,86 @@ fn a_mixed_zip_without_a_password_is_refused_before_any_write() {
     );
     assert_eq!(entries(&dest), 0);
 }
+
+fn many() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/enc-many.7z")
+}
+
+fn expected_many() -> Tree {
+    let mut expected = Tree::default();
+    for i in 0..300 {
+        expected.files.insert(
+            PathBuf::from(format!("f{i:03}")),
+            (i % 100).to_string().into_bytes(),
+        );
+    }
+    expected
+}
+
+#[test]
+fn a_many_file_nonsolid_7z_extracts_to_its_plaintext_twin() {
+    let (dest, result) = extract_path(&many(), Some(password(RIGHT)), &SecurityConfig::default());
+
+    result.unwrap();
+    assert_eq!(tree(&dest), expected_many());
+}
+
+#[test]
+fn a_many_file_7z_costs_one_derivation_not_one_per_block() {
+    // 300 blocks of power 19 would cost 300 * 2^19 > the default 2^27 if every
+    // block were charged; the single (power, salt) run costs 2^19.
+    let config = SecurityConfig::default().with_max_kdf_work(NonZeroU64::new(1 << 19).unwrap());
+
+    let (dest, result) = extract_path(&many(), Some(password(RIGHT)), &config);
+
+    result.unwrap();
+    assert_eq!(tree(&dest), expected_many());
+}
+
+/// One AES-256 entry written by a streaming writer, so it uses a data
+/// descriptor and its local header carries no sizes.
+fn streamed_aes_zip() -> Vec<u8> {
+    use zip::AesMode;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    let mut writer = ZipWriter::new_stream(Vec::new());
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_aes_encryption(AesMode::Aes256, "correct-horse");
+    writer.start_file("s.txt", options).unwrap();
+    writer.write_all(&[b'a'; 300]).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn an_aes_entry_with_a_data_descriptor_extracts_when_untouched() {
+    let (dest, result) = extract_bytes(&streamed_aes_zip(), Some(password(RIGHT)));
+
+    result.unwrap();
+    assert_eq!(
+        std::fs::read(dest.path().join("s.txt")).unwrap(),
+        vec![b'a'; 300]
+    );
+}
+
+#[test]
+fn a_descriptor_and_header_planted_in_aes_ciphertext_are_refused() {
+    let mut bytes = streamed_aes_zip();
+    let name = usize::from(u16::from_le_bytes([bytes[26], bytes[27]]));
+    let extra = usize::from(u16::from_le_bytes([bytes[28], bytes[29]]));
+    let data = 30 + name + extra;
+    let mut planted = b"PK\x07\x08".to_vec();
+    planted.extend_from_slice(&[0; 12]);
+    planted.extend_from_slice(b"PK\x03\x04\x14\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\0\0\0z");
+    let at = data + 60;
+    bytes[at..at + planted.len()].copy_from_slice(&planted);
+
+    let (dest, result) = extract_bytes(&bytes, Some(password(RIGHT)));
+
+    assert!(
+        matches!(result, Err(ArchiveError::ZipInconsistency(_))),
+        "{result:?}"
+    );
+    assert_eq!(entries(&dest), 0);
+}

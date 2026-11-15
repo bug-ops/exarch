@@ -599,6 +599,13 @@ pub struct JsonError {
     /// what the user must clean up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leftover_path: Option<HostPath>,
+    /// Why an encrypted archive or entry was refused: the token of an
+    /// `EncryptionRefusal` (`password_required`, `wrong_password`,
+    /// `authentication_failed`, `wrong_password_or_corrupt`,
+    /// `weak_encryption_refused`, `kdf_cost_exceeded`); present only on a
+    /// `SECURITY_VIOLATION` with sub-code `ENCRYPTED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     /// `relaxable_by` is the stable id of the `SecurityConfig` setting whose
     /// current value refused the entry (only for a `SecurityViolation` a
     /// setting relaxes); `sub_code` the finer classification (always for a
@@ -622,8 +629,19 @@ impl JsonError {
             by: None,
             step: None,
             leftover_path: None,
+            reason: None,
             discriminants: None,
         }
+    }
+
+    /// Records why an encryption refusal happened. Any other error leaves the
+    /// object unchanged.
+    #[must_use]
+    pub fn with_encryption_reason(mut self, error: &ArchiveError) -> Self {
+        self.reason = error
+            .encryption_refusal()
+            .map(exarch_core::EncryptionRefusal::as_str);
+        self
     }
 
     /// Records what an occupied-path refusal names: the refused paths with

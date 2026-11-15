@@ -22,6 +22,8 @@ use super::types::PolicySetting;
 use super::types::QuotaKind;
 use super::types::ReaderFormatError;
 use super::types::ZipBombScope;
+use super::violation::EncryptionRefusal;
+use super::violation::Violation;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -1204,6 +1206,41 @@ impl ArchiveError {
     #[must_use]
     pub fn sub_code(&self) -> Option<SubCode> {
         self.ffi_kind().sub_code()
+    }
+
+    /// Why an encrypted archive or entry was refused, or `None` when this error
+    /// is not an encryption refusal.
+    ///
+    /// The reason is carried under `SECURITY_VIOLATION` / `ENCRYPTED`, so a
+    /// caller that must tell a missing password from a wrong one or from
+    /// tampered data reads it here instead of parsing the message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::EncryptionRefusal;
+    /// use exarch_core::Violation;
+    ///
+    /// let err = ArchiveError::from(Violation::Encrypted {
+    ///     reason: EncryptionRefusal::WrongPassword,
+    ///     name: None,
+    /// });
+    /// assert_eq!(
+    ///     err.encryption_refusal(),
+    ///     Some(EncryptionRefusal::WrongPassword)
+    /// );
+    /// assert_eq!(ArchiveError::Cancelled.encryption_refusal(), None);
+    /// ```
+    #[must_use]
+    pub fn encryption_refusal(&self) -> Option<EncryptionRefusal> {
+        match self {
+            Self::PartialExtraction(partial) => partial.cause().encryption_refusal(),
+            Self::SecurityViolation {
+                kind: Violation::Encrypted { reason, .. },
+            } => Some(*reason),
+            _ => None,
+        }
     }
 }
 

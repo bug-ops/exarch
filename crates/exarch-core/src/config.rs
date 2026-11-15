@@ -1020,6 +1020,8 @@ pub struct SecurityConfig {
     /// derivation is a fixed 1000 PBKDF2 iterations per entry and is bounded
     /// by [`max_file_count`](Self::max_file_count) instead.
     ///
+    /// The budget bounds the key-derivation work that the operation requests.
+    ///
     /// Default: 2^27 (134,217,728 rounds), including for
     /// [`SecurityConfig::permissive`]. Exposed by both bindings, not by the
     /// CLI.

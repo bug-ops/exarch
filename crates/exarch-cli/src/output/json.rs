@@ -374,7 +374,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         if let Some(error) = extraction_err {
             json_error = json_error
                 .with_occupancy(error)
-                .with_destination_step(error);
+                .with_destination_step(error)
+                .with_encryption_reason(error);
         }
         json_error = json_error.with_leftover_path(leftover_path(error).map(HostPath::from));
         if let Some(kind) = &ffi_kind {
@@ -715,6 +716,28 @@ mod tests {
         }));
         assert!(fixed["error"].get("relaxable_by").is_none());
         assert_eq!(fixed["error"]["sub_code"], "ENCRYPTED");
+    }
+
+    #[test]
+    fn test_error_envelope_reports_the_encryption_reason_only_for_encryption() {
+        let wrong = ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::WrongPassword,
+            name: None,
+        });
+        let error = JsonError::new(JsonKind::Generic, "denied").with_encryption_reason(&wrong);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["reason"],
+            "wrong_password"
+        );
+
+        let other = JsonError::new(JsonKind::Generic, "denied")
+            .with_encryption_reason(&ArchiveError::Cancelled);
+        assert!(
+            serde_json::to_value(&other)
+                .unwrap()
+                .get("reason")
+                .is_none()
+        );
     }
 
     #[test]

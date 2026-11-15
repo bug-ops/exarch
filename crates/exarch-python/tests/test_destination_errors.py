@@ -3,9 +3,11 @@
 import errno
 import io
 import os
+import pathlib
 import pickle
 import sys
 import tarfile
+import zipfile
 
 import pytest
 
@@ -154,6 +156,67 @@ def test_overwrite_over_a_symlink_occupant_is_an_existing_symlink_violation(temp
     assert "existing symlink at link_entry" in str(info.value)
     assert target.read_text() == "keep"
     assert (destination / "link_entry").is_symlink()
+
+
+_SIMPLE_7Z = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "simple.7z"
+
+
+def _escaping_link_archive(temp_dir, kind, name):
+    if kind == "tar":
+        return _file_entry_archive(temp_dir, name), name
+    if kind == "zip":
+        path = temp_dir / "entry.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr(name, "hi")
+        return path, name
+    return _SIMPLE_7Z, name
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+@pytest.mark.parametrize(
+    "kind, name",
+    [("tar", "l"), ("tar", "d/l"), ("zip", "l"), ("zip", "d/l"), ("7z", "simple/file1.txt")],
+)
+@pytest.mark.parametrize("policy", ["refuse", "overwrite"])
+def test_file_over_an_escaping_symlink_is_the_occupant_kind(temp_dir, kind, name, policy):
+    archive, rel = _escaping_link_archive(temp_dir, kind, name)
+    config = exarch.SecurityConfig().with_allow_symlinks()
+    destination = temp_dir / "out"
+    outside = temp_dir / "outside"
+    (destination / rel).parent.mkdir(parents=True)
+    outside.mkdir()
+    (destination / rel).symlink_to(outside)
+    options = exarch.ExtractionOptions().with_existing_files(policy)
+
+    if policy == "refuse":
+        with pytest.raises(exarch.OutputExistsError) as info:
+            exarch.extract_archive(archive, destination, config, options)
+        assert [(c.path, c.occupant) for c in info.value.conflicts] == [(rel, "symlink")]
+    else:
+        with pytest.raises(exarch.SecurityViolationError) as info:
+            exarch.extract_archive(archive, destination, config, options)
+        assert info.value.sub_code == "EXISTING_SYMLINK"
+    assert info.value.by == "existing"
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+@pytest.mark.parametrize("kind", ["tar", "zip"])
+def test_file_under_an_escaping_parent_symlink_stays_a_containment_error(temp_dir, kind):
+    archive, _ = _escaping_link_archive(temp_dir, kind, "d/l")
+    config = exarch.SecurityConfig().with_allow_symlinks()
+    destination = temp_dir / "out"
+    outside = temp_dir / "outside"
+    destination.mkdir()
+    outside.mkdir()
+    (destination / "d").symlink_to(outside)
+    (outside / "l").symlink_to("elsewhere")
+
+    with pytest.raises((exarch.PathTraversalError, exarch.SymlinkEscapeError)):
+        exarch.extract_archive(archive, destination, config)
+
+    assert [p.name for p in outside.iterdir()] == ["l"]
+    assert (outside / "l").is_symlink()
 
 
 def test_conflict_is_a_frozen_typed_value(temp_dir):

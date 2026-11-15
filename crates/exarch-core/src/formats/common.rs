@@ -21,6 +21,7 @@
 //! resolved a second time between a check and the act that follows it.
 
 use std::fs::File;
+use std::io;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
@@ -78,11 +79,64 @@ use crate::types::safe_path::ParentCheck;
 /// is [`ArchiveError::SourceNotAccessible`], the classification creation
 /// already gives its sources, so every front end can point at the archive path.
 ///
+/// A path that is not a regular file (a named pipe, a device, a directory) is
+/// refused with [`ArchiveError::SourceNotAccessible`] carrying
+/// [`NotARegularFile`]. On Unix the open never blocks, so a pipe with no
+/// writer cannot hold the run; the returned handle is back in blocking mode.
+///
 /// # Errors
 ///
 /// See above.
 pub(crate) fn open_archive(path: &Path) -> Result<File> {
-    File::open(path).map_err(|error| crate::creation::source::source_error(path, error))
+    let refuse = |error| crate::creation::source::source_error(path, error);
+    let file = open_without_blocking(path).map_err(refuse)?;
+    if file.metadata().map_err(refuse)?.is_file() {
+        #[cfg(unix)]
+        clear_nonblocking(&file).map_err(refuse)?;
+        Ok(file)
+    } else {
+        Err(refuse(io::Error::other(NotARegularFile)))
+    }
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the archive is the caller's own path, not an entry below the destination"
+)]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn clear_nonblocking(file: &File) -> io::Result<()> {
+    let flags = rustix::fs::fcntl_getfl(file)?;
+    rustix::fs::fcntl_setfl(file, flags.difference(rustix::fs::OFlags::NONBLOCK))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// The cause of an archive path that names something other than a regular
+/// file.
+#[derive(Debug, thiserror::Error)]
+#[error("not a regular file")]
+pub(crate) struct NotARegularFile;
+
+impl NotARegularFile {
+    /// Whether `error` is the refusal [`open_archive`] gives such a path.
+    pub(crate) fn is_cause_of(error: &ArchiveError) -> bool {
+        matches!(error, ArchiveError::SourceNotAccessible { error, .. }
+            if error.get_ref().is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>))
+    }
 }
 
 /// RAII guard that calls `on_entry_complete` when dropped.
@@ -2167,6 +2221,57 @@ mod tests {
         }));
         assert!(outcome.is_err());
         assert_eq!(progress.0, 1, "Drop must not fire the callback again");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_archive_refuses_a_named_pipe_without_blocking() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fifo = temp.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(open_archive(&fifo).map(drop));
+        });
+        let refusal = outcome
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("opening a named pipe blocked")
+            .unwrap_err();
+
+        assert!(NotARegularFile::is_cause_of(&refusal), "{refusal}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_archive_leaves_a_regular_file_in_blocking_mode() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let file = temp.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let opened = open_archive(&file).unwrap();
+
+        assert!(
+            !rustix::fs::fcntl_getfl(&opened)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        );
+    }
+
+    #[test]
+    fn open_archive_reports_a_missing_path_as_not_found() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        let refusal = open_archive(&temp.path().join("absent")).unwrap_err();
+
+        assert_matches!(refusal, ArchiveError::SourceNotFound { .. });
+        assert!(!NotARegularFile::is_cause_of(&refusal));
     }
 }
 

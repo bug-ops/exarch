@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-exclude = ["tests/data/tar-minefield/"]
+exclude = ["tests/data/tar-minefield/", "tests/tar_minefield.rs"]
 
 [dependencies]
 bzip2.workspace = true

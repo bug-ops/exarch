@@ -258,14 +258,36 @@ describe('ioKind', () => {
   it('an IO_ERROR keeps the kind core reported', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-node-iokind-'));
     try {
+      const source = path.join(dir, 'source');
+      fs.mkdirSync(source);
+      fs.writeFileSync(path.join(source, 'a.txt'), 'a');
+      const archive = path.join(dir, 'a.tar');
+      createArchiveSync(archive, [source]);
+      const blocker = path.join(dir, 'afile');
+      fs.writeFileSync(blocker, 'f');
+
+      const err = await extractArchive(archive, path.join(blocker, 'sub')).catch((e) => e);
+
+      assert.strictEqual(err.code, 'IO_ERROR');
+      assert.strictEqual(
+        err.ioKind,
+        process.platform === 'win32' ? 'AlreadyExists' : 'NotADirectory'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an archive path that is not a regular file is SOURCE_NOT_ACCESSIBLE', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-node-notfile-'));
+    try {
       const directoryAsArchive = path.join(dir, 'dir.tar');
       fs.mkdirSync(directoryAsArchive);
+
       const err = await listArchive(directoryAsArchive).catch((e) => e);
-      assert.strictEqual(err.code, 'IO_ERROR');
-      assert.strictEqual(typeof err.ioKind, 'string');
-      if (process.platform !== 'win32') {
-        assert.strictEqual(err.ioKind, 'IsADirectory');
-      }
+
+      assert.strictEqual(err.code, 'SOURCE_NOT_ACCESSIBLE');
+      assert.strictEqual(err.ioKind, undefined);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

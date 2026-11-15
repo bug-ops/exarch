@@ -338,6 +338,106 @@ fn directory_over_a_file_of_the_run_names_the_archive_under_every_mode() {
 }
 
 #[test]
+fn file_over_an_escaping_existing_symlink_writes_nothing_outside_under_skip() {
+    let dir = TempDir::new().unwrap();
+    let tar = write(&dir, "f.tar", &tar_archive(&[tar_file("l", b"n\n")]));
+    let root = TempDir::new().unwrap();
+    let dest = root.path().join("out");
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    symlink("../outside", dest.join("l")).unwrap();
+
+    extract(&tar, &dest, ExistingFiles::Skip, &config()).unwrap();
+
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+fn plant_escaping(dest: &Path, outside: &Path, rel: &str) {
+    let link = dest.join(rel);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(outside, link).unwrap();
+}
+
+fn archives_of(dir: &TempDir, name: &str) -> [PathBuf; 3] {
+    [
+        write(dir, "n.tar", &tar_archive(&[tar_file(name, b"n\n")])),
+        write(dir, "n.zip", &zip_archive(vec![zip_file(name, b"n\n")])),
+        sevenz(dir, &[(name, false)]),
+    ]
+}
+
+fn assert_file_over_escaping_symlink_is_the_occupant_kind(name: &str) {
+    for policy in [ExistingFiles::Refuse, ExistingFiles::Overwrite] {
+        let dir = TempDir::new().unwrap();
+        for archive in archives_of(&dir, name) {
+            let root = TempDir::new().unwrap();
+            let dest = root.path().join("out");
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            plant_escaping(&dest, &outside, name);
+
+            let error = extract(&archive, &dest, policy, &config()).unwrap_err();
+
+            match (policy, cause(&error)) {
+                (ExistingFiles::Refuse, ArchiveError::DestinationOccupied { by, .. }) => {
+                    assert_eq!(*by, OccupiedBy::Existing);
+                }
+                (
+                    ExistingFiles::Overwrite,
+                    ArchiveError::SecurityViolation {
+                        kind: Violation::ReplacesSymlink { by, .. },
+                        ..
+                    },
+                ) => assert_eq!(*by, OccupiedBy::Existing),
+                (_, other) => panic!("{policy:?} {}: {other}", archive.display()),
+            }
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
+fn file_over_an_escaping_existing_symlink_is_the_occupant_kind_in_every_format() {
+    assert_file_over_escaping_symlink_is_the_occupant_kind("l");
+}
+
+#[test]
+fn nested_file_over_an_escaping_existing_symlink_is_the_occupant_kind_in_every_format() {
+    assert_file_over_escaping_symlink_is_the_occupant_kind("d/l");
+}
+
+#[test]
+fn file_under_an_escaping_parent_symlink_stays_a_traversal_in_every_format() {
+    for policy in POLICIES {
+        let dir = TempDir::new().unwrap();
+        for archive in archives_of(&dir, "d/l") {
+            let root = TempDir::new().unwrap();
+            let dest = root.path().join("out");
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&dest).unwrap();
+            std::fs::create_dir(&outside).unwrap();
+            symlink("../outside", dest.join("d")).unwrap();
+            symlink("elsewhere", outside.join("l")).unwrap();
+
+            let error = extract(&archive, &dest, policy, &config()).unwrap_err();
+
+            assert_matches!(
+                error.error_code(),
+                ErrorCode::PathTraversal | ErrorCode::SymlinkEscape,
+                "{policy:?} {}: {error}",
+                archive.display()
+            );
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+            assert_eq!(
+                std::fs::read_link(outside.join("l")).unwrap(),
+                Path::new("elsewhere")
+            );
+        }
+    }
+}
+
+#[test]
 fn directory_over_a_symlink_of_the_run_names_the_archive_under_every_mode() {
     let dir = TempDir::new().unwrap();
     let archive = write(

@@ -10,6 +10,19 @@ use crate::types::safe_path::Resolved;
 use crate::types::safe_path::Walked;
 use std::marker::PhantomData;
 
+/// What validation does with a landing that is itself an existing symlink
+/// whose target escapes the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeafSymlink {
+    /// The landing is a traversal, as the public `SafePath::validate` reports.
+    Refuse,
+    /// The landing is left to the directory walker that writes the path, which
+    /// never follows a symlink at the landing and treats it as an occupant
+    /// under the existing-files policy. Set for walker-backed contexts and the
+    /// 7z pre-pass on unix and wasi, never on Windows.
+    Defer,
+}
+
 /// Carries state that enables skipping the full-path `canonicalize()` syscall
 /// when safety can be proven through other means.
 ///
@@ -23,6 +36,7 @@ use std::marker::PhantomData;
 pub(crate) struct ValidationContext<'r, V: FsView = HostFs, P: ParentCheck = Resolved> {
     symlink_seen: bool,
     symlinks_allowed: bool,
+    leaf_symlink: LeafSymlink,
     _proof: P::Proof<'r>,
     view: PhantomData<fn() -> V>,
 }
@@ -36,9 +50,19 @@ impl<V: FsView> ValidationContext<'_, V, Resolved> {
         Self {
             symlink_seen: false,
             symlinks_allowed,
+            leaf_symlink: LeafSymlink::Refuse,
             _proof: (),
             view: PhantomData,
         }
+    }
+
+    /// Leaves an escaping symlink at the landing to the walker that writes the
+    /// path, for a pre-pass whose paths a walker consumes later.
+    #[cfg(any(unix, target_os = "wasi"))]
+    #[must_use]
+    pub(crate) const fn deferring_leaf_symlink(mut self) -> Self {
+        self.leaf_symlink = LeafSymlink::Defer;
+        self
     }
 
     /// Defers the parent-directory probe to the directory walker that the
@@ -49,6 +73,7 @@ impl<V: FsView> ValidationContext<'_, V, Resolved> {
         ValidationContext {
             symlink_seen: self.symlink_seen,
             symlinks_allowed: self.symlinks_allowed,
+            leaf_symlink: LeafSymlink::Defer,
             _proof: proof,
             view: PhantomData,
         }
@@ -60,6 +85,12 @@ impl<V: FsView, P: ParentCheck> ValidationContext<'_, V, P> {
     /// `canonicalize()` even when the config disallows them.
     pub(crate) fn mark_symlink_seen(&mut self) {
         self.symlink_seen = true;
+    }
+
+    /// What validation does with an escaping symlink at the landing.
+    #[inline]
+    pub(crate) const fn leaf_symlink(&self) -> LeafSymlink {
+        self.leaf_symlink
     }
 
     /// Returns true if `canonicalize()` is needed for the full resolved path.

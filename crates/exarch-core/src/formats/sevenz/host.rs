@@ -331,6 +331,8 @@ impl PrePass for HostPrePass<'_> {
         shape: EntryShape,
     ) -> Result<Gated<EntryPath<SafePath>>> {
         let ctx: ValidationContext<HostFs> = self.core.context();
+        #[cfg(any(unix, target_os = "wasi"))]
+        let ctx = ctx.deferring_leaf_symlink();
         self.core
             .route_entry_in(path, shape, self.root.dest(), &HostFs, &ctx)
     }

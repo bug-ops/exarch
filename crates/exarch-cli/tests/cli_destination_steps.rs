@@ -79,6 +79,35 @@ fn test_extract_atomic_too_long_leaf_is_the_typed_destination_error_with_the_pla
 
 #[cfg(unix)]
 #[test]
+fn test_extract_below_a_read_only_directory_reports_create_unless_staging_was_asked_for() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let archive = archive_in(&temp);
+    let ro = temp.path().join("ro");
+    std::fs::create_dir(&ro).expect("parent");
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let probe = std::fs::create_dir(ro.join("probe"));
+    if probe.is_ok() {
+        std::fs::remove_dir(ro.join("probe")).expect("probe cleanup");
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        return;
+    }
+    let dest = ro.join("sub");
+
+    let plain = extract_error(&archive, &dest, &[]);
+    let force = extract_error(&archive, &dest, &["--force"]);
+    let atomic = extract_error(&archive, &dest, &["--atomic"]);
+
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    assert_eq!(step(&plain), "create", "{plain}");
+    assert_eq!(step(&force), "create", "{force}");
+    assert_eq!(step(&atomic), "stage", "{atomic}");
+    assert_eq!(plain["error"]["io_kind"], "PermissionDenied", "{plain}");
+}
+
+#[cfg(unix)]
+#[test]
 fn test_extract_into_a_destination_without_search_permission_is_a_typed_write_access_failure() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -164,4 +193,83 @@ fn test_verify_directory_over_an_earlier_file_is_the_typed_medium_refusal() {
         .arg(&archive)
         .assert()
         .code(3);
+}
+
+#[cfg(unix)]
+fn assert_refused_as_not_a_regular_file(archive: &std::path::Path, out: &std::path::Path) {
+    use std::time::Duration;
+
+    for command in ["extract", "list", "verify"] {
+        let mut run = assert_cmd::cargo::cargo_bin_cmd!("exarch");
+        run.args([command, "--json"]).arg(archive);
+        if command == "extract" {
+            run.arg(out);
+        }
+        let stdout = run
+            .timeout(Duration::from_secs(20))
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+
+        assert_eq!(
+            json["error"]["kind"],
+            "SourceNotAccessible",
+            "{} {command}: {json}",
+            archive.display()
+        );
+        let text = json["error"]["message"].as_str().expect("message");
+        assert!(
+            text.contains("not a regular file"),
+            "{} {command}: {json}",
+            archive.display()
+        );
+    }
+    assert!(!out.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_named_pipe_as_the_archive_is_a_typed_refusal_that_never_blocks() {
+    let temp = TempDir::new().expect("temp dir");
+    for name in ["pipe", "pipe.tar", "pipe.zip", "pipe.7z"] {
+        let fifo = temp.path().join(name);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+
+        assert_refused_as_not_a_regular_file(&fifo, &temp.path().join("out"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_directory_as_the_archive_is_a_typed_refusal_for_every_suffix() {
+    let temp = TempDir::new().expect("temp dir");
+    for name in ["dir", "dir.tar", "dir.zip", "dir.7z"] {
+        let directory = temp.path().join(name);
+        std::fs::create_dir(&directory).expect("directory");
+
+        assert_refused_as_not_a_regular_file(&directory, &temp.path().join("out"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_device_as_the_archive_is_a_typed_refusal_for_every_suffix() {
+    let temp = TempDir::new().expect("temp dir");
+    assert_refused_as_not_a_regular_file(
+        std::path::Path::new("/dev/null"),
+        &temp.path().join("out"),
+    );
+    for name in ["null.tar", "null.zip", "null.7z"] {
+        let link = temp.path().join(name);
+        std::os::unix::fs::symlink("/dev/null", &link).expect("symlink");
+
+        assert_refused_as_not_a_regular_file(&link, &temp.path().join("out"));
+    }
 }

@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-14
+updated: 2026-11-15
 status: implemented
 related:
   - "[[constitution]]"
@@ -18,9 +18,13 @@ related:
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
   - "[[020-reader-sink-and-in-memory-api/spec]]"
+  - "[[002-format-handlers/spec]]"
 ---
 
 # Feature: Python Bindings
+
+> [!note] Revision 2026-11-15: non-regular archive path, file over an escaping symlink (#1224, #1221)
+> An archive path that is not a regular file raises `SourceNotAccessibleError`; a file entry over an existing symlink that leaves the destination raises `OutputExistsError` or `SecurityViolationError` with `sub_code` `EXISTING_SYMLINK` and `by` `existing`, not `PathTraversalError` (see the error table).
 
 > [!note] Revision 2026-11-14: exception pickling, `step`, stub gate (#1207, #1211, #1197)
 > Every exarch exception pickles and revives its attributes, including the dual `OSError` classes and the `Skipped`, `Skip` and `NameCollision` values it holds (FR-121); destination failures carry `step` (FR-113); `OccupiedPath` is built by `__new__` in the stub and the stubtest gate runs in CI with a reasoned allowlist (FR-105).
@@ -360,6 +364,8 @@ class ExtractionOptions:
 | Rust returns `ArchiveError::PartialExtraction` after an atomic rollback | The inner exception carries `writes == "rolled_back"` and none of the counter attributes (v0.7.0, #747) |
 | Symlink entry over an existing symlink with a different target, overwrite enabled | `SecurityViolationError` with `sub_code` `EXISTING_SYMLINK` and `by`, not `SymlinkEscapeError` and not a builtin `OSError` (v0.7.0, #752, #1176, #1183) |
 | Directory entry over an existing file, any `existing_files` | `OutputExistsError` with `conflicts == [OccupiedPath(path, "file")]` and `by`, not a bare `OSError` (#1181, #1183) |
+| File entry (TAR, ZIP or 7z) over an existing symlink whose target is outside the destination, symlinks allowed | `OutputExistsError` under `existing_files` refuse, `SecurityViolationError` with `sub_code` `EXISTING_SYMLINK` under overwrite, both with `by == "existing"`, not `PathTraversalError` (#1221; core: [[001-security-pipeline/spec]] FR-057) |
+| Archive path that is a named pipe, directory, device or symlink to one | `SourceNotAccessibleError` (`not a regular file`) from extraction, `list_archive` and `verify_archive`, on Unix never a block (#1224; core: [[002-format-handlers/spec]] FR-074) |
 | Rust returns `ArchiveError::SecurityViolation` that a setting relaxes | `SecurityViolationError` with `relaxable_by` set to the setting id (v0.7.0, #741, #757) |
 | GIL state with progress callback | GIL held throughout; no concurrent Python threads during extraction |
 

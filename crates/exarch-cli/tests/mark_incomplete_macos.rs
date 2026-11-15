@@ -37,7 +37,7 @@ fn deny<'a>(path: &'a Path, permissions: &str) -> Option<AclGuard<'a>> {
     Some(AclGuard(path))
 }
 
-fn marked_archive(dir: &Path) -> Option<std::path::PathBuf> {
+fn build_archive(dir: &Path, symlink: Option<&str>) -> Option<std::path::PathBuf> {
     let path = dir.join("a.tar");
     let mut builder = tar::Builder::new(std::fs::File::create(&path).unwrap());
     let mut header = tar::Header::new_gnu();
@@ -46,6 +46,13 @@ fn marked_archive(dir: &Path) -> Option<std::path::PathBuf> {
     builder
         .append_data(&mut header, "f.txt", &b"data"[..])
         .unwrap();
+    if let Some(name) = symlink {
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_mode(0o777);
+        builder.append_link(&mut link, name, "target.txt").unwrap();
+    }
     builder.finish().unwrap();
     drop(builder);
     let mark = "0083;5f3c8d11;Safari;3F2D5A10-1111-4222-8333-444455556666";
@@ -54,6 +61,16 @@ fn marked_archive(dir: &Path) -> Option<std::path::PathBuf> {
         &["-w", "com.apple.quarantine", mark, &path.to_string_lossy()],
     )?;
     Some(path)
+}
+
+fn marked_archive(dir: &Path) -> Option<std::path::PathBuf> {
+    build_archive(dir, None)
+}
+
+/// A marked archive whose symlink entry is refused after `f.txt` is written,
+/// so the extraction fails with a partial report.
+fn failing_marked_archive(dir: &Path) -> Option<std::path::PathBuf> {
+    build_archive(dir, Some("link"))
 }
 
 fn extract_json(archive: &Path, dest: &Path) -> serde_json::Value {
@@ -129,4 +146,70 @@ fn read_arm_acl_on_the_archive_warns_mark_incomplete() {
 
     assert_eq!(json["data"]["mark_propagation"]["state"], "unreadable");
     assert_eq!(warning_kinds(&json), ["mark_incomplete"], "{json}");
+}
+
+fn partial_warning_kinds(json: &serde_json::Value) -> Vec<&str> {
+    json["error"]["partial_report"]["warnings"]
+        .as_array()
+        .map_or_default(|warnings| warnings.iter().filter_map(|w| w["kind"].as_str()).collect())
+}
+
+#[test]
+fn failing_run_without_acl_has_no_mark_warning() {
+    let dir = TempDir::new().unwrap();
+    let Some(archive) = failing_marked_archive(dir.path()) else {
+        eprintln!("skipped: xattr is unavailable");
+        return;
+    };
+    let dest = dir.path().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+
+    let json = extract_json(&archive, &dest);
+
+    assert!(json["error"]["partial_report"]["files_extracted"].as_u64() >= Some(1));
+    assert!(
+        !partial_warning_kinds(&json).contains(&"mark_incomplete"),
+        "{json}"
+    );
+}
+
+#[test]
+fn failing_run_with_read_arm_acl_warns_mark_incomplete_in_the_partial_report() {
+    let dir = TempDir::new().unwrap();
+    let Some(archive) = failing_marked_archive(dir.path()) else {
+        eprintln!("skipped: xattr is unavailable");
+        return;
+    };
+    let dest = dir.path().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    let Some(_guard) = deny(&archive, "readextattr") else {
+        eprintln!("skipped: chmod +a is unavailable");
+        return;
+    };
+
+    let json = extract_json(&archive, &dest);
+
+    assert_eq!(json["status"], "error");
+    assert!(json["error"]["partial_report"]["files_extracted"].as_u64() >= Some(1));
+    assert_eq!(partial_warning_kinds(&json), ["mark_incomplete"], "{json}");
+}
+
+#[test]
+fn failing_run_with_write_arm_acl_warns_mark_incomplete_in_the_partial_report() {
+    let dir = TempDir::new().unwrap();
+    let Some(archive) = failing_marked_archive(dir.path()) else {
+        eprintln!("skipped: xattr is unavailable");
+        return;
+    };
+    let dest = dir.path().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    let Some(_guard) = deny(&dest, "writeextattr,file_inherit,directory_inherit") else {
+        eprintln!("skipped: chmod +a is unavailable");
+        return;
+    };
+
+    let json = extract_json(&archive, &dest);
+
+    assert_eq!(json["status"], "error");
+    assert_eq!(partial_warning_kinds(&json), ["mark_incomplete"], "{json}");
 }

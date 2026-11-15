@@ -422,11 +422,9 @@ fn file_under_an_escaping_parent_symlink_stays_a_traversal_in_every_format() {
 
             let error = extract(&archive, &dest, policy, &config()).unwrap_err();
 
-            assert!(
-                matches!(
-                    error.error_code(),
-                    ErrorCode::PathTraversal | ErrorCode::SymlinkEscape
-                ),
+            assert_matches!(
+                error.error_code(),
+                ErrorCode::PathTraversal | ErrorCode::SymlinkEscape,
                 "{policy:?} {}: {error}",
                 archive.display()
             );

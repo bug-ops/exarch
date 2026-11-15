@@ -91,6 +91,7 @@ pub(crate) fn open_archive(path: &Path) -> Result<File> {
     let refuse = |error| crate::creation::source::source_error(path, error);
     let file = open_without_blocking(path).map_err(refuse)?;
     if file.metadata().map_err(refuse)?.is_file() {
+        #[cfg(unix)]
         clear_nonblocking(&file).map_err(refuse)?;
         Ok(file)
     } else {
@@ -116,11 +117,6 @@ fn open_without_blocking(path: &Path) -> io::Result<File> {
 fn clear_nonblocking(file: &File) -> io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(file)?;
     rustix::fs::fcntl_setfl(file, flags.difference(rustix::fs::OFlags::NONBLOCK))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-const fn clear_nonblocking(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
@@ -2274,7 +2270,7 @@ mod tests {
 
         let refusal = open_archive(&temp.path().join("absent")).unwrap_err();
 
-        assert!(matches!(refusal, ArchiveError::SourceNotFound { .. }));
+        assert_matches!(refusal, ArchiveError::SourceNotFound { .. });
         assert!(!NotARegularFile::is_cause_of(&refusal));
     }
 }

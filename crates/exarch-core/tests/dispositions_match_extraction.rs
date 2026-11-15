@@ -11,7 +11,9 @@
 //! extraction counts and samples.
 //!
 //! Core defaults are `ExistingFiles::Skip`, so every leg asks for `Refuse`
-//! explicitly.
+//! explicitly. The corpus also runs under `RepeatedPaths::Refuse`, where every
+//! repeat of a landing is refused instead of skipped, and the four legs, the
+//! sink and the listing must still agree.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
@@ -40,6 +42,7 @@ use exarch_core::ManifestEntryKind;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
+use exarch_core::RepeatedPaths;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::SinkExtractRequest;
@@ -47,6 +50,7 @@ use exarch_core::SinkOptions;
 use exarch_core::SkipKind;
 use exarch_core::Staging;
 use exarch_core::StoredTargets;
+use exarch_core::VerifyRequest;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_file;
@@ -343,11 +347,12 @@ impl Format {
     }
 }
 
-fn config() -> SecurityConfig {
+fn config(repeats: RepeatedPaths) -> SecurityConfig {
     SecurityConfig::default()
         .with_allow_symlinks(true)
         .with_allow_hardlinks(true)
         .with_allow_solid_archives(true)
+        .with_repeated_paths(repeats)
 }
 
 /// How the archives of one format fared, for the non-vacuity floors.
@@ -396,11 +401,17 @@ fn assert_leg(label: &str, expected: &Expected, outcome: Outcome) {
 
 /// Runs one archive through every leg and compares each with the dispositions;
 /// returns the index of the first refused entry.
-fn check(label: &str, format: Format, bytes: &[u8], tally: &mut Tally) -> Option<usize> {
+fn check(
+    label: &str,
+    format: Format,
+    repeats: RepeatedPaths,
+    bytes: &[u8],
+    tally: &mut Tally,
+) -> Option<usize> {
     let dir = TempDir::new().unwrap();
     let archive = dir.path().join(format.file_name());
     std::fs::write(&archive, bytes).unwrap();
-    let config = config();
+    let config = config(repeats);
     let listing = ListRequest::new(&config)
         .with_options(ListOptions::default().with_stored_targets(StoredTargets::Read))
         .list(&archive);
@@ -460,7 +471,7 @@ fn check(label: &str, format: Format, bytes: &[u8], tally: &mut Tally) -> Option
 /// clean as an archive of their own, and, with no hardlink (which extraction
 /// defers) to move the failure, the archive through that entry must fail: so
 /// the entry the dispositions refuse first is the one extraction fails at.
-fn check_case(format: Format, case: &Case, tally: &mut Tally) {
+fn check_case(format: Format, repeats: RepeatedPaths, case: &Case, tally: &mut Tally) {
     let build = |items: &[Item]| match format {
         Format::Tar => Some(tar_bytes(items)),
         Format::Zip => zip_bytes(items),
@@ -470,14 +481,14 @@ fn check_case(format: Format, case: &Case, tally: &mut Tally) {
         tally.inexpressible += 1;
         return;
     };
-    let Some(first) = check(&case.name, format, &bytes, tally) else {
+    let Some(first) = check(&case.name, format, repeats, &bytes, tally) else {
         return;
     };
     let mut scratch = Tally::default();
     let before = build(&case.items[..first]).unwrap();
     let label = format!("{} (first {first})", case.name);
     assert_eq!(
-        check(&label, format, &before, &mut scratch),
+        check(&label, format, repeats, &before, &mut scratch),
         None,
         "{label}: refused before the first refused entry"
     );
@@ -485,7 +496,7 @@ fn check_case(format: Format, case: &Case, tally: &mut Tally) {
         let through = build(&case.items[..=first]).unwrap();
         let label = format!("{} (through {first})", case.name);
         let list_refused = scratch.list_refused;
-        let refused = check(&label, format, &through, &mut scratch);
+        let refused = check(&label, format, repeats, &through, &mut scratch);
         assert!(
             refused.is_some() || scratch.list_refused > list_refused,
             "{label}: the first refused entry does not fail the run"
@@ -493,10 +504,10 @@ fn check_case(format: Format, case: &Case, tally: &mut Tally) {
     }
 }
 
-fn run_corpus(format: Format) -> Tally {
+fn run_corpus(format: Format, repeats: RepeatedPaths) -> Tally {
     let mut tally = Tally::default();
     for case in &corpus() {
-        check_case(format, case, &mut tally);
+        check_case(format, repeats, case, &mut tally);
     }
     assert_eq!(
         tally.ran + tally.list_refused + tally.inexpressible,
@@ -507,7 +518,7 @@ fn run_corpus(format: Format) -> Tally {
 
 #[test]
 fn tar_dispositions_match_extraction() {
-    let tally = run_corpus(Format::Tar);
+    let tally = run_corpus(Format::Tar, RepeatedPaths::KeepFirst);
     assert_eq!(tally.ran, corpus().len());
     assert_eq!(tally.without_extract, 0, "every archive extracts something");
     #[cfg(unix)]
@@ -519,7 +530,7 @@ fn tar_dispositions_match_extraction() {
 
 #[test]
 fn zip_dispositions_match_extraction() {
-    let tally = run_corpus(Format::Zip);
+    let tally = run_corpus(Format::Zip, RepeatedPaths::KeepFirst);
     // A ZIP that repeats a name is refused at listing, so only the names that
     // differ (`x`/`x/`, links, the case alias) reach the legs.
     assert!(tally.ran >= 6, "ran: {}", tally.ran);
@@ -534,7 +545,7 @@ fn zip_dispositions_match_extraction() {
 
 #[test]
 fn sevenz_dispositions_match_extraction() {
-    let tally = run_corpus(Format::SevenZ);
+    let tally = run_corpus(Format::SevenZ, RepeatedPaths::KeepFirst);
     assert_eq!(tally.list_refused, 0);
     assert_eq!(tally.ran, 14, "every archive without a hardlink runs");
     #[cfg(unix)]
@@ -549,4 +560,73 @@ fn sevenz_dispositions_match_extraction() {
         assert!(tally.refused >= 5, "refused: {}", tally.refused);
     }
     assert_eq!(tally.without_extract, 0, "every archive extracts something");
+}
+
+/// Under `RepeatedPaths::Refuse` no entry is skipped as a duplicate, so the
+/// listing refuses each one and every leg, the sink included, fails at it. A
+/// ZIP that repeats a name never reaches the legs: its listing refuses it.
+fn assert_repeats_are_refused_not_skipped(tally: &Tally) {
+    assert_eq!(tally.duplicates, 0, "a repeat was skipped");
+    assert!(
+        tally.refused + tally.list_refused >= 10,
+        "refused: {}, list refused: {}",
+        tally.refused,
+        tally.list_refused
+    );
+}
+
+#[test]
+fn tar_dispositions_match_extraction_when_repeats_are_refused() {
+    let tally = run_corpus(Format::Tar, RepeatedPaths::Refuse);
+    assert_repeats_are_refused_not_skipped(&tally);
+}
+
+#[test]
+fn zip_dispositions_match_extraction_when_repeats_are_refused() {
+    let tally = run_corpus(Format::Zip, RepeatedPaths::Refuse);
+    assert_repeats_are_refused_not_skipped(&tally);
+}
+
+#[test]
+fn sevenz_dispositions_match_extraction_when_repeats_are_refused() {
+    let tally = run_corpus(Format::SevenZ, RepeatedPaths::Refuse);
+    assert_repeats_are_refused_not_skipped(&tally);
+}
+
+fn repeat_issues(bytes: &[u8], repeats: RepeatedPaths) -> usize {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join(Format::Tar.file_name());
+    std::fs::write(&archive, bytes).unwrap();
+    VerifyRequest::new(&config(repeats))
+        .verify(&archive)
+        .unwrap()
+        .issues()
+        .iter()
+        .filter(|issue| issue.message().contains("is named twice"))
+        .count()
+}
+
+#[test]
+fn verify_reports_a_repeat_only_when_repeats_are_refused_and_never_a_directory_over_a_directory() {
+    let repeated = [
+        tar_bytes(&[Item::File("x"), Item::File("x")]),
+        tar_bytes(&[Item::File(TARGET), Item::Sym("x", TARGET), Item::File("x")]),
+        tar_bytes(&[Item::Dir("d"), Item::Sym("x", "d"), Item::Dir("x")]),
+        tar_bytes(&[Item::File(TARGET), Item::File("x"), Item::Hard("x", TARGET)]),
+        tar_bytes(&[Item::File("x/a"), Item::File("x")]),
+    ];
+    for (index, bytes) in repeated.iter().enumerate() {
+        assert_eq!(
+            repeat_issues(bytes, RepeatedPaths::KeepFirst),
+            0,
+            "case {index}"
+        );
+        assert_eq!(
+            repeat_issues(bytes, RepeatedPaths::Refuse),
+            1,
+            "case {index}"
+        );
+    }
+    let directories = tar_bytes(&[Item::Dir("d"), Item::Dir("d"), Item::File("d/f")]);
+    assert_eq!(repeat_issues(&directories, RepeatedPaths::Refuse), 0);
 }

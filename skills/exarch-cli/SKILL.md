@@ -61,6 +61,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--allow-symlinks` / `--allow-hardlinks` | off | Allow links that resolve inside the destination. |
 | `--allow-absolute-paths` / `--allow-world-writable` / `--allow-solid-archives` | off | Relax the matching default-deny check. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP structural ambiguity check. |
+| `--repeated-paths <keep-first\|refuse>` | keep-first | Whether an archive naming a path twice keeps the first copy or fails `SecurityViolation` (`REPEATED_PATH`). Pair `refuse` with `--atomic` to leave nothing behind. |
 | `--banned-component <C>` | `.git .ssh .gnupg .aws .kube .docker .env` | **Replaces** the default list, never appends (see below). |
 
 > **`--banned-component` replaces the default ban list.** `--banned-component foo` silently allows `.ssh`, `.aws`, etc. To add one component, repeat the flag with the full set plus the addition. An exactly empty value (`""`) disables all banning.

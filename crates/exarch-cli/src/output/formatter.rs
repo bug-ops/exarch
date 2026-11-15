@@ -21,6 +21,7 @@ use exarch_core::OccupiedBy;
 use exarch_core::PartialWrites;
 use exarch_core::PathOccupant;
 use exarch_core::PolicySetting;
+use exarch_core::RepeatedPaths;
 use exarch_core::SecurityConfig;
 use exarch_core::SkipKind;
 use exarch_core::Skips;
@@ -52,8 +53,8 @@ pub enum ManifestView {
 }
 
 /// What the selection of a listing does to each entry, aligned with
-/// `manifest.entries()`; empty when the selection is the default, which
-/// leaves every entry extracted where it is named.
+/// `manifest.entries()`; empty when the selection is the default and repeated
+/// paths are kept, which leaves every entry extracted where it is named.
 #[derive(Debug, Default)]
 pub struct Dispositions(Vec<Option<Disposition>>);
 
@@ -66,7 +67,7 @@ impl Dispositions {
     /// The disposition of each entry of `manifest` under its own selection,
     /// on a destination volume that identifies landings as `volume` says.
     pub fn of(manifest: &ArchiveManifest, config: &SecurityConfig, volume: VolumeIdentity) -> Self {
-        if manifest.selection().is_default() {
+        if manifest.selection().is_default() && config.repeated_paths == RepeatedPaths::KeepFirst {
             return Self::none();
         }
         let mut judged = manifest.dispositions_on(config, volume).peekable();

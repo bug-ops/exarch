@@ -12,6 +12,7 @@
 | `--allow-symlinks` / `--allow-hardlinks` | off | As `extract`; pass the ones you will extract with. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | As `extract`. An include matching nothing, and a hardlink to an unselected target, are `HIGH` issues. No per-entry rows, so no `disposition`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Structural findings become issues under `enforce`. |
+| `--repeated-paths <keep-first\|refuse>` | keep-first | Under `refuse` an entry that repeats an earlier landing is an issue naming the path and both kinds. |
 | `--parallel-decode-memory`, `--max-files`, `--max-total-size`, `--max-file-size`, `--max-compression-ratio`, `--allow-solid-archives` | as `list` | File count and total size fail with `QuotaExceeded` past the cap. |
 
 `verify` has no `--max-path-depth`, `--banned-component`, `--allow-absolute-paths`, or `--allow-world-writable`; those are evaluated by `extract` alone.

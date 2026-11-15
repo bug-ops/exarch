@@ -285,29 +285,22 @@ fn extract_keep_first_keeps_the_symlink_over_a_later_file_s10() {
 }
 
 #[test]
-fn extract_keep_first_refuses_a_directory_over_a_run_symlink_s14() {
+fn extract_keep_first_keeps_the_symlink_over_a_later_directory_s14() {
     let dir = TempDir::new().unwrap();
     let archive = write(&dir, "s14.tar", &s14().tar);
     let dest = TempDir::new().unwrap();
 
-    let error = extract(
+    extract(
         &archive,
         dest.path(),
         ExistingFiles::Skip,
         &config(RepeatedPaths::KeepFirst),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_matches!(
-        cause(&error),
-        ArchiveError::SecurityViolation {
-            kind: Violation::ReplacesSymlink {
-                by: OccupiedBy::Archive,
-                ..
-            },
-            ..
-        },
-        "{error}"
+    assert_eq!(
+        std::fs::read_link(dest.path().join("a")).unwrap(),
+        Path::new("target")
     );
 }
 

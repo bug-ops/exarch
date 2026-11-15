@@ -120,8 +120,10 @@ use crate::EntryTotal;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::Malformation;
+use crate::ManifestEntryType;
 use crate::MemorySink;
 use crate::ProgressCallback;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
@@ -129,12 +131,14 @@ use crate::SinkOptions;
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::ZipConsistencyPolicy;
+use crate::ZipInconsistency;
 use crate::security::Compressed;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
 use crate::sink::SinkReuse;
 
 use crate::copy::declared_size_exceeded;
+use crate::formats::occupant::repeated_path_between;
 use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
@@ -694,12 +698,25 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Admits the archive and applies the structural policy.
     fn admit_structure(&mut self, config: &SecurityConfig) -> Result<AdmittedZip<'_, R>> {
         let admitted = self.check_admission(config)?;
-        if config.zip_consistency == ZipConsistencyPolicy::Enforce
-            && let Some(finding) = admitted.archive.structure.findings().first()
-        {
-            return Err(ArchiveError::ZipInconsistency(finding.clone()));
+        let findings = admitted.archive.structure.findings();
+        let enforced = match config.zip_consistency {
+            ZipConsistencyPolicy::Enforce => findings.first(),
+            ZipConsistencyPolicy::Ignore => None,
+        };
+        let repeated = match config.repeated_paths {
+            RepeatedPaths::Refuse => findings.iter().find_map(duplicate_name),
+            RepeatedPaths::KeepFirst => None,
+        };
+        // A forced repeat takes the place of the duplicate finding it is
+        // (first under `Enforce`), never of another finding that comes first.
+        match (enforced, repeated) {
+            (Some(finding), Some(name)) if duplicate_name(finding).is_some() => {
+                Err(repeated_name_refusal(name))
+            }
+            (Some(finding), _) => Err(ArchiveError::ZipInconsistency(finding.clone())),
+            (None, Some(name)) => Err(repeated_name_refusal(name)),
+            (None, None) => Ok(admitted),
         }
-        Ok(admitted)
     }
 
     /// Checks the structural policy and returns the archive bound to `config`
@@ -833,6 +850,28 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 }
 
+/// The shared name of a duplicate-name finding.
+fn duplicate_name(finding: &ZipInconsistency) -> Option<&str> {
+    match finding {
+        ZipInconsistency::DuplicateName { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// The refusal of a name the central directory repeats, when repeated paths
+/// are refused.
+///
+/// ASSUMPTION: the finding carries no entry kinds, so both copies take the
+/// kind the name spells (a trailing `/` is a directory).
+fn repeated_name_refusal(name: &str) -> ArchiveError {
+    let kind = if name.ends_with('/') {
+        ManifestEntryType::Directory
+    } else {
+        ManifestEntryType::File
+    };
+    repeated_path_between(Path::new(name.trim_end_matches('/')), kind, kind)
+}
+
 impl<R: Read + Seek> ZipArchive<R> {
     /// Runs the extraction loop against `target`: the validation gates are the
     /// same whether it writes to the filesystem or to an entry sink.
@@ -844,6 +883,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
+        let options = options.under(config);
 
         let mut report = ExtractionReport::new();
 

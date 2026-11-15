@@ -22,6 +22,7 @@ use crate::SinkOptions;
 use crate::SkipKind;
 use crate::copy::CopyBuffer;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::refuse_hardlink_replace;
 use crate::mark::MarkRun;
@@ -436,7 +437,13 @@ impl ExtractTarget for HostTarget<'_> {
     }
 
     fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
-        common::create_directory(path, &self.root, tally.report, self.dirs)
+        common::create_directory(
+            path,
+            &self.root,
+            tally.report,
+            self.dirs,
+            OccupantPolicy::of(tally.options),
+        )
     }
 
     fn file<R: Read>(
@@ -535,14 +542,14 @@ impl ExtractTarget for HostTarget<'_> {
         ) {
             Ok(created) => created,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let action = tally.options.existing_files.on_occupant(
+                let action = OccupantPolicy::of(tally.options).on_occupant(
                     EntryShape::Link(LinkKind::Hardlink),
                     link.as_path(),
                     || link_dir.probe(link_leaf),
                     || {
                         self.root
                             .created()
-                            .created_here(&link_dir, link_leaf, link.as_path())
+                            .maker(&link_dir, link_leaf, link.as_path())
                     },
                     OccupiedSite::Host(&self.root),
                 )?;

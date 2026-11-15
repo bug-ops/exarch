@@ -26,6 +26,7 @@ use crate::formats::dir_walker::DirRef;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::replaces_symlink;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::LeafBuf;
@@ -434,7 +435,9 @@ fn vet_symlinked_directory(
 ) -> Result<Occupancy> {
     let rel = landing.path().as_path();
     if matches!(landing.kind(), LandingKind::Entry(_)) {
-        check_directory_occupant(root, walker, rel, |_| OccupiedBy::Existing)?;
+        check_directory_occupant(root, walker, rel, OccupantPolicy::PRE_EXISTING, |_| {
+            OccupiedBy::Existing
+        })?;
     }
     walker.vet_dir(root, rel, entry)?;
     Ok(Occupancy::Free)

@@ -6,6 +6,8 @@
 //! short-circuit and the decode loop are the same for the host filesystem and
 //! for an entry sink; only the [`SevenZTarget`] hooks differ.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
@@ -28,11 +30,14 @@ use crate::EntryPosition;
 use crate::EntryTotal;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
+use crate::formats::occupant::repeated_path_between;
+use crate::formats::occupant::shape_type;
 use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::SourceRead;
@@ -126,6 +131,44 @@ pub(crate) trait PrePass {
     fn reserve_file(&mut self, size: u64) -> Result<()>;
 }
 
+/// The landings the entries of one archive claim, kept only while repeated
+/// paths are refused so the pre-pass can refuse a repeat before any write.
+struct RepeatClaims(Option<HashMap<PathBuf, EntryShape>>);
+
+impl RepeatClaims {
+    fn of(policy: RepeatedPaths) -> Self {
+        Self((policy == RepeatedPaths::Refuse).then(HashMap::new))
+    }
+
+    /// Records the landing `rel` of an entry of kind `shape`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Violation::RepeatedPath`] when an earlier entry claimed `rel`,
+    /// except for a directory entry over a directory entry.
+    fn claim(&mut self, rel: &Path, shape: EntryShape) -> Result<()> {
+        let Some(claimed) = &mut self.0 else {
+            return Ok(());
+        };
+        match claimed.entry(rel.to_path_buf()) {
+            Entry::Vacant(slot) => {
+                slot.insert(shape);
+                Ok(())
+            }
+            Entry::Occupied(first)
+                if shape == EntryShape::Directory && *first.get() == EntryShape::Directory =>
+            {
+                Ok(())
+            }
+            Entry::Occupied(first) => Err(repeated_path_between(
+                rel,
+                shape_type(*first.get()),
+                shape_type(shape),
+            )),
+        }
+    }
+}
+
 /// A destination the shared 7z loop can extract into.
 pub(crate) trait SevenZTarget: ExtractTarget {
     /// Runs `run` against a fresh pre-pass over this destination.
@@ -170,6 +213,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
+        let options = options.under(config);
         target.with_pre_pass(config, options, &mut |pre| self.run_pre_pass(config, pre))?;
 
         let total = self
@@ -193,6 +237,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// The checks that need only the file table, in the order every
     /// destination applies them.
     fn run_pre_pass(&self, config: &SecurityConfig, pre: &mut dyn PrePass) -> Result<()> {
+        let mut claims = RepeatClaims::of(config.repeated_paths);
         for (index, entry) in self.header.file_indices().zip(&self.entries) {
             let Some(kind) = entry.class.present(&entry.name)? else {
                 continue;
@@ -234,6 +279,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     }
                 }
             }
+            // After the gates above, so a repeat is refused only once its
+            // copy would have been admitted.
+            claims.claim(safe_path.as_path(), kind.shape())?;
         }
         Ok(())
     }

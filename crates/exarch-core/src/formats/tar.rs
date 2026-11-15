@@ -340,6 +340,7 @@ impl<R: Read> TarArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
+        let options = options.under(config);
 
         let mut report = ExtractionReport::new();
 

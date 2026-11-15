@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::EntrySelection;
+use crate::ExistingFiles;
 use crate::IntegrityCheck;
 use crate::NoopProgress;
 use crate::ProgressCallback;
@@ -19,7 +20,10 @@ use crate::formats::common::is_extension_allowed;
 use crate::formats::common::open_archive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::occupant::OccupantPolicy;
+use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::tree_occupant_refusal;
+use crate::formats::run_record::Maker;
 use crate::inspection::integrity::IntegrityOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::list::ListPass;
@@ -467,6 +471,11 @@ fn verify_entry(
                 pending_hardlink = Some(safe_path.clone());
             }
             _ => {
+                if !allowlist_skipped
+                    && let Some(issue) = repeat_issue(tree, safe_path, entry, config)
+                {
+                    issues.push(issue);
+                }
                 let recorded = record_entry(tree, safe_path, &entry.kind, config);
                 issues.extend(collision_issues(tree));
                 if let Err(error) = recorded {
@@ -572,6 +581,27 @@ fn collision_issue(collision: NameCollision) -> VerificationIssue {
     .with_entry_path(Some(entry_path))
 }
 
+/// The issue for `entry` landing on an occupant an earlier entry made, when
+/// `config` refuses repeated paths; `None` otherwise.
+fn repeat_issue(
+    tree: &VirtualTree,
+    landing: &SafePath,
+    entry: &ArchiveEntry,
+    config: &SecurityConfig,
+) -> Option<VerificationIssue> {
+    let held = tree.occupant(landing.as_path())?;
+    OccupantPolicy::new(ExistingFiles::Skip, config.repeated_paths)
+        .refuse_repeat(
+            entry.kind.shape(),
+            landing.as_path(),
+            held,
+            || Maker::Run,
+            OccupiedSite::Detached,
+        )
+        .err()
+        .map(|error| VerificationIssue::from_error(&error, Some(entry.path.clone())))
+}
+
 /// Records a successfully validated non-hardlink entry in the tree.
 fn record_entry(
     tree: &mut VirtualTree,
@@ -636,6 +666,9 @@ fn verify_deferred_hardlink(
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
+    if let Some(issue) = repeat_issue(tree, link_path, entry, config) {
+        return Err(issue);
+    }
     let landed = tree.check_landing(link_path, Node::File, LandingLimits::Enforced);
     let error = match (landed, occupant) {
         (Err(error), _) => error,

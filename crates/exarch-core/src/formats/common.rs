@@ -30,7 +30,6 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::EntryPosition;
-use crate::ExistingFiles;
 use crate::ExtractionReport;
 use crate::Malformation;
 use crate::OccupiedBy;
@@ -49,6 +48,7 @@ use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
 use crate::formats::occupant::KeptOccupant;
 use crate::formats::occupant::OccupantAction;
+use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::occupant::kept_occupant_refusal;
@@ -412,7 +412,7 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     options: SinkOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let duplicates = options.existing_files;
+    let duplicates = OccupantPolicy::of(options);
 
     let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
 
@@ -683,7 +683,7 @@ fn open_output_slot(
     leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
-    duplicates: ExistingFiles,
+    duplicates: OccupantPolicy,
     root: &PinnedRoot,
     timing: ModeTiming,
 ) -> Result<Option<OutputSlot>> {
@@ -701,7 +701,7 @@ fn open_output_slot(
                 EntryShape::File,
                 rel,
                 || dir.probe(leaf),
-                || root.created().created_here(dir, leaf, rel),
+                || root.created().maker(dir, leaf, rel),
                 OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
@@ -794,6 +794,8 @@ pub(crate) fn kept_refusal_at(
 /// * `root` - Destination directory, pinned by an open handle
 /// * `report` - Extraction statistics (updated)
 /// * `dirs` - Creates and vets the directory
+/// * `policy` - What an occupied landing means: a directory entry over a file
+///   or symlink the run made is a repeat when repeated paths are refused
 ///
 /// # Errors
 ///
@@ -804,9 +806,10 @@ pub(crate) fn create_directory<P: ParentCheck>(
     root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,
+    policy: OccupantPolicy,
 ) -> Result<()> {
     let rel = safe_path.as_path();
-    check_directory_occupant(root, dirs, rel, |occupant| {
+    check_directory_occupant(root, dirs, rel, policy, |occupant| {
         maker_of(root, dirs, rel, occupant)
     })?;
     dirs.ensure_dir(root, safe_path)?;
@@ -834,6 +837,7 @@ pub(crate) fn check_directory_occupant(
     root: &PinnedRoot,
     dirs: DirWalker,
     rel: &Path,
+    policy: OccupantPolicy,
     maker: impl FnOnce(Occupant) -> OccupiedBy,
 ) -> Result<()> {
     if landing_is_free_or_directory(root, rel) {
@@ -842,14 +846,25 @@ pub(crate) fn check_directory_occupant(
     let Ok((parent, leaf)) = dirs.open_parent(root, rel) else {
         return Ok(());
     };
-    match parent.probe(leaf) {
-        Ok(None | Some(Occupant::Directory)) | Err(_) => Ok(()),
-        Ok(Some(Occupant::File)) => {
+    let found = match parent.probe(leaf) {
+        Ok(None | Some(Occupant::Directory)) | Err(_) => return Ok(()),
+        Ok(Some(found)) => found,
+    };
+    policy.refuse_repeat(
+        EntryShape::Directory,
+        rel,
+        found,
+        || root.created().maker(&parent, leaf, rel),
+        OccupiedSite::Host(root),
+    )?;
+    match found {
+        Occupant::File => {
             Err(OccupiedSite::Host(root).refuse(rel, Some(Occupant::File), maker(Occupant::File)))
         }
-        Ok(Some(Occupant::Symlink)) => {
+        Occupant::Symlink => {
             refuse_unadmitted_symlink_landing(root, dirs, rel, || maker(Occupant::Symlink))
         }
+        Occupant::Directory => Ok(()),
     }
 }
 
@@ -963,7 +978,7 @@ pub(crate) fn create_symlink<P: ParentCheck>(
 ) -> Result<()> {
     #[cfg(unix)]
     {
-        let duplicates = options.existing_files;
+        let duplicates = OccupantPolicy::of(options);
         let target_path = safe_symlink.target_path();
 
         let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
@@ -974,7 +989,7 @@ pub(crate) fn create_symlink<P: ParentCheck>(
                 EntryShape::Link(LinkKind::Symlink),
                 link_path,
                 || Ok(Some(existing)),
-                || root.created().created_here(&parent, leaf, link_path),
+                || root.created().maker(&parent, leaf, link_path),
                 OccupiedSite::Host(root),
             )?;
             let OccupantAction::Replace(permit) = action else {
@@ -1403,6 +1418,7 @@ mod tests {
             &pinned(dest),
             &mut report,
             DirWalker::new(&config),
+            OccupantPolicy::PRE_EXISTING,
         )
         .map(|()| report)
     }
@@ -2306,7 +2322,10 @@ mod refuse_probe_tests {
             leaf(name),
             Path::new(name),
             None,
-            ExistingFiles::Refuse,
+            OccupantPolicy::new(
+                crate::ExistingFiles::Refuse,
+                crate::RepeatedPaths::KeepFirst,
+            ),
             root,
             ModeTiming::AtCreate,
         )

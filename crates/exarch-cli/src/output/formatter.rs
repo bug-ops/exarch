@@ -1,6 +1,7 @@
 //! Output formatter trait for CLI results.
 
 use crate::operation::Operation;
+use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
@@ -108,6 +109,9 @@ pub trait OutputFormatter {
     /// Format verification report
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()>;
 
+    /// Reports the outcome of `--sandbox` once the run is confined.
+    fn format_sandbox(&mut self, status: &SandboxStatus);
+
     /// Format error message for the given operation
     fn format_error(&mut self, operation: Operation, error: &anyhow::Error);
 
@@ -132,6 +136,9 @@ pub enum Envelope<T> {
         operation: Operation,
         /// The command's result.
         data: T,
+        /// The `--sandbox` outcome; absent unless the flag was given.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sandbox: Option<SandboxStatus>,
     },
     /// The command failed.
     Error {

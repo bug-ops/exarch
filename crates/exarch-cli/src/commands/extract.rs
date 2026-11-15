@@ -22,6 +22,7 @@ use crate::progress::BarLength;
 use crate::progress::progress_for;
 use crate::sandbox;
 use crate::sandbox::Grant;
+use crate::sandbox::SandboxMode;
 use crate::sandbox::Scope;
 use anyhow::Context;
 use anyhow::Result;
@@ -31,6 +32,7 @@ use exarch_core::ArchiveType;
 use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
+use exarch_core::DestDir;
 use exarch_core::DestinationCheck;
 use exarch_core::DestinationState;
 use exarch_core::DestinationStep;
@@ -468,8 +470,12 @@ pub fn execute(
     };
     let config = security_config(args, base)?;
     let password = password::read(args.password.source().as_ref())?;
-    // The status reaches the output formatters with the Landlock backend.
-    let _sandbox = sandbox::confine(
+    if cfg!(target_os = "linux") && args.sandbox.mode != SandboxMode::Off && !args.atomic {
+        // The grant needs a directory to attach to; core creates it with the
+        // same call for an unsandboxed in-place run.
+        DestDir::new_or_create(&output_dir)?;
+    }
+    sandbox::confine_and_report(
         args.sandbox.mode,
         &Grant {
             archive: &args.archive,
@@ -478,6 +484,7 @@ pub fn execute(
                 atomic: args.atomic,
             },
         },
+        formatter,
     )
     .map_err(anyhow::Error::new)?;
 

@@ -57,13 +57,13 @@ fn destination_volume(
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
     let password = password::read(args.password.source().as_ref())?;
-    // The status reaches the output formatters with the Landlock backend.
-    let _sandbox = sandbox::confine(
+    sandbox::confine_and_report(
         args.sandbox.mode,
         &Grant {
             archive: &args.archive,
             scope: Scope::ReadOnly,
         },
+        formatter,
     )
     .map_err(anyhow::Error::new)?;
 

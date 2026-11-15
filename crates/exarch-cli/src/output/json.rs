@@ -20,6 +20,7 @@ use crate::error::chain_text;
 use crate::error::leftover_path;
 use crate::error::raw;
 use crate::operation::Operation;
+use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
@@ -105,13 +106,17 @@ pub fn forced_exit_envelope(operation: Operation, hint: &str) -> serde_json::Res
 /// tests can inject an in-memory writer (`with_writer`) to capture output.
 pub struct JsonFormatter<W: Write = Stdout> {
     out: W,
+    sandbox: Option<SandboxStatus>,
 }
 
 impl JsonFormatter<Stdout> {
     /// Creates a formatter writing to the process stdout.
     #[must_use]
     pub fn stdout() -> Self {
-        Self { out: io::stdout() }
+        Self {
+            out: io::stdout(),
+            sandbox: None,
+        }
     }
 }
 
@@ -119,7 +124,7 @@ impl<W: Write> JsonFormatter<W> {
     /// Creates a formatter writing to the given writer.
     #[cfg(test)]
     pub fn with_writer(out: W) -> Self {
-        Self { out }
+        Self { out, sandbox: None }
     }
 
     /// Returns a reference to the underlying writer.
@@ -136,7 +141,12 @@ impl<W: Write> JsonFormatter<W> {
     }
 
     fn success<T: Serialize>(&mut self, operation: Operation, data: T) -> Result<()> {
-        self.output(&Envelope::Success { operation, data })
+        let sandbox = self.sandbox.take();
+        self.output(&Envelope::Success {
+            operation,
+            data,
+            sandbox,
+        })
     }
 }
 
@@ -324,6 +334,10 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
     }
 
     fn format_verification_failed(&mut self) {}
+
+    fn format_sandbox(&mut self, status: &SandboxStatus) {
+        self.sandbox = Some(status.clone());
+    }
 
     fn format_error(&mut self, operation: Operation, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
@@ -1159,6 +1173,7 @@ mod tests {
         let success = serde_json::to_value(Envelope::Success {
             operation: Operation::List,
             data: serde_json::json!({"n": 1}),
+            sandbox: None,
         })
         .unwrap();
         assert_eq!(

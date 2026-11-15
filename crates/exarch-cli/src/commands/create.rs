@@ -138,6 +138,8 @@ mod tests {
         fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
 
         fn format_verification_failed(&mut self) {}
+
+        fn format_sandbox(&mut self, _status: &crate::sandbox::SandboxStatus) {}
     }
 
     /// `JsonFormatter` always calls `format_creation_result` regardless of
@@ -184,6 +186,8 @@ mod tests {
         fn format_error(&mut self, _: Operation, _: &anyhow::Error) {}
 
         fn format_verification_failed(&mut self) {}
+
+        fn format_sandbox(&mut self, _status: &crate::sandbox::SandboxStatus) {}
     }
 
     fn make_args(output: PathBuf, source: PathBuf) -> CreateArgs {

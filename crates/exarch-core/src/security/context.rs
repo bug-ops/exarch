@@ -58,7 +58,6 @@ impl<V: FsView> ValidationContext<'_, V, Resolved> {
 
     /// Leaves an escaping symlink at the landing to the walker that writes the
     /// path, for a pre-pass whose paths a walker consumes later.
-    #[cfg(any(unix, target_os = "wasi"))]
     #[must_use]
     pub(crate) const fn deferring_leaf_symlink(mut self) -> Self {
         self.leaf_symlink = LeafSymlink::Defer;

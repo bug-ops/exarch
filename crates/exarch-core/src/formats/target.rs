@@ -289,7 +289,7 @@ pub(super) fn host_context<'r, V: FsView>(
     core: &ValidatorCore<'_>,
     _root: &'r PinnedRoot,
 ) -> ValidationContext<'r, V, HostParent> {
-    core.context::<V>()
+    core.context::<V>().deferring_leaf_symlink()
 }
 
 /// Extraction onto the real filesystem.

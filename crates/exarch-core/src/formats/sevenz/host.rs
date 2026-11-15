@@ -99,10 +99,9 @@ impl DestOccupancy {
     }
 
     /// A pre-existing symlink that is refused rather than unlinked and written
-    /// under its name, as TAR and ZIP refuse it through `O_NOFOLLOW`. Elsewhere
-    /// a symlink is replaced like a regular file.
+    /// under its name, as TAR and ZIP refuse it on every host.
     fn kept_symlink(self) -> Option<KeptOccupant> {
-        (cfg!(unix) && self == Self::Symlink).then_some(KeptOccupant::Symlink)
+        (self == Self::Symlink).then_some(KeptOccupant::Symlink)
     }
 
     /// How to write over this occupant with the policy's `permit`, or the
@@ -330,9 +329,7 @@ impl PrePass for HostPrePass<'_> {
         path: &Path,
         shape: EntryShape,
     ) -> Result<Gated<EntryPath<SafePath>>> {
-        let ctx: ValidationContext<HostFs> = self.core.context();
-        #[cfg(any(unix, target_os = "wasi"))]
-        let ctx = ctx.deferring_leaf_symlink();
+        let ctx: ValidationContext<HostFs> = self.core.context().deferring_leaf_symlink();
         self.core
             .route_entry_in(path, shape, self.root.dest(), &HostFs, &ctx)
     }

@@ -215,14 +215,12 @@ pub(crate) fn refuse_unless_duplicate(
 
 /// The occupants a write does not replace, even under
 /// [`ExistingFiles::Overwrite`]: a file is replaced, so it cannot reach
-/// [`kept_occupant_refusal`]. The one exception is a 7z extraction on a
-/// Windows host, which replaces a symlink like a regular file.
+/// [`kept_occupant_refusal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeptOccupant {
     /// A directory, which only a directory entry may share.
     Directory,
-    /// A symlink, which a file entry does not replace (see the type doc for 7z
-    /// on Windows).
+    /// A symlink, which a file entry does not replace.
     Symlink,
 }
 

@@ -76,6 +76,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--follow-symlinks` | off | Store target contents instead of the link. |
 | `--max-file-size <BYTES>` | none | Skip larger source files. |
 | `--preserve-permissions[=true\|false]` | true | `=false` for a portable archive. |
+| `--threads <N>` | 1 | ZIP only: compress entries on up to N threads (non-zero `u16`, capped at the core count); the archive bytes do not change. |
 
 Grammar, zip-ratio warning, name collisions, refused outputs (7z and ZIP-family extensions such as `.jar`, `.whl`, `.apk`): [references/create.md](references/create.md).
 

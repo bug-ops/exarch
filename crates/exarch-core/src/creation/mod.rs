@@ -15,6 +15,7 @@ pub(crate) mod source;
 pub(crate) mod staged;
 pub(crate) mod tar;
 pub(crate) mod zip;
+pub(crate) mod zip_prepared;
 
 #[cfg(all(test, unix))]
 mod source_tests;

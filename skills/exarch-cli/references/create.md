@@ -14,6 +14,7 @@
 | `--follow-symlinks` | off | Store target contents, not the link. |
 | `--max-file-size <BYTES>` | none | Skip larger source files; `0` refused (`InvalidConfiguration`). |
 | `--preserve-permissions[=true\|false]` | true | `=false` gives a portable archive. |
+| `--threads <N>` | 1 | ZIP only, other formats ignore it. Compresses entries on up to `N` worker threads, capped at the number of available cores; `0` or a non-number is a usage error (exit `2`). The archive is byte-identical for every `N`. Files over 8 MiB are streamed on the main thread. |
 
 Missing or unreadable sources fail with `SourceNotFound` / `SourceNotAccessible` (message names the path and OS error); no archive is left behind.
 

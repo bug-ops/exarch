@@ -82,6 +82,7 @@ impl<'a> FilteredWalker<'a> {
     pub(crate) fn walk(&self) -> impl Iterator<Item = Result<WalkItem>> + '_ {
         let mut walker = WalkDir::new(self.root)
             .follow_links(self.config.follow_symlinks)
+            .sort_by_file_name()
             .into_iter();
 
         std::iter::from_fn(move || {

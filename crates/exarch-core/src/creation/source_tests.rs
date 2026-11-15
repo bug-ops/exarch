@@ -209,6 +209,10 @@ fn source_changed_to_a_fifo_is_refused() {
     }
 }
 
+/// Above the prepared-entry limit, so the copy reports progress chunk by
+/// chunk and the file can change mid-copy.
+const STREAMED_LEN: usize = 9 * 1024 * 1024;
+
 #[test]
 fn a_file_that_grows_during_the_copy_is_refused() {
     for writer in WRITERS {
@@ -216,7 +220,7 @@ fn a_file_that_grows_during_the_copy_is_refused() {
         let tree = dir.path().join("tree");
         fs::create_dir(&tree).unwrap();
         let file = tree.join("big.bin");
-        fs::write(&file, vec![7u8; 4 * 1024 * 1024]).unwrap();
+        fs::write(&file, vec![7u8; STREAMED_LEN]).unwrap();
 
         let grow = Probe {
             on_start: Box::new(|_| {}),
@@ -243,7 +247,7 @@ fn a_file_that_shrinks_during_the_copy_is_refused() {
         let tree = dir.path().join("tree");
         fs::create_dir(&tree).unwrap();
         let file = tree.join("big.bin");
-        fs::write(&file, vec![7u8; 4 * 1024 * 1024]).unwrap();
+        fs::write(&file, vec![7u8; STREAMED_LEN]).unwrap();
 
         let shrink = Probe {
             on_start: Box::new(|_| {}),

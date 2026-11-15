@@ -264,17 +264,22 @@ impl RunRecord {
     ///
     /// The tri-state form of [`created_here`](Self::created_here) that an
     /// opt-in refusal of repeats needs: a record that cannot vouch either way
-    /// answers [`Maker::Unknown`] instead of "not made here".
+    /// answers [`Maker::Unknown`] instead of "not made here". `Maker::Run` is
+    /// true exactly when `created_here` is.
     pub(crate) fn maker(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Maker {
         let created = self.created.borrow();
-        if created.saturated || created.lossy {
+        if created.saturated {
             return Maker::Unknown;
         }
+        // A held key proves the run made the occupant even in a lossy record,
+        // so `Run` is exactly `created_here`; lossiness only withdraws
+        // "foreign".
         match dir.identity(leaf) {
             Err(_) => Maker::Unknown,
             Ok(None) => Maker::Foreign,
             Ok(Some(identity)) => match key_for(identity, rel) {
                 key if created.keys.contains(&key) => Maker::Run,
+                _ if created.lossy => Maker::Unknown,
                 LandingKey::Identity(_) => Maker::Foreign,
                 LandingKey::Path(_) => Maker::Unknown,
             },
@@ -419,12 +424,35 @@ mod tests {
 
         assert_eq!(
             record.maker(&dir, leaf("made"), "made".as_ref()),
-            Maker::Unknown
+            Maker::Run
         );
-        assert!(
-            record.created_here(&dir, leaf("made"), "made".as_ref()),
-            "a lossy record still answers the boolean question as before"
+        assert_eq!(
+            record.maker(&dir, leaf("foreign"), "foreign".as_ref()),
+            Maker::Unknown,
+            "a lossy record cannot call an unseen occupant foreign"
         );
+    }
+
+    #[test]
+    fn run_is_exactly_created_here_whatever_the_state_of_the_record() {
+        let (_temp, dir) = made_and_foreign();
+        let lossy = RunRecord::new(RecordBudget::Full);
+        lossy.note(&dir, leaf("made"), "made".as_ref());
+        lossy.note(&dir, leaf("absent"), "absent".as_ref());
+        let saturated = RunRecord::new(RecordBudget::Full);
+        saturated.note(&dir, leaf("made"), "made".as_ref());
+        saturated.saturate();
+        let too_long = "x".repeat(300);
+
+        for record in [&lossy, &saturated] {
+            for name in ["made", "foreign", "absent", too_long.as_str()] {
+                assert_eq!(
+                    record.maker(&dir, leaf(name), name.as_ref()) == Maker::Run,
+                    record.created_here(&dir, leaf(name), name.as_ref()),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]

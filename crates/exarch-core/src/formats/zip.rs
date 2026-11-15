@@ -132,6 +132,7 @@ use crate::Result;
 use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::VerificationIssue;
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::ZipConsistencyPolicy;
@@ -1128,13 +1129,34 @@ impl<R: Read + Seek> ZipArchive<R> {
         let listed = list_for_verify(config, options, progress, |listing| {
             list_zip_reader(&mut admitted, config, listing)
         })?;
-        let (findings, omitted) = match config.zip_consistency {
-            ZipConsistencyPolicy::Enforce => {
-                (self.structure.findings(), self.structure.omitted_findings())
-            }
-            ZipConsistencyPolicy::Ignore => (&[][..], 0),
+        let refusing = config.repeated_paths == RepeatedPaths::Refuse;
+        let repeats: Vec<_> = if refusing {
+            self.structure
+                .findings()
+                .iter()
+                .find_map(duplicate_name)
+                .map(|name| VerificationIssue::from_error(&repeated_name_refusal(name), None))
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
         };
-        let structure = ArchiveStructure::new(self.structure.central_entries(), findings, omitted);
+        // A repeated name is reported once, as the refusal extraction gives,
+        // not also as the structure finding it came from.
+        let (findings, omitted) = match config.zip_consistency {
+            ZipConsistencyPolicy::Enforce => (
+                self.structure
+                    .findings()
+                    .iter()
+                    .filter(|finding| !(refusing && duplicate_name(finding).is_some()))
+                    .cloned()
+                    .collect(),
+                self.structure.omitted_findings(),
+            ),
+            ZipConsistencyPolicy::Ignore => (Vec::new(), 0),
+        };
+        let structure = ArchiveStructure::new(self.structure.central_entries(), &findings, omitted)
+            .with_refusals(&repeats);
         Ok(verify_manifest_with_structure(
             &listed.manifest,
             config,

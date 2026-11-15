@@ -171,5 +171,5 @@ fn debug_of_a_request_with_a_password_never_shows_the_secret() {
 
     let text = format!("{request:?}");
 
-    assert!(!text.contains(marker), "{text}");
+    assert!(!text.contains(marker));
 }

@@ -11,6 +11,10 @@
 //! an interrupted or failed run into a destination that did not exist leaves
 //! its partial output and reports it as such, instead of discarding it.
 //!
+//! Nothing is granted on the temporary directory: `--decode-reuse temp-file`
+//! cannot create its spool there, and core then decodes again instead of
+//! reusing, so the result is the same and only the optimisation is lost.
+//!
 //! Only Linux has a backend (Landlock, ABI v2 or newer). Elsewhere [`confine`]
 //! reports [`Unavailable::NotLinux`], which `--sandbox require` turns into a
 //! failure. The status is [`SandboxStatus::Enforced`] only when the kernel

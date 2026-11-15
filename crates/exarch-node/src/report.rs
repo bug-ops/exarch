@@ -2075,7 +2075,10 @@ mod tests {
     }
 
     fn policy_issue() -> exarch_core::VerificationIssue {
-        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         exarch_core::VerificationIssue::from_error(&error, None)
     }
 

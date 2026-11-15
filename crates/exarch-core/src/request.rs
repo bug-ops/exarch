@@ -13,6 +13,8 @@
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 
 use crate::ArchiveReader;
 use crate::ArchiveWriter;
@@ -22,6 +24,8 @@ use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ListOptions;
 use crate::NoopProgress;
+#[cfg(feature = "encryption")]
+use crate::Password;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -72,6 +76,8 @@ struct Carrier<'a, C, O> {
     config: &'a C,
     options: O,
     progress: OptionalProgress<'a>,
+    #[cfg(feature = "encryption")]
+    password: Option<Arc<Password>>,
 }
 
 impl<'a, C, O> Carrier<'a, C, O> {
@@ -80,7 +86,15 @@ impl<'a, C, O> Carrier<'a, C, O> {
             config,
             options,
             progress: OptionalProgress(None),
+            #[cfg(feature = "encryption")]
+            password: None,
         }
+    }
+
+    #[cfg(feature = "encryption")]
+    fn with_password(mut self, password: Arc<Password>) -> Self {
+        self.password = Some(password);
+        self
     }
 
     fn with_options(mut self, options: O) -> Self {
@@ -98,6 +112,7 @@ impl<'a, C, O> Carrier<'a, C, O> {
             config,
             options,
             progress,
+            ..
         } = self;
         progress.run(|progress| operation(config, options, progress))
     }
@@ -153,6 +168,18 @@ impl<'a> ExtractRequest<'a> {
     #[must_use]
     pub fn with_options(self, options: ExtractionOptions) -> Self {
         Self(self.0.with_options(options))
+    }
+
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
     }
 
     /// Reports progress to `progress`.
@@ -234,6 +261,18 @@ impl<'a> ListRequest<'a> {
     #[must_use]
     pub fn with_options(self, options: ListOptions) -> Self {
         Self(self.0.with_options(options))
+    }
+
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
     }
 
     /// Reports progress to `progress`.
@@ -378,6 +417,18 @@ impl<'a> VerifyRequest<'a> {
     #[must_use]
     pub fn with_options(self, options: VerificationOptions) -> Self {
         Self(self.0.with_options(options))
+    }
+
+    /// Decrypts encrypted entries with `password`.
+    ///
+    /// An archive with no encrypted entry behaves as if no password was
+    /// given. The secret is held only by this request and never reaches
+    /// [`SecurityConfig`], reports or errors.
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(self, password: Arc<Password>) -> Self {
+        Self(self.0.with_password(password))
     }
 
     /// Reports progress to `progress`.

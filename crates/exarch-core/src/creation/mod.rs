@@ -22,6 +22,7 @@ mod source_tests;
 // Re-exports for public API
 pub use config::CompressionLevel;
 pub use config::CreationConfig;
+pub use config::Parallelism;
 pub use report::CreationReport;
 pub use report::CreationWarning;
 pub use report::CreationWarningKind;

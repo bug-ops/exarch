@@ -59,6 +59,10 @@ impl Operation {
             | Flag::AllowHardlinks
             | Flag::AllowSolidArchives
             | Flag::ZipConsistency
+            | Flag::RepeatedPaths
+            | Flag::PasswordFile
+            | Flag::Sandbox
+            | Flag::PasswordPrompt
             | Flag::MaxFiles
             | Flag::MaxTotalSize
             | Flag::MaxCompressionRatio
@@ -97,6 +101,10 @@ closed_list! {
         MaxFileSize => "--max-file-size",
         MaxPathDepth => "--max-path-depth",
         MaxTotalSize => "--max-total-size",
+        PasswordFile => "--password-file",
+        PasswordPrompt => "--password-prompt",
+        Sandbox => "--sandbox",
+        RepeatedPaths => "--repeated-paths",
         StripComponents => "--strip-components",
         ZipConsistency => "--zip-consistency",
     }

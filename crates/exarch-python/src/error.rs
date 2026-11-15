@@ -1003,8 +1003,9 @@ mod tests {
 
     #[test]
     fn test_security_violation_conversion() {
-        let err = CoreError::from(exarch_core::Violation::EncryptedEntry {
-            name: "test violation".into(),
+        let err = CoreError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: Some("test violation".into()),
         });
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
@@ -1519,7 +1520,10 @@ mod tests {
             r.bytes_written = 512;
             r
         };
-        let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
+        let source = CoreError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         let err = CoreError::PartialExtraction(exarch_core::Partial::new(
             source,
             report,

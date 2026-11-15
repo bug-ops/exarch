@@ -83,6 +83,7 @@ pub fn security_config(
         config = links.apply(config);
     }
     config = flags.zip().apply(config);
+    config = flags.repeated().apply(config);
     if let Some(parallel) = flags.parallel() {
         config = parallel.apply(config)?;
     }
@@ -124,5 +125,25 @@ mod tests {
             SecurityConfig::default(),
         );
         assert!(within_depth.is_ok(), "{within_depth:?}");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn repeated_paths_flag_maps_to_the_core_policy() {
+        use exarch_core::RepeatedPaths;
+        let config = |extra: &[&str]| {
+            security_config(&extract_flags(extra), SecurityConfig::default())
+                .unwrap()
+                .repeated_paths
+        };
+        assert_eq!(config(&[]), RepeatedPaths::KeepFirst);
+        assert_eq!(
+            config(&["--repeated-paths", "keep-first"]),
+            RepeatedPaths::KeepFirst
+        );
+        assert_eq!(
+            config(&["--repeated-paths", "refuse"]),
+            RepeatedPaths::Refuse
+        );
     }
 }

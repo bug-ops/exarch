@@ -3,6 +3,8 @@
 use crate::operation::ATOMIC_FORCE_REFUSED;
 use crate::operation::Flag;
 use crate::operation::join_words;
+use crate::password::PasswordSource;
+use crate::sandbox::SandboxArgs;
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
@@ -17,6 +19,7 @@ use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
 use exarch_core::PathRewrite;
 use exarch_core::RatioLimit;
+use exarch_core::RepeatedPaths;
 use exarch_core::RequestedLevel;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
@@ -26,6 +29,7 @@ use exarch_core::ZipConsistencyPolicy;
 use exarch_core::non_zero_u64;
 use exarch_core::positive_from_i128;
 use std::num::IntErrorKind;
+use std::num::NonZeroU16;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -293,6 +297,8 @@ pub trait PolicyFlags {
     fn limits(&self) -> LimitArgs;
     /// ZIP structure policy.
     fn zip(&self) -> ZipPolicyArgs;
+    /// Repeated-landing policy.
+    fn repeated(&self) -> RepeatedPathsArgs;
     /// Entry selection and path rewrite.
     fn selection(&self) -> &SelectionArgs;
     /// Link policy, for the commands that extract or check links.
@@ -414,6 +420,91 @@ impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
             ZipConsistencyArg::Enforce => Self::Enforce,
             ZipConsistencyArg::Ignore => Self::Ignore,
         }
+    }
+}
+
+/// How an archive that names one landing more than once is handled.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatedPathsArg {
+    /// Keep the first copy; the existing-files policy decides every repeat
+    #[default]
+    KeepFirst,
+    /// Refuse an entry whose landing already holds an occupant the run made
+    Refuse,
+}
+
+impl RepeatedPathsArg {
+    /// The value as the command line spells it (`--repeated-paths <VALUE>`).
+    pub fn value_name(self) -> String {
+        use clap::ValueEnum as _;
+        self.to_possible_value()
+            .map_or_default(|value| value.get_name().to_owned())
+    }
+}
+
+impl From<RepeatedPathsArg> for RepeatedPaths {
+    fn from(arg: RepeatedPathsArg) -> Self {
+        match arg {
+            RepeatedPathsArg::KeepFirst => Self::KeepFirst,
+            RepeatedPathsArg::Refuse => Self::Refuse,
+        }
+    }
+}
+
+/// Repeated-landing policy flag shared by `extract`, `list` and `verify`, so
+/// all three refuse the same archives.
+#[derive(clap::Args, Clone, Copy)]
+pub struct RepeatedPathsArgs {
+    /// How to treat an archive that names one path twice. `refuse` rejects it
+    /// (extract, list) or reports it (verify) instead of keeping the first
+    /// copy; with `extract --atomic` nothing is left behind.
+    #[arg(long, value_enum, default_value_t = RepeatedPathsArg::KeepFirst)]
+    pub repeated_paths: RepeatedPathsArg,
+}
+
+impl RepeatedPathsArgs {
+    /// Applies the repeated-landing policy to `config`.
+    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
+        config.with_repeated_paths(self.repeated_paths.into())
+    }
+}
+
+/// Where the password of an encrypted archive comes from; at most one source,
+/// and none is ever an argument value or an environment variable.
+#[derive(clap::Args, Clone, Debug, Default, PartialEq, Eq)]
+#[group(multiple = false)]
+pub struct PasswordArgs {
+    /// Read the password from the first line of this file (at most 1 KiB, not
+    /// readable by group or others)
+    #[arg(id = "password-file", long = "password-file", value_name = "PATH")]
+    pub file: Option<PathBuf>,
+
+    /// Read the password from the first line of this inherited file descriptor
+    #[cfg(unix)]
+    #[arg(
+        id = "password-fd",
+        long = "password-fd",
+        value_name = "FD",
+        value_parser = clap::value_parser!(i32).range(0..)
+    )]
+    pub fd: Option<i32>,
+
+    /// Ask for the password on the terminal, without echo
+    #[arg(id = "password-prompt", long = "password-prompt")]
+    pub prompt: bool,
+}
+
+impl PasswordArgs {
+    /// The source the flags name, or `None` when no password was asked for.
+    pub fn source(&self) -> Option<PasswordSource> {
+        if let Some(path) = &self.file {
+            return Some(PasswordSource::File(path.clone()));
+        }
+        #[cfg(unix)]
+        if let Some(fd) = self.fd {
+            return Some(PasswordSource::Fd(fd));
+        }
+        self.prompt.then_some(PasswordSource::Prompt)
     }
 }
 
@@ -548,6 +639,15 @@ pub struct ExtractArgs {
     pub zip: ZipPolicyArgs,
 
     #[command(flatten)]
+    pub repeated: RepeatedPathsArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    #[command(flatten)]
+    pub sandbox: SandboxArgs,
+
+    #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
 
     #[arg(long, value_enum, value_name = "MODE", help = decode_reuse_help())]
@@ -619,6 +719,10 @@ impl PolicyFlags for ExtractArgs {
         self.zip
     }
 
+    fn repeated(&self) -> RepeatedPathsArgs {
+        self.repeated
+    }
+
     fn selection(&self) -> &SelectionArgs {
         &self.selection
     }
@@ -655,6 +759,11 @@ pub struct CreateArgs {
         help = compression_level_help()
     )]
     pub compression_level: Option<RequestedLevel>,
+
+    /// Compress ZIP entries on up to N threads; the archive bytes do not
+    /// change, and other formats ignore it (default: one thread)
+    #[arg(long, value_name = "N")]
+    pub threads: Option<NonZeroU16>,
 
     /// Follow symbolic links
     #[arg(long)]
@@ -728,6 +837,15 @@ pub struct ListArgs {
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
+
+    #[command(flatten)]
+    pub repeated: RepeatedPathsArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    #[command(flatten)]
+    pub sandbox: SandboxArgs,
 }
 
 impl PolicyFlags for ListArgs {
@@ -737,6 +855,10 @@ impl PolicyFlags for ListArgs {
 
     fn zip(&self) -> ZipPolicyArgs {
         self.zip
+    }
+
+    fn repeated(&self) -> RepeatedPathsArgs {
+        self.repeated
     }
 
     fn selection(&self) -> &SelectionArgs {
@@ -765,6 +887,15 @@ pub struct VerifyArgs {
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
+
+    #[command(flatten)]
+    pub repeated: RepeatedPathsArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    #[command(flatten)]
+    pub sandbox: SandboxArgs,
 
     #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
@@ -799,6 +930,10 @@ impl PolicyFlags for VerifyArgs {
 
     fn zip(&self) -> ZipPolicyArgs {
         self.zip
+    }
+
+    fn repeated(&self) -> RepeatedPathsArgs {
+        self.repeated
     }
 
     fn selection(&self) -> &SelectionArgs {
@@ -1003,6 +1138,48 @@ mod tests {
         assert_eq!(with("temp-file"), DecodeReuse::TempFile(ReuseLimit::MAX));
         assert!(
             Cli::try_parse_from(["exarch", "extract", "a.zip", "--decode-reuse", "disk"]).is_err()
+        );
+    }
+
+    fn password_source_of(extra: &[&str]) -> Option<PasswordSource> {
+        let words = ["exarch", "verify", "a.zip"]
+            .into_iter()
+            .chain(extra.iter().copied());
+        let Commands::Verify(args) = Cli::try_parse_from(words).unwrap().command else {
+            panic!("expected verify command");
+        };
+        args.password.source()
+    }
+
+    #[test]
+    fn password_flags_name_one_source_and_exclude_each_other() {
+        assert_eq!(password_source_of(&[]), None);
+        assert_eq!(
+            password_source_of(&["--password-file", "pw"]),
+            Some(PasswordSource::File("pw".into()))
+        );
+        assert_eq!(
+            password_source_of(&["--password-prompt"]),
+            Some(PasswordSource::Prompt)
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            password_source_of(&["--password-fd", "3"]),
+            Some(PasswordSource::Fd(3))
+        );
+        assert!(
+            Cli::try_parse_from([
+                "exarch",
+                "verify",
+                "a.zip",
+                "--password-file",
+                "pw",
+                "--password-prompt"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["exarch", "create", "a.zip", "d", "--password-prompt"]).is_err()
         );
     }
 

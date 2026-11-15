@@ -4,9 +4,12 @@
 //! built-in protection against path traversal, zip bombs, symlink attacks,
 //! and other common vulnerabilities.
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyByteArray;
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::Arc;
 
 mod buffer;
 mod config;
@@ -31,6 +34,7 @@ use exarch_core::Durability;
 use exarch_core::ExtractRequest;
 use exarch_core::ListRequest;
 use exarch_core::OutputFile;
+use exarch_core::Password;
 use exarch_core::VerifyRequest;
 use exarch_core::VolumeIdentity;
 use report::PyArchiveEntry;
@@ -127,29 +131,51 @@ const _: () = assert!(
 /// report = extract_archive("archive.tar.gz", "/tmp/output", None, opts)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, output_dir, config=None, options=None))]
+#[pyo3(signature = (archive_path, output_dir, config=None, options=None, password=None))]
 fn extract_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyExtractionOptions>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyExtractionReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let output_dir = path_to_boundary(py, output_dir)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyExtractionOptions::snapshot(options);
+    let password = password_of(password)?;
 
     // Release GIL during I/O-heavy extraction
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
-            ExtractRequest::new(&config)
-                .with_options(options)
-                .extract(&archive_path, &output_dir)
+            let mut request = ExtractRequest::new(&config).with_options(options);
+            if let Some(password) = password {
+                request = request.with_password(password);
+            }
+            request.extract(&archive_path, &output_dir)
         })
     })?;
 
     Ok(PyExtractionReport::from(report))
+}
+
+/// Copies a Python `bytearray` password into core's zeroizing [`Password`].
+///
+/// Only a `bytearray` is accepted, so the caller can wipe its own copy; `bytes`
+/// and `str` are refused by the type check with a `TypeError`.
+///
+/// # Errors
+///
+/// `ValueError` if the password is empty or longer than [`Password::MAX_LEN`].
+fn password_of(password: Option<&Bound<'_, PyByteArray>>) -> PyResult<Option<Arc<Password>>> {
+    password
+        .map(|bytes| {
+            Password::new(bytes.to_vec())
+                .map(Arc::new)
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+        })
+        .transpose()
 }
 
 /// Converts a Path-like object to a validated host path.
@@ -360,13 +386,14 @@ fn output_file(
 ///     print(f"{entry.path}: {entry.size} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, config=None, options=None, destination=None))]
+#[pyo3(signature = (archive_path, config=None, options=None, destination=None, password=None))]
 fn list_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyListOptions>>,
     destination: Option<&Bound<'_, PyAny>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyArchiveManifest> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let destination = destination
@@ -374,12 +401,16 @@ fn list_archive(
         .transpose()?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
+    let password = password_of(password)?;
 
     catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let volume = VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
-            ListRequest::new(&config)
-                .with_options(options)
+            let mut request = ListRequest::new(&config).with_options(options);
+            if let Some(password) = password {
+                request = request.with_password(password);
+            }
+            request
                 .list(&archive_path)
                 .map(|manifest| PyArchiveManifest::new(manifest, &config, volume))
         })
@@ -423,22 +454,26 @@ fn list_archive(
 ///         print(f"[{issue.severity}] {issue.message}")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, config=None, options=None))]
+#[pyo3(signature = (archive_path, config=None, options=None, password=None))]
 fn verify_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyVerificationOptions>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyVerificationReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyVerificationOptions::snapshot(options);
+    let password = password_of(password)?;
 
     let report = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
-            VerifyRequest::new(&config)
-                .with_options(options)
-                .verify(&archive_path)
+            let mut request = VerifyRequest::new(&config).with_options(options);
+            if let Some(password) = password {
+                request = request.with_password(password);
+            }
+            request.verify(&archive_path)
         })
     })?;
 
@@ -692,7 +727,7 @@ fn merge_progress_result<T>(
 /// )
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, output_dir, config=None, options=None, progress=None))]
+#[pyo3(signature = (archive_path, output_dir, config=None, options=None, progress=None, password=None))]
 fn extract_archive_with_progress(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
@@ -700,21 +735,26 @@ fn extract_archive_with_progress(
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyExtractionOptions>>,
     progress: Option<Py<PyAny>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyExtractionReport> {
     let archive_path = path_to_boundary(py, archive_path)?;
     let output_dir = path_to_boundary(py, output_dir)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyExtractionOptions::snapshot(options);
+    let password = password_of(password)?;
 
     let report = run_with_optional_progress(
         py,
         "archive extraction with progress",
         progress,
         |progress| {
-            ExtractRequest::new(&config)
+            let mut request = ExtractRequest::new(&config)
                 .with_options(options)
-                .with_progress(progress)
-                .extract(&archive_path, &output_dir)
+                .with_progress(progress);
+            if let Some(password) = password.clone() {
+                request = request.with_password(password);
+            }
+            request.extract(&archive_path, &output_dir)
         },
         attach_finished_extraction,
     )?;

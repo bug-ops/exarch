@@ -467,7 +467,10 @@ mod tests {
                 Uncompressed(100_000),
             )),
             ArchiveError::unclassified("bad header"),
-            ArchiveError::from(Violation::EncryptedArchive),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None,
+            }),
             ArchiveError::InvalidCompressionLevel {
                 level: crate::RequestedLevel::Integer(0),
             },

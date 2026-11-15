@@ -36,6 +36,8 @@ mod config;
 pub(crate) mod copy;
 mod creation;
 mod destination_state;
+#[cfg(feature = "encryption")]
+mod encryption;
 mod error;
 mod formats;
 mod inspection;
@@ -76,6 +78,7 @@ pub use config::IntegrityCheck;
 pub use config::ListOptions;
 pub use config::ParallelDecode;
 pub use config::PermissionPolicy;
+pub use config::RepeatedPaths;
 pub use config::ReuseLimit;
 pub use config::SecurityConfig;
 pub use config::SolidArchives;
@@ -85,12 +88,17 @@ pub use config::StoredTargets;
 pub use config::VerificationOptions;
 pub use config::ZipConsistencyPolicy;
 pub use destination_state::DestinationState;
+#[cfg(feature = "encryption")]
+pub use encryption::Password;
+#[cfg(feature = "encryption")]
+pub use encryption::PasswordError;
 pub use error::ArchiveError;
 pub use error::CentralRecordOrdinal;
 pub use error::CompressionRatio;
 pub use error::ConfigProblem;
 pub use error::ConfigSetting;
 pub use error::DestinationStep;
+pub use error::EncryptionRefusal;
 pub use error::EndRecordKind;
 pub use error::ErrorCode;
 pub use error::FfiDetail;
@@ -207,6 +215,7 @@ pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use creation::CreationWarning;
 pub use creation::CreationWarningKind;
+pub use creation::Parallelism;
 pub use pattern::EntryPattern;
 pub use writer::ArchiveWriter;
 

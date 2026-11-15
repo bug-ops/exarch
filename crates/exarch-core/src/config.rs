@@ -372,6 +372,45 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// How an archive that names one landing more than once is handled.
+    ///
+    /// Archive formats let a later entry reuse the name of an earlier one, and
+    /// readers disagree on which copy wins ("last wins" in `tar -x`, a
+    /// different rule in other tools). `KeepFirst` is the behaviour of earlier
+    /// releases: the existing-files policy decides every repeat, so the first
+    /// copy stays. `Refuse` removes the parser differential by refusing the
+    /// archive instead, under every
+    /// [`ExistingFiles`](crate::ExistingFiles) mode.
+    ///
+    /// Pair `Refuse` with [`Staging::Atomic`](crate::Staging) to leave nothing
+    /// behind when a repeat is found after the first copy was written.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::RepeatedPaths;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// assert_eq!(
+    ///     SecurityConfig::default().repeated_paths,
+    ///     RepeatedPaths::KeepFirst
+    /// );
+    /// let strict = SecurityConfig::default().with_repeated_paths(RepeatedPaths::Refuse);
+    /// assert_eq!(strict.repeated_paths.as_str(), "refuse");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum RepeatedPaths {
+        /// Keep the first copy; the existing-files policy decides every repeat.
+        #[default]
+        KeepFirst => "keep_first",
+
+        /// Refuse an entry whose landing already holds an occupant the run made.
+        Refuse => "refuse",
+    }
+}
+
 /// Limits applied to a solid 7z archive that is admitted.
 ///
 /// A solid block compresses several files into one stream, so no per-file
@@ -960,6 +999,31 @@ pub struct SecurityConfig {
     /// local headers, or with a central directory signature in a gap before an
     /// entry (left by in-place updaters), are rejected under `Enforce`.
     pub zip_consistency: ZipConsistencyPolicy,
+
+    /// How an archive that names one landing twice is handled.
+    ///
+    /// Default: [`RepeatedPaths::KeepFirst`], including for
+    /// [`SecurityConfig::permissive`]. With [`RepeatedPaths::Refuse`] a later
+    /// entry over an occupant the run made fails with
+    /// `Violation::RepeatedPath` (a directory over a directory is exempt), an
+    /// occupant whose maker cannot be proved fails as an existing occupant,
+    /// and a ZIP name repeat fails before any write whatever
+    /// [`zip_consistency`](Self::zip_consistency) says.
+    pub repeated_paths: RepeatedPaths,
+
+    /// Most SHA-256 rounds of password-based key derivation one operation may
+    /// spend.
+    ///
+    /// Charged at admission, before any encrypted block is decoded, so an
+    /// archive that asks for more work than this is refused as
+    /// `EncryptionRefusal::KdfCostExceeded` without costing the work. ZIP AES
+    /// derivation is a fixed 1000 PBKDF2 iterations per entry and is bounded
+    /// by [`max_file_count`](Self::max_file_count) instead.
+    ///
+    /// Default: 2^27 (134,217,728 rounds), including for
+    /// [`SecurityConfig::permissive`]. Exposed by both bindings, not by the
+    /// CLI.
+    pub max_kdf_work: NonZeroU64,
 }
 
 impl Default for SecurityConfig {
@@ -983,6 +1047,8 @@ impl Default for SecurityConfig {
     /// - `compressed_member_allowance`: 10,000
     /// - `parallel_decode`: `Bounded` at 128 MiB
     /// - `zip_consistency`: `Enforce`
+    /// - `repeated_paths`: `KeepFirst`
+    /// - `max_kdf_work`: 2^27
     fn default() -> Self {
         Self {
             max_file_size: Limit::Bounded(non_zero!(50 * 1024 * 1024)), // 50 MB
@@ -1001,9 +1067,14 @@ impl Default for SecurityConfig {
             compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
+            repeated_paths: RepeatedPaths::KeepFirst,
+            max_kdf_work: DEFAULT_MAX_KDF_WORK,
         }
     }
 }
+
+/// Default of [`SecurityConfig::max_kdf_work`]: 2^27 SHA-256 rounds.
+const DEFAULT_MAX_KDF_WORK: NonZeroU64 = non_zero!(1 << 27);
 
 /// Lookahead memory of [`SecurityConfig::permissive`]: 1 GiB.
 const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero!(1024 * 1024 * 1024);
@@ -1581,6 +1652,41 @@ impl SecurityConfig {
     #[inline]
     pub fn with_zip_consistency(mut self, policy: ZipConsistencyPolicy) -> Self {
         self.zip_consistency = policy;
+        self
+    }
+
+    /// Sets the most SHA-256 rounds of key derivation one operation may spend.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_kdf_work(exarch_core::non_zero!(1 << 20));
+    /// assert_eq!(config.max_kdf_work.get(), 1 << 20);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_kdf_work(mut self, rounds: NonZeroU64) -> Self {
+        self.max_kdf_work = rounds;
+        self
+    }
+
+    /// Sets how an archive that names one landing twice is handled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::RepeatedPaths;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_repeated_paths(RepeatedPaths::Refuse);
+    /// assert_eq!(config.repeated_paths, RepeatedPaths::Refuse);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_repeated_paths(mut self, policy: RepeatedPaths) -> Self {
+        self.repeated_paths = policy;
         self
     }
 }
@@ -2573,6 +2679,24 @@ mod tests {
         };
         assert_eq!(bytes(SecurityConfig::default()), 128 * 1024 * 1024);
         assert_eq!(bytes(SecurityConfig::permissive()), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_max_kdf_work_defaults_to_two_to_the_27th() {
+        assert_eq!(SecurityConfig::default().max_kdf_work.get(), 1 << 27);
+        assert_eq!(SecurityConfig::permissive().max_kdf_work.get(), 1 << 27);
+    }
+
+    #[test]
+    fn test_repeated_paths_defaults_to_keep_first() {
+        assert_eq!(
+            SecurityConfig::default().repeated_paths,
+            RepeatedPaths::KeepFirst
+        );
+        assert_eq!(
+            SecurityConfig::permissive().repeated_paths,
+            RepeatedPaths::KeepFirst
+        );
     }
 
     #[test]

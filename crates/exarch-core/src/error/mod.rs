@@ -64,6 +64,7 @@ pub use types::SolidMemoryScope;
 pub use types::ZipBombDetails;
 pub use types::ZipBombScope;
 pub(crate) use types::occupied_text;
+pub use violation::EncryptionRefusal;
 pub use violation::KindSource;
 pub use violation::NativeKind;
 pub use violation::PortableHazard;

@@ -17,8 +17,12 @@ use crate::operation::Flag;
 use crate::operation::Operation;
 use crate::output::OutputFormatter;
 use crate::output::OutputMode;
+use crate::password;
 use crate::progress::BarLength;
 use crate::progress::progress_for;
+use crate::sandbox;
+use crate::sandbox::Grant;
+use crate::sandbox::Scope;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveError;
@@ -44,6 +48,7 @@ use exarch_core::ListedExtractOptions;
 use exarch_core::MarkPropagation;
 use exarch_core::OccupiedPath;
 use exarch_core::OccupiedPaths;
+use exarch_core::Password;
 use exarch_core::PathComponentName;
 use exarch_core::PathOccupant;
 use exarch_core::ProgressCallback;
@@ -55,6 +60,7 @@ use exarch_core::detect_format;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Parses the `--allowed-extensions` items into [`Extension`]s: blank items
 /// are dropped and the rest are parsed by the core constructor.
@@ -146,12 +152,17 @@ fn list_for_extract(
     archive: &Path,
     config: &SecurityConfig,
     reuse: DecodeReuse,
+    password: Option<Arc<Password>>,
     watcher: &mut dyn ProgressCallback,
 ) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    ListRequest::new(config)
+    let mut request = ListRequest::new(config)
         .with_options(options)
-        .with_progress(watcher)
+        .with_progress(watcher);
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    request
         .for_extraction(archive, reuse)
         .map_err(|err| convert_error(Operation::Extract, err, archive))
 }
@@ -356,18 +367,25 @@ impl ExtractPlan {
         archive: &Path,
         output_dir: &Path,
         config: &SecurityConfig,
+        password: Option<Arc<Password>>,
         progress: &mut dyn ProgressCallback,
         advice: &ConflictAdvice,
     ) -> Result<ExtractionReport> {
         let result = match self {
-            Self::Stream { options, staging } => ExtractRequest::new(config)
-                .with_options(options)
-                .with_progress(progress)
-                .extract(archive, output_dir)
-                .map_err(|err| match staging {
-                    Requested::InPlace => as_unstaged(err),
-                    Requested::Staged => err,
-                }),
+            Self::Stream { options, staging } => {
+                let mut request = ExtractRequest::new(config)
+                    .with_options(options)
+                    .with_progress(progress);
+                if let Some(password) = password {
+                    request = request.with_password(password);
+                }
+                request
+                    .extract(archive, output_dir)
+                    .map_err(|err| match staging {
+                        Requested::InPlace => as_unstaged(err),
+                        Requested::Staged => err,
+                    })
+            }
             Self::Listed { listed, options } => (*listed).extract(output_dir, &options, progress),
         };
         result.map_err(|err| convert_error_with_advice(Operation::Extract, err, archive, advice))
@@ -379,6 +397,7 @@ fn plan_extraction(
     mode: WriteMode,
     output_dir: &Path,
     config: &SecurityConfig,
+    password: Option<Arc<Password>>,
     guard: &InterruptGuard,
 ) -> Result<ExtractPlan> {
     let reuse = DecodeReuseArg::resolve(args.decode_reuse);
@@ -407,7 +426,7 @@ fn plan_extraction(
         });
     }
 
-    let listed = list_for_extract(&args.archive, config, reuse, &mut guard.watcher())?;
+    let listed = list_for_extract(&args.archive, config, reuse, password, &mut guard.watcher())?;
     mode.check_destination(&listed, output_dir, &args.archive)?;
     Ok(ExtractPlan::Listed {
         listed: Box::new(listed),
@@ -435,7 +454,6 @@ pub fn execute(
     };
 
     let write_mode = WriteMode::of(args);
-    let guard = interrupt::install(&output_dir, write_mode.run(), mode);
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions)?;
 
@@ -449,8 +467,29 @@ pub fn execute(
         None => base,
     };
     let config = security_config(args, base)?;
+    let password = password::read(args.password.source().as_ref())?;
+    // The status reaches the output formatters with the Landlock backend.
+    let _sandbox = sandbox::confine(
+        args.sandbox.mode,
+        &Grant {
+            archive: &args.archive,
+            scope: Scope::Extract {
+                destination: &output_dir,
+                atomic: args.atomic,
+            },
+        },
+    )
+    .map_err(anyhow::Error::new)?;
 
-    let plan = plan_extraction(args, write_mode, &output_dir, &config, &guard)?;
+    let guard = interrupt::install(&output_dir, write_mode.run(), mode);
+    let plan = plan_extraction(
+        args,
+        write_mode,
+        &output_dir,
+        &config,
+        password.clone(),
+        &guard,
+    )?;
     let length = plan.manifest().map_or(BarLength::Discover, |manifest| {
         BarLength::Known(listed_entry_count(manifest, &config))
     });
@@ -459,6 +498,7 @@ pub fn execute(
         &args.archive,
         &output_dir,
         &config,
+        password,
         progress.as_mut(),
         &write_mode.write_advice(),
     );

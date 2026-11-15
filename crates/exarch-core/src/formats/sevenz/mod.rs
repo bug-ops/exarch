@@ -134,6 +134,7 @@
 //! ```
 
 use super::common;
+use super::occupant::OccupantPolicy;
 use super::output_root::OutputRoot;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
@@ -287,9 +288,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let config = Arc::clone(&self.config);
-        let output = output
-            .into()
-            .with_record_budget(options.existing_files.record_budget());
+        let output = output.into().with_record_budget(
+            OccupantPolicy::new(options.existing_files, config.repeated_paths).record_budget(),
+        );
         self.admit(&config)?.extract_with(
             |config| SevenZHostTarget::create(output, config),
             SinkOptions::existing_files_of(options),

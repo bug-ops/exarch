@@ -11,6 +11,10 @@ use crate::output::Dispositions;
 use crate::output::ManifestView;
 use crate::output::OutputFormatter;
 use crate::output::SizeUnits;
+use crate::password;
+use crate::sandbox;
+use crate::sandbox::Grant;
+use crate::sandbox::Scope;
 use exarch_core::EntrySelection;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
@@ -52,6 +56,16 @@ fn destination_volume(
 /// The core failure of the listing, or the CLI's own refusal of a flag value.
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
+    let password = password::read(args.password.source().as_ref())?;
+    // The status reaches the output formatters with the Landlock backend.
+    let _sandbox = sandbox::confine(
+        args.sandbox.mode,
+        &Grant {
+            archive: &args.archive,
+            scope: Scope::ReadOnly,
+        },
+    )
+    .map_err(anyhow::Error::new)?;
 
     let volume = destination_volume(
         args.destination.as_deref(),
@@ -67,9 +81,11 @@ pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandR
     let options = ListOptions::default().with_stored_targets(stored_targets);
 
     // List archive
-    let manifest = ListRequest::new(&config)
-        .with_options(options)
-        .list(&args.archive)?;
+    let mut request = ListRequest::new(&config).with_options(options);
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    let manifest = request.list(&args.archive)?;
 
     // Format output
     let dispositions = Dispositions::of(&manifest, &config, volume);

@@ -42,6 +42,7 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_RepeatedPaths = Literal["keep_first", "refuse"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
 _Staging = Literal["in_place", "atomic", "atomic_replace"]
@@ -121,7 +122,7 @@ _QuotaSubCode = Literal[
     "HEADER_ENTRY_COUNT",
 ]
 _ZipBombSubCode = Literal["ENTRY", "SOLID_BLOCK", "SKIPPED_ENTRIES"]
-_SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
+_SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH", "REPEATED_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
@@ -171,6 +172,7 @@ _ConfigSetting = Literal[
     "max_solid_block_memory",
     "max_tar_metadata_bytes",
     "max_decoder_memory",
+    "max_kdf_work",
     "compressed_member_allowance",
     "decompression_budget",
     "allowed_extension",
@@ -185,6 +187,7 @@ _ConfigSetting = Literal[
     "parallel_decode_memory",
     "exclude_pattern",
     "zip_consistency",
+    "repeated_paths",
     "path_model",
     "archive_format",
     "decode_reuse",
@@ -200,7 +203,7 @@ _ConfigSetting = Literal[
     "stored_targets",
     "mark_propagation",
 ]
-_PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
+_PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes", "repeated_paths"]  # noqa: E501  # fmt: skip
 
 @final
 class SecurityConfig:
@@ -340,6 +343,28 @@ class SecurityConfig:
         local and central headers disagree, that repeat a name, overlap entries or hide
         records. ``"ignore"`` keeps the central directory interpretation without
         structural findings. Raises ``ValueError`` for any other string.
+        """
+        ...
+
+    def with_max_kdf_work(self, rounds: int) -> SecurityConfig:
+        """
+        Sets the most SHA-256 rounds of key derivation one operation may spend
+        (default: 2**27).
+
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
+        its ``setting`` attribute is ``"max_kdf_work"``.
+        """
+        ...
+
+    def with_repeated_paths(self, policy: _RepeatedPaths) -> SecurityConfig:
+        """
+        Sets how an archive that names one landing twice is handled.
+
+        ``"keep_first"`` (the default, also for ``permissive()``) keeps the first copy
+        and lets the existing-files policy decide every repeat. ``"refuse"`` rejects the
+        archive instead, under every existing-files mode; combine it with
+        ``staging="atomic"`` to leave nothing behind. Raises ``ValueError`` for any
+        other string.
         """
         ...
 
@@ -621,6 +646,20 @@ class SecurityConfig:
 
     @zip_consistency.setter
     def zip_consistency(self, value: _ZipConsistency) -> None: ...
+    @property
+    def max_kdf_work(self) -> int:
+        """Most SHA-256 rounds of key derivation one operation may spend (default: 2**27)."""
+        ...
+
+    @max_kdf_work.setter
+    def max_kdf_work(self, value: int) -> None: ...
+    @property
+    def repeated_paths(self) -> _RepeatedPaths:
+        """How an archive that names one landing twice is handled (default: ``"keep_first"``)."""
+        ...
+
+    @repeated_paths.setter
+    def repeated_paths(self, value: _RepeatedPaths) -> None: ...
     @property
     def allow_solid_archives(self) -> bool:
         """Whether solid 7z archives are allowed (default: False)."""
@@ -1777,6 +1816,7 @@ def extract_archive(
     output_dir: str | Path,
     config: SecurityConfig | None = None,
     options: ExtractionOptions | None = None,
+    password: bytearray | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory.
@@ -1836,6 +1876,7 @@ def extract_archive_with_progress(
     config: SecurityConfig | None = None,
     options: ExtractionOptions | None = None,
     progress: ProgressCallbackFn | None = None,
+    password: bytearray | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory with progress reporting.
@@ -2001,6 +2042,7 @@ def list_archive(
     config: SecurityConfig | None = None,
     options: ListOptions | None = None,
     destination: str | Path | None = None,
+    password: bytearray | None = None,
 ) -> ArchiveManifest:
     """
     List archive contents without extracting.
@@ -2028,6 +2070,7 @@ def verify_archive(
     archive_path: str | Path,
     config: SecurityConfig | None = None,
     options: VerificationOptions | None = None,
+    password: bytearray | None = None,
 ) -> VerificationReport:
     """
     Verify archive security, optionally checking payload integrity.

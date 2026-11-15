@@ -1680,7 +1680,10 @@ mod tests {
 
     #[test]
     fn test_verification_issue_security_policy_category() {
-        let error = exarch_core::ArchiveError::from(exarch_core::Violation::EncryptedArchive);
+        let error = exarch_core::ArchiveError::from(exarch_core::Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(
@@ -1770,6 +1773,7 @@ mod tests {
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
         use exarch_core::PolicySetting;
+        use exarch_core::RepeatedPaths;
         use exarch_core::SecurityViolationSubCode;
         use exarch_core::SkipKind;
         use exarch_core::SubCode;
@@ -1808,6 +1812,7 @@ mod tests {
                 ZipConsistencyPolicy::ALL,
                 ZipConsistencyPolicy::as_str,
             ),
+            literal_line("_RepeatedPaths", RepeatedPaths::ALL, RepeatedPaths::as_str),
             literal_line("_PartialWrites", PartialWrites::ALL, PartialWrites::as_str),
             literal_line("_PolicySetting", PolicySetting::ALL, PolicySetting::as_str),
             literal_line(

@@ -116,6 +116,7 @@ module.exports.StoredTargets = addon.StoredTargets;
 module.exports.DecodeReuseKind = addon.DecodeReuseKind;
 module.exports.MarkPropagation = addon.MarkPropagation;
 module.exports.ZipConsistencyPolicy = addon.ZipConsistencyPolicy;
+module.exports.RepeatedPaths = addon.RepeatedPaths;
 module.exports.VerificationOptions = addon.VerificationOptions;
 module.exports.ListOptions = addon.ListOptions;
 module.exports.CreationConfig = addon.CreationConfig;

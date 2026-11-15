@@ -226,7 +226,11 @@ pub(crate) fn normalize_entry_name(name: &str) -> String {
 /// 7z (open, list and extract paths) report encryption identically.
 #[must_use]
 pub(crate) fn encrypted_archive_error() -> ArchiveError {
-    Violation::EncryptedArchive.into()
+    Violation::Encrypted {
+        reason: crate::EncryptionRefusal::PasswordRequired,
+        name: None,
+    }
+    .into()
 }
 
 /// Adds `n` to a byte counter.

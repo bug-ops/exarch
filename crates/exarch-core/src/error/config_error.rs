@@ -47,6 +47,8 @@ closed_enum! {
         MaxTarMetadataBytes => "max_tar_metadata_bytes",
         /// `SecurityConfig::max_decoder_memory`.
         MaxDecoderMemory => "max_decoder_memory",
+        /// `SecurityConfig::max_kdf_work`.
+        MaxKdfWork => "max_kdf_work",
         /// `SecurityConfig::compressed_member_allowance`.
         CompressedMemberAllowance => "compressed_member_allowance",
         /// The decompression budget of an integrity check.
@@ -77,6 +79,8 @@ closed_enum! {
         ExcludePattern => "exclude_pattern",
         /// The ZIP structure policy.
         ZipConsistency => "zip_consistency",
+        /// The repeated-landing policy of an extraction.
+        RepeatedPaths => "repeated_paths",
         /// The path model of a sink extraction.
         PathModel => "path_model",
         /// The archive format of an extraction or listing.
@@ -145,6 +149,7 @@ impl ConfigSetting {
             Self::ParallelDecodeMemory => "parallel decode memory",
             Self::ExcludePattern => "exclude pattern",
             Self::ZipConsistency => "zip consistency",
+            Self::RepeatedPaths => "repeated paths",
             Self::PathModel => "path model",
             Self::ArchiveFormat => "archive format",
             Self::DecodeReuse => "decode reuse",
@@ -167,6 +172,7 @@ impl ConfigSetting {
             | Self::MaxSolidBlockMemory
             | Self::MaxTarMetadataBytes
             | Self::MaxDecoderMemory
+            | Self::MaxKdfWork
             | Self::CompressedMemberAllowance
             | Self::StripPrefix
             | Self::Durability

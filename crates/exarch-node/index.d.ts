@@ -1002,6 +1002,17 @@ export declare class SecurityConfig {
    */
   withMaxDecoderMemory(size: number): this
   /**
+   * Sets the most SHA-256 rounds of key derivation one operation may spend.
+   *
+   * Default: 2^27.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_kdf_work`) if `rounds`
+   * is not a positive whole number.
+   */
+  withMaxKdfWork(rounds: number): this
+  /**
    * Sets the base number of gzip members or bzip2 streams a compressed TAR
    * may hold; every 16 KiB of decoded output adds one more.
    *
@@ -1029,6 +1040,8 @@ export declare class SecurityConfig {
   withMaxSolidCompressionRatio(ratio: number): this
   /** Sets how ZIP archives with ambiguous structure are handled. */
   withZipConsistency(policy: ZipConsistencyPolicy): this
+  /** Sets how an archive that names one landing twice is handled. */
+  withRepeatedPaths(policy: RepeatedPaths): this
   /**
    * Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
    * block ahead on worker threads, or `null` to decode on one thread.
@@ -1233,6 +1246,11 @@ export declare class SecurityConfig {
    */
   get zipConsistency(): ZipConsistencyPolicy | (string & {})
   /**
+   * How an archive that names one landing twice is handled. A policy newer
+   * than this binding is reported as core's token.
+   */
+  get repeatedPaths(): RepeatedPaths | (string & {})
+  /**
    * Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
    * `null` when decoding runs on one thread.
    */
@@ -1248,6 +1266,8 @@ export declare class SecurityConfig {
   get maxTarMetadataBytes(): number
   /** Memory in bytes a decoder may use for its dictionary or window. */
   get maxDecoderMemory(): number
+  /** Most SHA-256 rounds of key derivation one operation may spend. */
+  get maxKdfWork(): number
   /**
    * Base number of gzip members or bzip2 streams a compressed TAR may
    * hold.
@@ -1459,7 +1479,7 @@ export type BackupIdentity = 'verified' | 'unverified'
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'max_kdf_work' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'repeated_paths' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -1910,7 +1930,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
-export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): Promise<ExtractionReport>
+export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Buffer | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive to the specified directory (sync).
@@ -1945,7 +1965,7 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
  * ```
  */
-export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): ExtractionReport
+export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Buffer | undefined | null): ExtractionReport
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -2290,7 +2310,7 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Buffer | undefined | null): Promise<ExtractionReport>
 
 /** An entry that extraction writes. */
 export interface ExtractDisposition {
@@ -2431,7 +2451,7 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * }
  * ```
  */
-export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): Promise<ArchiveManifest>
+export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Buffer | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (async).
@@ -2606,7 +2626,7 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * }
  * ```
  */
-export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null): ArchiveManifest
+export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Buffer | undefined | null): ArchiveManifest
 
 /** A directory in a listing. */
 export interface ManifestDirectoryEntry {
@@ -2851,7 +2871,7 @@ export type PathModel = 'host' | 'portable'
  * Value of the `relaxableBy` property: the `SecurityConfig` setting whose
  * current value refused the entry.
  */
-export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
+export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes' | 'repeated_paths'
 
 /**
  * What makes a destination too important to replace as a whole (the
@@ -2864,6 +2884,16 @@ export type ProtectedPath = 'filesystem_root' | 'archive_ancestor' | 'working_di
  * that was exceeded.
  */
 export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY' | 'HEADER_SIZE' | 'HEADER_ENTRY_COUNT'
+
+/**
+ * How an archive that names one landing twice is handled.
+ *
+ * `keep_first` (the default, also for `SecurityConfig.permissive()`) keeps the
+ * first copy and lets the existing-files policy decide every repeat. `refuse`
+ * rejects the archive instead, under every existing-files mode; combine it
+ * with `staging: 'atomic'` to leave nothing behind.
+ */
+export type RepeatedPaths = 'keep_first' | 'refuse'
 
 /** A link target the archive stores. */
 export interface RecordedLinkTarget {
@@ -2901,7 +2931,7 @@ export interface RootAccessNarrowedWarning {
 }
 
 /** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
-export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH'
+export type SecurityViolationSubCode = 'PATH_NAME' | 'PATH_DEPTH' | 'LINK_TARGET' | 'LINK_POLICY' | 'EXISTING_SYMLINK' | 'ENTRY_TYPE' | 'ROOT_ENTRY' | 'ENCRYPTED' | 'COMPRESSION_METHOD' | 'SOLID_ARCHIVE' | 'DECLARED_SIZE' | 'CONCURRENT_CHANGE' | 'TAR_METADATA' | 'TAR_TRAILER' | 'PLATFORM' | 'OUTPUT_CONFLICT' | 'SOURCE_PATH' | 'REPEATED_PATH'
 
 /** How many entries were skipped for one reason. */
 export interface SkipCount {
@@ -3183,7 +3213,7 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * }
  * ```
  */
-export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): Promise<VerificationReport>
+export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Buffer | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (async).
@@ -3349,7 +3379,7 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * }
  * ```
  */
-export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport
+export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Buffer | undefined | null): VerificationReport
 
 /**
  * Value of the `subCode` property of a `ZIP_BOMB` error: what the refused

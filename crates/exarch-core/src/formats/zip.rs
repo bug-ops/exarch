@@ -149,6 +149,7 @@ use crate::types::safe_path::stream_separator_error;
 use super::common;
 use super::common::EntryCompleteGuard;
 use super::io_marker::IoMarker as _;
+use super::occupant::OccupantPolicy;
 use super::output_root::OutputRoot;
 use super::source_fault::DeclaredSizeCeiling;
 use super::source_fault::ReadFamily;
@@ -747,7 +748,11 @@ impl<R: Read + Seek> ZipArchive<R> {
             let name = zip_file
                 .name()
                 .map_or_else(|_| format!("<entry {index}>"), std::borrow::Cow::into_owned);
-            return Err(Violation::EncryptedEntry { name: name.into() }.into());
+            return Err(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: Some(name.into()),
+            }
+            .into());
         }
 
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
@@ -927,9 +932,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let output = output
-            .into()
-            .with_record_budget(options.existing_files.record_budget());
+        let output = output.into().with_record_budget(
+            OccupantPolicy::new(options.existing_files, config.repeated_paths).record_budget(),
+        );
         self.check_structure(config)?.extract_with(
             |config| HostTarget::create(output, config),
             SinkOptions::existing_files_of(options),

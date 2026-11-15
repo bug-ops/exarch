@@ -682,7 +682,10 @@ mod tests {
         assert_eq!(relaxable["error"]["relaxable_by"], "symlinks");
         assert_eq!(relaxable["error"]["sub_code"], "LINK_POLICY");
 
-        let fixed = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let fixed = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(fixed["error"].get("relaxable_by").is_none());
         assert_eq!(fixed["error"]["sub_code"], "ENCRYPTED");
     }
@@ -695,7 +698,10 @@ mod tests {
         assert_eq!(denied["error"]["kind"], "IoError");
         assert_eq!(denied["error"]["io_kind"], "PermissionDenied");
 
-        let other = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let other = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(other["error"].get("io_kind").is_none());
     }
 
@@ -739,7 +745,10 @@ mod tests {
         assert_eq!(v["error"]["leftover_path"], "out/.exarch-AbC123");
         assert_eq!(v["error"]["partial_report"]["writes"], "rolled_back");
 
-        let clean = envelope_for(&ArchiveError::from(Violation::EncryptedArchive));
+        let clean = envelope_for(&ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        }));
         assert!(clean["error"].get("leftover_path").is_none());
     }
 
@@ -811,7 +820,10 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_security_violation() {
-        let err = ArchiveError::from(Violation::EncryptedArchive);
+        let err = ArchiveError::from(Violation::Encrypted {
+            reason: exarch_core::EncryptionRefusal::PasswordRequired,
+            name: None,
+        });
         assert_eq!(error_kind(&err), "SecurityViolation");
     }
 

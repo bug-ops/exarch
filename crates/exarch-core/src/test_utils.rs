@@ -429,10 +429,10 @@ mod tests {
     #[test]
     #[ignore = "generates fuzz seeds on demand; not part of the default test run"]
     fn dump_fuzz_seeds() {
-        let seeds = std::path::PathBuf::from(
-            std::env::var_os("EXARCH_FUZZ_SEEDS_DIR")
-                .expect("set EXARCH_FUZZ_SEEDS_DIR to the directory that receives the seeds"),
-        );
+        let Some(dir) = std::env::var_os("EXARCH_FUZZ_SEEDS_DIR") else {
+            panic!("set EXARCH_FUZZ_SEEDS_DIR to the directory that receives the seeds");
+        };
+        let seeds = std::path::PathBuf::from(dir);
 
         let write_seed = |target: &str, name: &str, data: &[u8]| {
             let dir = seeds.join(target);

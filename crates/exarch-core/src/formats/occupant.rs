@@ -18,12 +18,41 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::ExistingFiles;
 use crate::OccupiedBy;
+use crate::RepeatedPaths;
 use crate::Result;
 use crate::Violation;
 use crate::formats::pinned_dir::PinnedRoot;
+use crate::formats::run_record::RecordBudget;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::normalized_display;
 use crate::selection::EntryShape;
+
+/// The two policies that decide an occupied landing, taken together.
+///
+/// The run record must outlive the existing-files policy alone: refusing a
+/// repeat needs to know what the run made, so an opt-in
+/// [`RepeatedPaths::Refuse`] keeps the full record under every
+/// [`ExistingFiles`] mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OccupantPolicy {
+    existing: ExistingFiles,
+    repeats: RepeatedPaths,
+}
+
+impl OccupantPolicy {
+    /// The product of `existing` and `repeats`.
+    pub(crate) const fn new(existing: ExistingFiles, repeats: RepeatedPaths) -> Self {
+        Self { existing, repeats }
+    }
+
+    /// The budget of the record of an in-place run under this policy.
+    pub(crate) const fn record_budget(self) -> RecordBudget {
+        match self.repeats {
+            RepeatedPaths::Refuse => RecordBudget::Full,
+            RepeatedPaths::KeepFirst => self.existing.record_budget(),
+        }
+    }
+}
 
 /// Where an occupied-path refusal is raised: on a host destination, which the
 /// refusal names, or with none (the in-memory sink and the `list` model).
@@ -306,6 +335,7 @@ mod tests {
 
     use super::KeptOccupant;
     use super::OccupantAction;
+    use super::OccupantPolicy;
     use super::ReplacePermit;
     use super::is_run_duplicate;
     use super::kept_occupant_refusal;
@@ -313,9 +343,31 @@ mod tests {
     use crate::ArchiveError;
     use crate::ExistingFiles;
     use crate::OccupiedBy;
+    use crate::RepeatedPaths;
+    use crate::formats::run_record::RecordBudget;
     use crate::security::fs_view::LinkKind;
     use crate::security::fs_view::Occupant;
     use crate::selection::EntryShape;
+
+    #[test]
+    fn refuse_repeats_keep_the_full_record_under_every_existing_files_mode() {
+        for existing in [
+            ExistingFiles::Skip,
+            ExistingFiles::Refuse,
+            ExistingFiles::Overwrite,
+        ] {
+            assert_eq!(
+                OccupantPolicy::new(existing, RepeatedPaths::Refuse).record_budget(),
+                RecordBudget::Full,
+                "{existing:?}"
+            );
+            assert_eq!(
+                OccupantPolicy::new(existing, RepeatedPaths::KeepFirst).record_budget(),
+                existing.record_budget(),
+                "{existing:?}"
+            );
+        }
+    }
 
     use super::OccupiedSite;
 

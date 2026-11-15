@@ -7,6 +7,7 @@ use crate::Result;
 use crate::error::RequestedLevel;
 use crate::pattern::EntryPattern;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 /// A compression level on exarch's 1-9 scale; the default is 6.
@@ -182,6 +183,39 @@ impl CompressionLevel {
     }
 }
 
+/// How many threads compress ZIP entries while an archive is created.
+///
+/// The bytes of the archive do not depend on this value: a ZIP is the same for
+/// [`Sequential`](Self::Sequential) and every thread count. Formats other than
+/// ZIP, and targets without threads, ignore it. A count above the threads the
+/// host offers is clamped to them.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use exarch_core::CreationConfig;
+/// use exarch_core::Parallelism;
+///
+/// assert_eq!(
+///     CreationConfig::default().parallelism,
+///     Parallelism::Sequential
+/// );
+/// let four = Parallelism::Threads(NonZeroUsize::new(4).unwrap());
+/// let config = CreationConfig::default().with_parallelism(four);
+/// assert_eq!(config.parallelism, four);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Parallelism {
+    /// Compress every entry on the calling thread.
+    #[default]
+    Sequential,
+    /// Compress ZIP entries on up to this many worker threads.
+    Threads(NonZeroUsize),
+}
+
 /// Configuration for archive creation operations.
 ///
 /// Controls how archives are created from filesystem sources, including
@@ -267,6 +301,11 @@ pub struct CreationConfig {
     ///
     /// Default: [`PermissionPolicy::Preserve`].
     pub permissions: PermissionPolicy,
+
+    /// Threads that compress ZIP entries.
+    ///
+    /// Default: [`Parallelism::Sequential`].
+    pub parallelism: Parallelism,
 }
 
 impl Default for CreationConfig {
@@ -280,6 +319,7 @@ impl Default for CreationConfig {
     /// - `strip_prefix`: `None`
     /// - `compression_level`: 6
     /// - `permissions`: [`PermissionPolicy::Preserve`]
+    /// - `parallelism`: [`Parallelism::Sequential`]
     fn default() -> Self {
         Self {
             follow_symlinks: false,
@@ -293,6 +333,7 @@ impl Default for CreationConfig {
             strip_prefix: None,
             compression_level: CompressionLevel::default(),
             permissions: PermissionPolicy::Preserve,
+            parallelism: Parallelism::Sequential,
         }
     }
 }
@@ -317,6 +358,23 @@ impl CreationConfig {
     #[must_use]
     pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
         self.follow_symlinks = follow;
+        self
+    }
+
+    /// Sets the threads that compress ZIP entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CreationConfig;
+    /// use exarch_core::Parallelism;
+    ///
+    /// let config = CreationConfig::default().with_parallelism(Parallelism::Sequential);
+    /// assert_eq!(config.parallelism, Parallelism::Sequential);
+    /// ```
+    #[must_use]
+    pub fn with_parallelism(mut self, parallelism: Parallelism) -> Self {
+        self.parallelism = parallelism;
         self
     }
 

@@ -45,6 +45,8 @@
     reason = "napi passes JavaScript arguments by value and cannot take them by reference"
 )]
 
+use std::sync::Arc;
+
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -229,20 +231,48 @@ pub fn extract_archive<'env>(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
+    password: Option<Buffer>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     // Owned copies: the work outlives this call on the blocking pool.
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
         options.map_or_default(|o| o.as_core().clone());
+    let password = password_of(password)?;
 
     // NOTE: another process can modify the archive file while it is read;
     // sync and async calls are equally exposed (see the TOCTOU notes above).
     spawn_blocking_promise(
         env,
         "archive extraction",
-        move || extract_core(&archive_path, &output_dir, &config_owned, &options_owned),
+        move || {
+            extract_core(
+                &archive_path,
+                &output_dir,
+                &config_owned,
+                &options_owned,
+                password,
+            )
+        },
         |report| Ok(ExtractionReport::from(report)),
     )
+}
+
+/// Copies a JavaScript `Buffer` password into core's zeroizing `Password`.
+///
+/// The caller wipes its own buffer (`buf.fill(0)`); only a `Buffer` is
+/// accepted, so a string is refused by napi's argument conversion.
+///
+/// # Errors
+///
+/// `InvalidArg` if the password is empty or longer than 1024 bytes.
+fn password_of(password: Option<Buffer>) -> Result<Option<Arc<exarch_core::Password>>> {
+    password
+        .map(|buffer| {
+            exarch_core::Password::new(buffer.to_vec())
+                .map(Arc::new)
+                .map_err(|error| napi::Error::new(napi::Status::InvalidArg, error.to_string()))
+        })
+        .transpose()
 }
 
 /// Validates the boundary paths, then extracts.
@@ -255,12 +285,15 @@ fn extract_core(
     output_dir: &str,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<exarch_core::ExtractionReport> {
     let archive_path = boundary_path(archive_path)?;
     let output_dir = boundary_path(output_dir)?;
-    Ok(exarch_core::ExtractRequest::new(config)
-        .with_options(options.clone())
-        .extract(&archive_path, &output_dir)?)
+    let mut request = exarch_core::ExtractRequest::new(config).with_options(options.clone());
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    Ok(request.extract(&archive_path, &output_dir)?)
 }
 
 /// Extract an archive to the specified directory (sync).
@@ -301,7 +334,9 @@ pub fn extract_archive_sync(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
+    password: Option<Buffer>,
 ) -> Result<ExtractionReport> {
+    let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
@@ -310,7 +345,13 @@ pub fn extract_archive_sync(
 
     // CRITICAL: Never panic across FFI boundary
     run_sync(env, "archive extraction", || {
-        extract_core(&archive_path, &output_dir, config_ref, options_ref)
+        extract_core(
+            &archive_path,
+            &output_dir,
+            config_ref,
+            options_ref,
+            password,
+        )
     })
     .map(ExtractionReport::from)
 }
@@ -745,9 +786,11 @@ pub fn list_archive<'env>(
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
     destination: Option<String>,
+    password: Option<Buffer>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
+    let password = password_of(password)?;
 
     spawn_blocking_promise(
         env,
@@ -758,6 +801,7 @@ pub fn list_archive<'env>(
                 &config_owned,
                 options,
                 destination.as_deref(),
+                password,
             )
         },
         Ok,
@@ -769,17 +813,16 @@ fn list_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::ListOptions,
     destination: Option<&str>,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<ArchiveManifest> {
     let archive_path = boundary_path(archive_path)?;
     let destination = destination.map(boundary_path).transpose()?;
     let volume = exarch_core::VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
-    ArchiveManifest::from_core(
-        exarch_core::ListRequest::new(config)
-            .with_options(options)
-            .list(&archive_path)?,
-        config,
-        volume,
-    )
+    let mut request = exarch_core::ListRequest::new(config).with_options(options);
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    ArchiveManifest::from_core(request.list(&archive_path)?, config, volume)
 }
 
 /// List archive contents without extracting (sync).
@@ -818,13 +861,21 @@ pub fn list_archive_sync(
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
     destination: Option<String>,
+    password: Option<Buffer>,
 ) -> Result<ArchiveManifest> {
+    let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.map_or_default(ListOptions::to_core);
 
     run_sync(env, "archive listing", || {
-        list_core(&archive_path, config_ref, options, destination.as_deref())
+        list_core(
+            &archive_path,
+            config_ref,
+            options,
+            destination.as_deref(),
+            password,
+        )
     })
 }
 
@@ -867,14 +918,16 @@ pub fn verify_archive<'env>(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
+    password: Option<Buffer>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
+    let password = password_of(password)?;
 
     spawn_blocking_promise(
         env,
         "archive verification",
-        move || verify_core(&archive_path, &config_owned, options_owned),
+        move || verify_core(&archive_path, &config_owned, options_owned, password),
         Ok,
     )
 }
@@ -883,13 +936,14 @@ fn verify_core(
     archive_path: &str,
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<VerificationReport> {
     let archive_path = boundary_path(archive_path)?;
-    Ok(VerificationReport::from(
-        exarch_core::VerifyRequest::new(config)
-            .with_options(options)
-            .verify(&archive_path)?,
-    ))
+    let mut request = exarch_core::VerifyRequest::new(config).with_options(options);
+    if let Some(password) = password {
+        request = request.with_password(password);
+    }
+    Ok(VerificationReport::from(request.verify(&archive_path)?))
 }
 
 /// Verify archive security (sync).
@@ -926,14 +980,16 @@ pub fn verify_archive_sync(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
+    password: Option<Buffer>,
 ) -> Result<VerificationReport> {
+    let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     run_sync(env, "archive verification", || {
-        verify_core(&archive_path, config_ref, *options_ref)
+        verify_core(&archive_path, config_ref, *options_ref, password)
     })
 }
 
@@ -1040,11 +1096,13 @@ pub fn extract_archive_with_progress<'env>(
     options: Option<&ExtractionOptions>,
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
+    password: Option<Buffer>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
         options.map_or_default(|o| o.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+    let password = password_of(password)?;
 
     spawn_blocking_promise(
         env,
@@ -1058,10 +1116,13 @@ pub fn extract_archive_with_progress<'env>(
                 ProgressDispatch::Awaited,
                 AbortHandle::NONE,
                 |progress| {
-                    Ok(exarch_core::ExtractRequest::new(&config_owned)
+                    let mut request = exarch_core::ExtractRequest::new(&config_owned)
                         .with_options(options_owned.clone())
-                        .with_progress(progress)
-                        .extract(&archive_path, &output_dir)?)
+                        .with_progress(progress);
+                    if let Some(password) = password.clone() {
+                        request = request.with_password(password);
+                    }
+                    Ok(request.extract(&archive_path, &output_dir)?)
                 },
                 |source, report| ProgressCallbackError::ExtractionCallback { source, report },
             )
@@ -1255,33 +1316,46 @@ mod tests {
 
     #[test]
     fn test_extract_rejects_null_byte_in_archive_path() {
-        let result = extract_core("/tmp/test\0x.tar", "/tmp/out", &security(), &extraction());
+        let result = extract_core(
+            "/tmp/test\0x.tar",
+            "/tmp/out",
+            &security(),
+            &extraction(),
+            None,
+        );
         assert_boundary_violation(result, "null bytes");
     }
 
     #[test]
     fn test_extract_rejects_null_byte_in_output_dir() {
-        let result = extract_core("/tmp/test.tar", "/tmp/out\0x", &security(), &extraction());
+        let result = extract_core(
+            "/tmp/test.tar",
+            "/tmp/out\0x",
+            &security(),
+            &extraction(),
+            None,
+        );
         assert_boundary_violation(result, "null bytes");
     }
 
     #[test]
     fn test_extract_rejects_excessively_long_paths() {
         let long = long_path();
-        let archive = extract_core(&long, "/tmp/out", &security(), &extraction());
+        let archive = extract_core(&long, "/tmp/out", &security(), &extraction(), None);
         assert_boundary_violation(archive, "maximum length");
-        let output = extract_core("/tmp/test.tar", &long, &security(), &extraction());
+        let output = extract_core("/tmp/test.tar", &long, &security(), &extraction(), None);
         assert_boundary_violation(output, "maximum length");
     }
 
     #[test]
     fn test_extract_accepts_empty_and_relative_paths() {
-        assert_not_boundary_error(extract_core("", "", &security(), &extraction()));
+        assert_not_boundary_error(extract_core("", "", &security(), &extraction(), None));
         assert_not_boundary_error(extract_core(
             "relative_test.tar",
             "relative_output",
             &security(),
             &extraction(),
+            None,
         ));
     }
 
@@ -1359,11 +1433,11 @@ mod tests {
     fn test_list_rejects_invalid_archive_path() {
         let options = exarch_core::ListOptions::default();
         assert_boundary_violation(
-            list_core("/tmp/test\0x.tar", &security(), options, None),
+            list_core("/tmp/test\0x.tar", &security(), options, None, None),
             "null bytes",
         );
         assert_boundary_violation(
-            list_core(&long_path(), &security(), options, None),
+            list_core(&long_path(), &security(), options, None, None),
             "maximum length",
         );
     }
@@ -1372,11 +1446,11 @@ mod tests {
     fn test_verify_rejects_invalid_archive_path() {
         let options = exarch_core::VerificationOptions::default();
         assert_boundary_violation(
-            verify_core("/tmp/test\0x.tar", &security(), options),
+            verify_core("/tmp/test\0x.tar", &security(), options, None),
             "null bytes",
         );
         assert_boundary_violation(
-            verify_core(&long_path(), &security(), options),
+            verify_core(&long_path(), &security(), options, None),
             "maximum length",
         );
     }

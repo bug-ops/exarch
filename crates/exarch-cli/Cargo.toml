@@ -19,11 +19,15 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["derive", "cargo", "wrap_help", "color"] }
 clap_complete.workspace = true
 console.workspace = true
-exarch-core.workspace = true
+exarch-core = { workspace = true, features = ["encryption"] }
 indicatif = { workspace = true, features = ["improved_unicode"] }
+rpassword.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -40,6 +44,11 @@ predicates.workspace = true
 sevenz-rust2.workspace = true
 tar.workspace = true
 zip.workspace = true
+
+[features]
+# Test-only seams (stalled read, sandbox probe) compiled into debug builds only;
+# never enabled for a shipped binary.
+test-hooks = []
 
 [lints]
 workspace = true

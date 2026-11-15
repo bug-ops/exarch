@@ -182,6 +182,9 @@ closed_enum! {
         OutputConflict => "OUTPUT_CONFLICT",
         /// A source path to archive lies outside the archive root.
         SourcePath => "SOURCE_PATH",
+        /// A landing named by more than one entry while repeated paths are
+        /// refused.
+        RepeatedPath => "REPEATED_PATH",
     }
 }
 
@@ -297,7 +300,11 @@ impl std::fmt::Display for SubCode {
 /// use exarch_core::Violation;
 /// use std::assert_matches;
 ///
-/// let msg = ArchiveError::from(Violation::EncryptedArchive).into_ffi_message();
+/// let msg = ArchiveError::from(Violation::Encrypted {
+///     reason: exarch_core::EncryptionRefusal::PasswordRequired,
+///     name: None,
+/// })
+/// .into_ffi_message();
 /// assert_matches!(
 ///     msg.kind,
 ///     FfiKind::SecurityViolation {
@@ -1161,13 +1168,42 @@ impl ArchiveError {
     /// use exarch_core::ErrorCode;
     /// use exarch_core::Violation;
     ///
-    /// let err = ArchiveError::from(Violation::EncryptedArchive);
+    /// let err = ArchiveError::from(Violation::Encrypted {
+    ///     reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///     name: None,
+    /// });
     /// assert_eq!(err.error_code(), ErrorCode::SecurityViolation);
     /// assert_eq!(err.error_code().as_str(), "SECURITY_VIOLATION");
     /// ```
     #[must_use]
     pub fn error_code(&self) -> ErrorCode {
         self.ffi_kind().code()
+    }
+
+    /// Returns the finer classification of this error, when it has one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::SecurityViolationSubCode;
+    /// use exarch_core::SubCode;
+    /// use exarch_core::Violation;
+    ///
+    /// let err = ArchiveError::from(Violation::Encrypted {
+    ///     reason: exarch_core::EncryptionRefusal::PasswordRequired,
+    ///     name: None,
+    /// });
+    /// assert_eq!(
+    ///     err.sub_code(),
+    ///     Some(SubCode::SecurityViolation(
+    ///         SecurityViolationSubCode::Encrypted
+    ///     ))
+    /// );
+    /// ```
+    #[must_use]
+    pub fn sub_code(&self) -> Option<SubCode> {
+        self.ffi_kind().sub_code()
     }
 }
 
@@ -1455,7 +1491,10 @@ mod tests {
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },
-            ArchiveError::from(Violation::EncryptedArchive),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None,
+            }),
             ArchiveError::unclassified("test"),
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
@@ -1616,7 +1655,11 @@ mod tests {
 
         assert_eq!(ArchiveError::unclassified("x").ffi_kind(), invalid(None));
         assert_eq!(
-            ArchiveError::from(Violation::EncryptedArchive).ffi_kind(),
+            ArchiveError::from(Violation::Encrypted {
+                reason: crate::EncryptionRefusal::PasswordRequired,
+                name: None
+            })
+            .ffi_kind(),
             FfiKind::SecurityViolation {
                 relaxable_by: None,
                 sub_code: SecurityViolationSubCode::Encrypted,
@@ -1634,7 +1677,10 @@ mod tests {
     fn test_partial_extraction_sets_partial() {
         let wrap = |writes| {
             ArchiveError::PartialExtraction(crate::Partial::new(
-                ArchiveError::from(Violation::EncryptedArchive),
+                ArchiveError::from(Violation::Encrypted {
+                    reason: crate::EncryptionRefusal::PasswordRequired,
+                    name: None,
+                }),
                 ExtractionReport::default(),
                 writes,
             ))

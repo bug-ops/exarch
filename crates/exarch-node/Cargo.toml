@@ -13,7 +13,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-exarch-core.workspace = true
+exarch-core = { workspace = true, features = ["encryption"] }
 napi = { workspace = true, features = ["async", "napi4", "napi5", "error_anyhow", "tokio_rt"] }
 napi-derive.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }

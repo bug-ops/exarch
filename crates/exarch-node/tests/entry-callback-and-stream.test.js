@@ -24,31 +24,9 @@ const {
   ExtractionOptions,
   SinkOptions,
 } = require('../index.js');
+const { tarEntry, tarArchive: tar } = require('./helpers/archives.js');
 
-function tarEntry(name, { type = '0', data = Buffer.alloc(0), link = '' } = {}) {
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 'utf8');
-  header.write('0000644\0', 100, 'ascii');
-  header.write('0000000\0', 108, 'ascii');
-  header.write('0000000\0', 116, 'ascii');
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'ascii');
-  header.write('00000000000\0', 136, 'ascii');
-  header.write('        ', 148, 'ascii');
-  header.write(type, 156, 'ascii');
-  header.write(link, 157, 'utf8');
-  header.write('ustar\0' + '00', 257, 'ascii');
-  const sum = header.reduce((total, byte) => total + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
-
-function tar(entries) {
-  return Buffer.concat([...entries, Buffer.alloc(1024)]);
-}
-
-const file = (name, text) => tarEntry(name, { data: Buffer.from(text) });
+const file = (name, text) => tarEntry({ name, data: Buffer.from(text) });
 const linksConfig = () => new SecurityConfig().withAllowSymlinks(true).withAllowHardlinks(true);
 
 async function* chunked(buffer, size = 700) {
@@ -78,10 +56,10 @@ function assertWrapped(err, value) {
 
 describe('extractArchiveToCallback', () => {
   const archive = tar([
-    tarEntry('d/', { type: '5' }),
+    tarEntry({ name: 'd/', type: '5' }),
     file('d/a.txt', 'alpha'),
-    tarEntry('s', { type: '2', link: 'd/a.txt' }),
-    tarEntry('h', { type: '1', link: 'd/a.txt' }),
+    tarEntry({ name: 's', type: '2', link: 'd/a.txt' }),
+    tarEntry({ name: 'h', type: '1', link: 'd/a.txt' }),
   ]);
 
   it('delivers every kind, with the hardlink last and by reference', async () => {
@@ -202,7 +180,10 @@ describe('extractArchiveToCallback', () => {
 });
 
 describe('extractArchiveToCallbackSync', () => {
-  const archive = tar([file('d/a.txt', 'alpha'), tarEntry('h', { type: '1', link: 'd/a.txt' })]);
+  const archive = tar([
+    file('d/a.txt', 'alpha'),
+    tarEntry({ name: 'h', type: '1', link: 'd/a.txt' }),
+  ]);
   let unhandled;
   const onUnhandled = (reason) => unhandled.push(reason);
 
@@ -294,7 +275,7 @@ describe('extractArchiveToCallbackSync', () => {
     const SIZE = 1024;
     const big = tar(
       Array.from({ length: COUNT }, (_, i) =>
-        tarEntry(`f${i}.bin`, { data: Buffer.alloc(SIZE, 0x42) })
+        tarEntry({ name: `f${i}.bin`, data: Buffer.alloc(SIZE, 0x42) })
       )
     );
 
@@ -338,8 +319,8 @@ describe('extractArchiveToCallbackSync', () => {
   it('delivers a hardlink chain link by link', () => {
     const chain = tar([
       file('a', 'x'),
-      tarEntry('b', { type: '1', link: 'a' }),
-      tarEntry('c', { type: '1', link: 'b' }),
+      tarEntry({ name: 'b', type: '1', link: 'a' }),
+      tarEntry({ name: 'c', type: '1', link: 'b' }),
     ]);
     const links = [];
     extractArchiveToCallbackSync(
@@ -359,7 +340,7 @@ describe('extractArchiveToCallbackSync', () => {
 describe('AsyncIterable input', () => {
   const archive = tar([
     file('a.txt', 'alpha'),
-    tarEntry('d/', { type: '5' }),
+    tarEntry({ name: 'd/', type: '5' }),
     file('d/b.txt', 'bravo'),
   ]);
 

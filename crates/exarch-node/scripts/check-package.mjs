@@ -187,9 +187,7 @@ function differingPaths(packed, committed, path = '') {
     const keys = new Set([...Object.keys(packed), ...Object.keys(committed)]);
     return [...keys].flatMap((key) => {
       const here = path === '' ? key : `${path}.${key}`;
-      return REWRITTEN_BY_PACK.has(here)
-        ? []
-        : differingPaths(packed[key], committed[key], here);
+      return REWRITTEN_BY_PACK.has(here) ? [] : differingPaths(packed[key], committed[key], here);
     });
   }
   return JSON.stringify(packed) === JSON.stringify(committed) ? [] : [path];

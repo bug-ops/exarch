@@ -7,7 +7,6 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const zlib = require('node:zlib');
 const {
   extractArchive,
   verifyArchive,
@@ -15,28 +14,9 @@ const {
   ExtractionOptions,
   VerificationOptions,
 } = require('../index.js');
+const { tarEntry, tarArchive, crc32 } = require('./helpers/archives.js');
 
-function tarEntry({ name, type = '0', data = Buffer.alloc(0), linkname = '' }) {
-  const header = Buffer.alloc(512);
-  header.write(name, 0);
-  header.write('0000644\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
-  header.write('00000000000\0', 136);
-  header.write(type, 156);
-  header.write(linkname, 157);
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  header.fill(0x20, 148, 156);
-  const sum = header.reduce((acc, byte) => acc + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
-
-const tarOf = (...entries) => Buffer.concat([...entries.map(tarEntry), Buffer.alloc(1024)]);
+const tarOf = (...entries) => tarArchive(entries.map(tarEntry));
 
 function gzipWithBadSecondBlock(data, split) {
   const parts = [Buffer.from([0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff])];
@@ -48,7 +28,7 @@ function gzipWithBadSecondBlock(data, split) {
     parts.push(head, block);
   });
   const tail = Buffer.alloc(8);
-  tail.writeUInt32LE(zlib.crc32(data), 0);
+  tail.writeUInt32LE(crc32(data), 0);
   tail.writeUInt32LE(data.length, 4);
   parts.push(tail);
   return Buffer.concat(parts);
@@ -61,7 +41,7 @@ function zipWithForgedCompressedSize() {
   const local = Buffer.alloc(30);
   local.writeUInt32LE(0x04034b50, 0);
   local.writeUInt16LE(20, 4);
-  local.writeUInt32LE(zlib.crc32(body), 14);
+  local.writeUInt32LE(crc32(body), 14);
   local.writeUInt32LE(forged, 18);
   local.writeUInt32LE(body.length, 22);
   local.writeUInt16LE(name.length, 26);
@@ -69,7 +49,7 @@ function zipWithForgedCompressedSize() {
   central.writeUInt32LE(0x02014b50, 0);
   central.writeUInt16LE(20, 4);
   central.writeUInt16LE(20, 6);
-  central.writeUInt32LE(zlib.crc32(body), 16);
+  central.writeUInt32LE(crc32(body), 16);
   central.writeUInt32LE(forged, 20);
   central.writeUInt32LE(body.length, 24);
   central.writeUInt16LE(name.length, 28);
@@ -106,7 +86,7 @@ describe('InvalidArchive families', () => {
   }
 
   it('a hardlink to a missing target is LINK_TARGET', async () => {
-    const bytes = tarOf({ name: 'h', type: '1', linkname: 'nothere' });
+    const bytes = tarOf({ name: 'h', type: '1', link: 'nothere' });
     const config = new SecurityConfig().withAllowHardlinks(true);
     const err = await extractFailure('absent.tar', bytes, config);
     assert.strictEqual(err.code, 'INVALID_ARCHIVE');
@@ -124,8 +104,8 @@ describe('InvalidArchive families', () => {
   it('a duplicate hardlink within the archive is an archive conflict', async () => {
     const bytes = tarOf(
       { name: 't', data: Buffer.from('x') },
-      { name: 'h', type: '1', linkname: 't' },
-      { name: 'h', type: '1', linkname: 't' }
+      { name: 'h', type: '1', link: 't' },
+      { name: 'h', type: '1', link: 't' }
     );
     const config = new SecurityConfig().withAllowHardlinks(true);
     const options = new ExtractionOptions().withExistingFiles('overwrite');
@@ -139,7 +119,7 @@ describe('InvalidArchive families', () => {
     const file = path.join(tempDir, 'over.tar');
     fs.writeFileSync(
       file,
-      tarOf({ name: 't', data: Buffer.from('x') }, { name: 'h', type: '1', linkname: 't' })
+      tarOf({ name: 't', data: Buffer.from('x') }, { name: 'h', type: '1', link: 't' })
     );
     const out = path.join(tempDir, 'out');
     fs.mkdirSync(out);

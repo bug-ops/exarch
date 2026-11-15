@@ -9,73 +9,10 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const zlib = require('node:zlib');
 const { extractArchiveSync, SecurityConfig, ExtractionOptions } = require('../index.js');
+const { tarEntry, tarArchive, zipArchive } = require('./helpers/archives.js');
 
 const FIXTURES = path.join(__dirname, '..', '..', 'exarch-core', 'tests', 'fixtures');
-
-function tarEntry({ name, type = '0', data = Buffer.alloc(0) }) {
-  const header = Buffer.alloc(512);
-  header.write(name, 0);
-  header.write('0000644\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
-  header.write('00000000000\0', 136);
-  header.write(type, 156);
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  header.fill(0x20, 148, 156);
-  const sum = header.reduce((acc, byte) => acc + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
-
-function tarArchive(entries) {
-  return Buffer.concat([...entries.map(tarEntry), Buffer.alloc(1024)]);
-}
-
-/** Builds a stored ZIP of `{ name, data }` entries; a name ending in `/` is a directory. */
-function zipArchive(entries) {
-  const locals = [];
-  const centrals = [];
-  let offset = 0;
-  for (const { name, data = Buffer.alloc(0) } of entries) {
-    const nameBytes = Buffer.from(name);
-    const crc = zlib.crc32(data);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(nameBytes.length, 26);
-    const localPart = Buffer.concat([local, nameBytes, data]);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(data.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(nameBytes.length, 28);
-    central.writeUInt32LE(offset, 42);
-    centrals.push(Buffer.concat([central, nameBytes]));
-    locals.push(localPart);
-    offset += localPart.length;
-  }
-  const centralPart = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralPart.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, centralPart, end]);
-}
 
 const POLICIES = ['refuse', 'overwrite'];
 
@@ -145,7 +82,9 @@ describe('entry over an escaping existing symlink', () => {
     return {
       tar: write(
         'a.tar',
-        tarArchive(files.map((f) => ({ ...f, type: f.name.endsWith('/') ? '5' : '0' })))
+        tarArchive(
+          files.map((f) => tarEntry({ ...f, type: f.name.endsWith('/') ? '5' : '0' }))
+        )
       ),
       zip: write('a.zip', zipArchive(files)),
     };

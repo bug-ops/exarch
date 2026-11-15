@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { ExtractionOptions, extractArchiveSync, createArchiveSync } = require('../index.js');
+const { tarEntry, tarArchive } = require('./helpers/archives.js');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-test-'));
@@ -17,26 +18,6 @@ function createValidArchive(archivePath, tempDir) {
   fs.mkdirSync(sourceDir);
   fs.writeFileSync(path.join(sourceDir, 'hello.txt'), 'Hello, World!');
   createArchiveSync(archivePath, [sourceDir]);
-}
-
-function tarEntry(name, text) {
-  const data = Buffer.from(text);
-  const header = Buffer.alloc(512);
-  header.write(name, 0);
-  header.write('0000644\0', 100);
-  header.write('0000000\0', 108);
-  header.write('0000000\0', 116);
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'latin1');
-  header.write('00000000000\0', 136);
-  header.write('0', 156);
-  header.write('ustar\0', 257);
-  header.write('00', 263);
-  header.fill(0x20, 148, 156);
-  const sum = header.reduce((acc, byte) => acc + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
 }
 
 describe('ExtractionOptions', () => {
@@ -300,7 +281,10 @@ describe('extractArchiveSync with ExtractionOptions', () => {
       const duplicates = path.join(tempDir, 'dup.tar');
       fs.writeFileSync(
         duplicates,
-        Buffer.concat([tarEntry('a.txt', 'first'), tarEntry('a.txt', 'second'), Buffer.alloc(1024)])
+        tarArchive([
+          tarEntry({ name: 'a.txt', data: Buffer.from('first') }),
+          tarEntry({ name: 'a.txt', data: Buffer.from('second') }),
+        ])
       );
       const options = new ExtractionOptions().withExistingFiles('refuse');
       const report = extractArchiveSync(duplicates, outputDir, null, options);

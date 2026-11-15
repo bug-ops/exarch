@@ -15,29 +15,11 @@ const {
   verifyArchiveBytes,
   verifyArchiveBytesWithProgress,
 } = require('../index.js');
+const { tarEntry, tarArchive } = require('./helpers/archives.js');
 
-function tarEntry(name, data) {
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 'utf8');
-  header.write('0000644\0', 100, 'ascii');
-  header.write('0000000\0', 108, 'ascii');
-  header.write('0000000\0', 116, 'ascii');
-  header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124, 'ascii');
-  header.write('00000000000\0', 136, 'ascii');
-  header.write('        ', 148, 'ascii');
-  header.write('0', 156, 'ascii');
-  header.write('ustar\0' + '00', 257, 'ascii');
-  const sum = header.reduce((total, byte) => total + byte, 0);
-  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([header, padded]);
-}
-
-const ARCHIVE = Buffer.concat([
-  tarEntry('a.txt', Buffer.from('alpha')),
-  tarEntry('b.txt', Buffer.from('beta')),
-  Buffer.alloc(1024),
+const ARCHIVE = tarArchive([
+  tarEntry({ name: 'a.txt', data: Buffer.from('alpha') }),
+  tarEntry({ name: 'b.txt', data: Buffer.from('beta') }),
 ]);
 
 const NEVER = () => new Promise(() => {});
@@ -214,7 +196,9 @@ describe('closing the iterable after an abort', () => {
   // The abort is raised from inside the operation at a known point, never by
   // a timer, so these tests do not depend on scheduling.
   const manyEntries = Buffer.concat([
-    ...Array.from({ length: 50 }, (_, i) => tarEntry(`dir/file-${i}.txt`, Buffer.from('x'))),
+    ...Array.from({ length: 50 }, (_, i) =>
+      tarEntry({ name: `dir/file-${i}.txt`, data: Buffer.from('x') })
+    ),
     Buffer.alloc(1024),
   ]);
 
@@ -429,7 +413,9 @@ describe('abort while waiting for JavaScript', () => {
 
 describe('abort of an in-memory Uint8Array call', () => {
   const manyEntries = Buffer.concat([
-    ...Array.from({ length: 30 }, (_, i) => tarEntry(`dir/file-${i}.txt`, Buffer.from('x'))),
+    ...Array.from({ length: 30 }, (_, i) =>
+      tarEntry({ name: `dir/file-${i}.txt`, data: Buffer.from('x') })
+    ),
     Buffer.alloc(1024),
   ]);
 

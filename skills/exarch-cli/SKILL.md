@@ -55,14 +55,15 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--strip-components <N>` / `--flatten` | off | Drop leading path components / land files at top level (mutually exclusive). |
 | `--allowed-extensions <EXT>` | all | Extract only matching regular files (`txt,pdf`). |
 | `--max-files` / `--max-total-size` / `--max-file-size` | 10000 / 500 MiB / 50 MiB | Hard quotas; size values take `K`/`M`/`G`/`T`. `0` is refused. `--max-files` counts every entry (directories, links, skipped entries included). |
-| `--password-file <PATH>` / `--password-fd <N>` / `--password-prompt` | none | Password of an encrypted ZIP (WinZip AES) or 7z; one source at most, also on `list` and `verify`. Never an argument value or an environment variable. See [references/formats.md](references/formats.md). |
+| `--password-file <PATH>` / `--password-fd <N>` / `--password-prompt` | none | Password of an encrypted ZIP (WinZip AES) or 7z; one source at most, also on `list` and `verify`; failures carry `error.reason` in `--json`. Never an argument value or an environment variable. See [references/formats.md](references/formats.md). |
 | `--max-compression-ratio` | 100 | Zip-bomb threshold (ZIP and non-solid 7z). |
 | `--max-path-depth` | 32 | Max path components per entry. |
 | `--preserve-permissions` | off | Keep archive modes (setuid/setgid always stripped). |
 | `--allow-symlinks` / `--allow-hardlinks` | off | Allow links that resolve inside the destination. |
 | `--allow-absolute-paths` / `--allow-world-writable` / `--allow-solid-archives` | off | Relax the matching default-deny check. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP structural ambiguity check. |
-| `--repeated-paths <keep-first\|refuse>` | keep-first | Whether an archive naming a path twice keeps the first copy or fails `SecurityViolation` (`REPEATED_PATH`). Pair `refuse` with `--atomic` to leave nothing behind. |
+| `--repeated-paths <keep-first\|refuse>` | keep-first | Whether an archive naming a path twice keeps the first copy or fails `SecurityViolation` (`REPEATED_PATH`). Also on `list` and `verify`. |
+| `--sandbox <off\|best-effort\|require>` | off | Confine the process with Linux Landlock; also on `list` and `verify`, refused by `create`. `require` exits `1` (`SandboxNotEnforced`) unless fully enforced, and never combines with `--atomic`. See [references/extract.md](references/extract.md). |
 | `--banned-component <C>` | `.git .ssh .gnupg .aws .kube .docker .env` | **Replaces** the default list, never appends (see below). |
 
 > **`--banned-component` replaces the default ban list.** `--banned-component foo` silently allows `.ssh`, `.aws`, etc. To add one component, repeat the flag with the full set plus the addition. An exactly empty value (`""`) disables all banning.
@@ -84,7 +85,7 @@ Grammar, zip-ratio warning, name collisions, refused outputs (7z and ZIP-family 
 
 ### list `<ARCHIVE>`
 
-Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--destination <DIR>`, `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency` and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
+Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--destination <DIR>`, `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency`, `--repeated-paths`, `--sandbox`, password and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
 
 ### verify `<ARCHIVE>`
 
@@ -96,6 +97,7 @@ Runs the full security pipeline without writing to disk. Use it before `extract`
 | `--check-integrity` | off | Decode the payload to EOF so checksums are verified. |
 | `--decompression-budget <SIZE>` | 500 MiB | Extra decode budget for `--check-integrity`. |
 | `--allow-symlinks` / `--allow-hardlinks` | off | Same as `extract`; pass the ones you will extract with. |
+| `--repeated-paths`, `--sandbox`, `--password-file` / `--password-fd` / `--password-prompt` | as `extract` | See [references/verify.md](references/verify.md). |
 
 - A plain `verify` reports `integrity_status` `SKIPPED`: a pass says nothing about corruption.
 - `INCOMPLETE` integrity exits `0` without `--strict`; in automation use `--strict` or read `data.integrity_status`.

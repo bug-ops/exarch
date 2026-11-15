@@ -12,12 +12,15 @@
 | `--allow-symlinks` / `--allow-hardlinks` | off | As `extract`; pass the ones you will extract with. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | As `extract`. An include matching nothing, and a hardlink to an unselected target, are `HIGH` issues. No per-entry rows, so no `disposition`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Structural findings become issues under `enforce`. |
-| `--repeated-paths <keep-first\|refuse>` | keep-first | Under `refuse` an entry that repeats an earlier landing is an issue naming the path and both kinds. |
+| `--repeated-paths <keep-first\|refuse>` | keep-first | Under `refuse` a repeated landing is a `HIGH` `Security Policy` issue (`sub_code` `REPEATED_PATH`, `relaxable_by` `repeated_paths`), also for a ZIP name repeat under both `--zip-consistency` policies (there it replaces the `Duplicate Entry` finding). |
+| `--sandbox`, `--password-file` / `--password-fd` / `--password-prompt` | as `extract` | See [extract.md](extract.md). |
 | `--parallel-decode-memory`, `--max-files`, `--max-total-size`, `--max-file-size`, `--max-compression-ratio`, `--allow-solid-archives` | as `list` | File count and total size fail with `QuotaExceeded` past the cap. |
 
 `verify` has no `--max-path-depth`, `--banned-component`, `--allow-absolute-paths`, or `--allow-world-writable`; those are evaluated by `extract` alone.
 
 ## Result
+
+- `--check-integrity` without a password: encrypted ZIP entries are unverified (`WARNING`, `INCOMPLETE`, reason `encrypted`); a 7z with encrypted content and a plain header is `FAIL` (`ENCRYPTED` issues) with `INCOMPLETE` and reason `not_decodable`. With the right password both are `PASS`/`OK`.
 
 - `data.status`: `PASS` / `WARNING` / `FAIL`. Envelope `status` stays `"success"`; exit `1` on `FAIL`. Text: `Archive verification: PASS|WARNING|FAIL`, issue tags `[HIGH]`/`[MEDIUM]`/`[LOW]` (same words with and without color).
 - `security_status` (`Security: OK|WARNING|FAILED`) and `integrity_status` (`OK|FAILED|INCOMPLETE|SKIPPED`).

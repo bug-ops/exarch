@@ -20,7 +20,9 @@ use crate::QuotaResource;
 use crate::Result;
 use crate::Violation;
 use crate::encryption::Credentials;
-use crate::encryption::kdf::HEADER_RESERVE;
+use crate::encryption::kdf::KdfRuns;
+use crate::encryption::kdf::KeyMode;
+use crate::encryption::kdf::KeySource;
 use crate::formats::common;
 use crate::formats::source_fault::SourceRead;
 use crate::formats::source_fault::SourceTap;
@@ -194,13 +196,9 @@ impl SevenZHeader {
         self.header_encrypted
     }
 
-    /// Whether any block holds AES-encrypted content.
-    pub(crate) fn content_encrypted(&self) -> bool {
-        self.archive.blocks.iter().any(|block| {
-            block.coders.iter().any(|coder| {
-                coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256
-            })
-        })
+    /// Whether the block holds AES-encrypted content.
+    pub(crate) fn is_block_encrypted(&self, index: BlockIndex) -> bool {
+        block_is_encrypted(self.block(index))
     }
 
     /// The password block decoding passes to `sevenz-rust2`.
@@ -359,6 +357,13 @@ const HEADER_BYTES_PER_ENTRY: u64 = 256;
 /// descriptions.
 const HEADER_BYTES_BASE: u64 = 64 * 1024;
 
+fn block_is_encrypted(block: &Block) -> bool {
+    block
+        .coders
+        .iter()
+        .any(|coder| coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256)
+}
+
 /// Header entries allowed on top of `max_file_count`: entries extraction does
 /// not count against it (anti items) and small archives.
 ///
@@ -513,7 +518,7 @@ pub(crate) fn open_sevenz_header<R: Read + Seek>(
         }
         DeclaredHeader::Unrecognized => cap,
     };
-    let mut header_encrypted = false;
+    let mut header_password = None;
     match header_entries(source, cap.bytes().get(), kib(limit.memory)) {
         HeaderEntries::Declared(tables) if tables.entries() > limit.entries => {
             return Err(ArchiveError::QuotaExceeded {
@@ -533,24 +538,16 @@ pub(crate) fn open_sevenz_header<R: Read + Seek>(
                 detail: "unsupported header layout: the number of entries cannot be read".into(),
             }));
         }
-        HeaderEntries::Refused(Refusal::Encrypted) => {
-            admit_encrypted_header(credentials, limit)?;
-            header_encrypted = true;
+        HeaderEntries::Refused(Refusal::Encrypted(key)) => {
+            header_password = Some(admit_encrypted_header(credentials, limit, key)?);
         }
         HeaderEntries::Refused(Refusal::Memory) => {
             return Err(HeaderCap::Memory(limit.memory).refusal());
         }
         HeaderEntries::NotApplicable => {}
     }
-    let password = if header_encrypted {
-        credentials
-            .sevenz_secret()
-            .ok()
-            .flatten()
-            .ok_or_else(|| encryption_refusal(EncryptionRefusal::WrongPasswordOrCorrupt))?
-    } else {
-        Password::empty()
-    };
+    let header_encrypted = header_password.is_some();
+    let password = header_password.unwrap_or_else(Password::empty);
     source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
     let parsed = Archive::read_with_memory_limit(
@@ -588,17 +585,16 @@ fn encryption_refusal(reason: EncryptionRefusal) -> ArchiveError {
     Violation::Encrypted { reason, name: None }.into()
 }
 
-/// Admits an encrypted header: a password must be supplied, and the key
-/// derivation `Archive::read` runs for it must fit the budget, which is known
-/// before it runs because the header's own power is not visible.
-fn admit_encrypted_header(credentials: &Credentials, limit: HeaderLimit) -> Result<()> {
-    if !credentials.is_supplied() {
-        return Err(common::encrypted_archive_error());
-    }
-    if HEADER_RESERVE > limit.kdf_work.get() {
-        return Err(encryption_refusal(EncryptionRefusal::KdfCostExceeded));
-    }
-    Ok(())
+/// Admits an encrypted header and returns the password to parse it with.
+///
+/// The refusal order is [`KdfRuns::admit_key`]'s; the key derivation is
+/// reserved at its worst case because the header's own power is not visible.
+fn admit_encrypted_header(
+    credentials: &Credentials,
+    limit: HeaderLimit,
+    key: KeyMode,
+) -> Result<Password> {
+    Ok(KdfRuns::new(limit.kdf_work, true).admit_key(credentials, KeySource::Header(key))?)
 }
 
 /// The result of a header parse that failed with `error`: a fault the source

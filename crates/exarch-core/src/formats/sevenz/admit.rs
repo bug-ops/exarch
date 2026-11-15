@@ -6,7 +6,6 @@ use super::header::BlockIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
-use crate::EncryptionRefusal;
 use crate::EntryCompression;
 use crate::Limit;
 use crate::Malformation;
@@ -17,10 +16,10 @@ use crate::SolidBlock;
 use crate::SolidMemoryScope;
 use crate::Violation;
 use crate::encryption::Credentials;
-use crate::encryption::kdf::KdfRefusal;
 use crate::encryption::kdf::KdfRuns;
+use crate::encryption::kdf::KeyRefusal;
+use crate::encryption::kdf::KeySource;
 use crate::error::QuotaResource;
-use crate::formats::common;
 use crate::formats::le;
 use crate::inspection::report::Finding;
 use crate::inspection::report::Heuristic;
@@ -399,7 +398,8 @@ pub(super) fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 ///
 /// Refuses with [`UnverifiedReason::ResourceLimit`] and
 /// [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the limit,
-/// and with [`UnverifiedReason::NotDecodable`] for AES content encryption
+/// with [`UnverifiedReason::Encrypted`] for AES content without a password,
+/// and with [`UnverifiedReason::NotDecodable`] for the other AES refusals
 /// ([`ArchiveError::SecurityViolation`]) and for an unknown method,
 /// unparseable coder properties, or a block whose files do not add up to its
 /// decoded size ([`ArchiveError::InvalidArchive`]).
@@ -415,7 +415,7 @@ pub(super) fn admit_sevenz_block(
     let mut memory: u64 = 0;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
-            admit_aes_coder(coder, credentials, kdf).map_err(not_decodable)?;
+            admit_aes_coder(coder, credentials, kdf)?;
             continue;
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
@@ -441,24 +441,23 @@ pub(super) fn admit_sevenz_block(
     Ok(())
 }
 
-/// Admits the AES coder of a block: a usable password must be supplied and the
-/// key derivation of the block must fit what is left of `max_kdf_work`.
+/// Admits the AES coder of a block through [`KdfRuns::admit_key`].
+///
+/// No password is reported by `verify` as [`UnverifiedReason::Encrypted`], like
+/// an AES ZIP entry; every other refusal is not decodable.
 fn admit_aes_coder(
     coder: &sevenz_rust2::Coder,
     credentials: &Credentials,
     kdf: &mut KdfRuns,
-) -> std::result::Result<(), ArchiveError> {
-    let encrypted = |reason| ArchiveError::from(Violation::Encrypted { reason, name: None });
-    if !credentials.is_supplied() {
-        return Err(common::encrypted_archive_error());
-    }
-    if credentials.sevenz_secret().is_err() {
-        return Err(encrypted(EncryptionRefusal::WrongPasswordOrCorrupt));
-    }
-    kdf.admit(coder.properties())
-        .map_err(|refusal| match refusal {
-            KdfRefusal::Malformed => ArchiveError::from(Malformation::SevenZUnsupportedCoder),
-            KdfRefusal::Refused(reason) => encrypted(reason),
+) -> std::result::Result<(), Refused> {
+    kdf.admit_key(credentials, KeySource::Block(coder.properties()))
+        .map(drop)
+        .map_err(|refusal| {
+            let reason = match refusal {
+                KeyRefusal::PasswordRequired => UnverifiedReason::Encrypted,
+                _ => UnverifiedReason::NotDecodable,
+            };
+            Refused::new(reason, refusal.into())
         })
 }
 
@@ -549,12 +548,16 @@ pub(super) const MAX_REFUSAL_ISSUES: usize = 32;
 /// Archive-level `verify` issues for the refusals, capped at
 /// [`MAX_REFUSAL_ISSUES`].
 pub(crate) fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
-    let mut issues: Vec<_> = refusals
+    let reported: Vec<_> = refusals
+        .iter()
+        .filter(|refusal| refusal.unverified() != UnverifiedReason::Encrypted)
+        .collect();
+    let mut issues: Vec<_> = reported
         .iter()
         .take(MAX_REFUSAL_ISSUES)
         .map(|r| VerificationIssue::from_error(&r.error, None))
         .collect();
-    if let Some(omitted) = refusals.len().checked_sub(MAX_REFUSAL_ISSUES)
+    if let Some(omitted) = reported.len().checked_sub(MAX_REFUSAL_ISSUES)
         && omitted > 0
     {
         issues.push(VerificationIssue::new(

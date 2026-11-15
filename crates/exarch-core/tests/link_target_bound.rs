@@ -12,6 +12,9 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use exarch_core::IssueCategory;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
@@ -23,7 +26,7 @@ const LINKS: usize = 64;
 
 fn hardlink_archive() -> Vec<u8> {
     let target = vec![b'a'; TARGET_BYTES];
-    let record = exarch_testkit::pax::record(b"linkpath", &target);
+    let record = testkit::pax::record(b"linkpath", &target);
     let mut builder = tar::Builder::new(Vec::new());
     for i in 0..LINKS {
         let mut pax = tar::Header::new_ustar();

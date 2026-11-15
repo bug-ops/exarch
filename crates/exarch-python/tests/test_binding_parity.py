@@ -146,7 +146,7 @@ SHARED = [
     (
         "ArchiveEntry",
         ["ManifestFileEntry"],
-        ["path", "entry_type", "compressed_size", "mode", "modified", "compression_ratio"],
+        ["path", "entry_type", "compressed_size", "mode", "modified", "compression_ratio", "encrypted"],
     ),
     ("ListOptions", ["ListOptions"], ["stored_targets"]),
     ("ArchiveFile", ["ManifestFileEntry"], ["size"]),

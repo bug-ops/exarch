@@ -11,6 +11,9 @@
 mod common;
 mod security;
 
+#[path = "sink_support/mod.rs"]
+mod sink_support;
+
 use exarch_core::ArchiveError;
 use exarch_core::CompressionLevel;
 use exarch_core::CreationConfig;

@@ -12,6 +12,9 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 mod common;
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -21,10 +24,10 @@ use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
-use exarch_testkit::raw_zip::deflate_zeros;
 use tempfile::TempDir;
+use testkit::raw_zip::RawEntry;
+use testkit::raw_zip::RawZip;
+use testkit::raw_zip::deflate_zeros;
 
 /// dhat allows one profiler at a time.
 static PROFILER: Mutex<()> = Mutex::new(());

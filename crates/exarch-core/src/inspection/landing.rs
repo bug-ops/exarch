@@ -417,16 +417,13 @@ impl RunKeys {
     }
 }
 
-/// Refuses a repeat when `repeats` says so, skips a repeat of an entry the run
-/// made, refuses an occupant it did not.
-fn skip_duplicate_or_refuse(
+/// Skips a repeat of an entry the run made, refuses an occupant it did not.
+fn skip_duplicate(
     shape: EntryShape,
     held: Occupant,
     rel: &Path,
     keys: &RunKeys,
-    repeats: RepeatedPaths,
 ) -> Result<Disposition> {
-    refuse_tree_repeat(shape, held, rel, keys, repeats)?;
     refuse_unless_duplicate(
         shape,
         rel,
@@ -837,13 +834,14 @@ fn land(
     };
     match tree.project_landing_found(safe, node.clone(), LandingLimits::Enforced) {
         Ok(Placement::Held { occupant, .. }) if shape != EntryShape::Directory => {
-            skip_duplicate_or_refuse(
+            refuse_tree_repeat(
                 shape,
                 occupant,
                 safe.as_path(),
                 &state.keys,
                 config.repeated_paths,
-            )
+            )?;
+            skip_duplicate(shape, occupant, safe.as_path(), &state.keys)
         }
         Ok(placement) => {
             if matches!(placement, Placement::New(_)) {
@@ -884,7 +882,7 @@ fn conflicting_placement(
     }
     match occupant {
         Some(held) if *node != Node::OpaqueSymlink && is_run_duplicate(shape, held) => {
-            skip_duplicate_or_refuse(shape, held, rel, keys, repeats)
+            skip_duplicate(shape, held, rel, keys)
         }
         Some(held) => tree_occupant_refusal(shape, held, rel)
             .map_or_else(|| Err(place_error(PlaceError::Conflict(conflict))), Err),
@@ -901,8 +899,8 @@ mod tests {
     use std::io::Cursor;
     use std::io::Write as _;
 
-    use exarch_testkit::raw_zip::RawEntry;
-    use exarch_testkit::raw_zip::RawZip;
+    use crate::testkit::raw_zip::RawEntry;
+    use crate::testkit::raw_zip::RawZip;
 
     use super::*;
     use crate::extract_archive;

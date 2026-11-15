@@ -1476,6 +1476,15 @@ class ArchiveEntry:
         ...
 
     @property
+    def encrypted(self) -> bool:
+        """
+        Whether the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+        block), whether or not a password was supplied. Always ``False`` for
+        TAR, directories and empty 7z files.
+        """
+        ...
+
+    @property
     def mode(self) -> int | None:
         """File permissions (Unix mode)."""
         ...
@@ -2315,6 +2324,7 @@ def extract_archive_to_memory(
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
+    password: bytearray | None = None,
 ) -> MemoryExtraction:
     """
     Extract an archive held in memory into memory.
@@ -2334,6 +2344,10 @@ def extract_archive_to_memory(
         path_model: "host" (default) validates names against this platform's
             rules, "portable" against the strictest rules of every platform
         format: The archive format; detected from the leading bytes if None
+        password: Optional password of an encrypted ZIP (WinZip AES) or 7z
+            (AES-256) archive, as for extract_archive: a ``bytearray`` only,
+            empty or over-long raises ``ValueError``, ignored for an archive
+            that is not encrypted; exarch wipes its own copy.
 
     Returns:
         MemoryExtraction with the report and the extracted entries
@@ -2352,6 +2366,7 @@ def extract_archive_to_callback(
     options: SinkOptions | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
+    password: bytearray | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive into a callback, one verified entry at a time.
@@ -2385,6 +2400,10 @@ def extract_archive_to_callback(
         options: Optional SinkOptions
         path_model: "host" (default) or "portable"
         format: The archive format; detected from the leading bytes if None
+        password: Optional password of an encrypted ZIP (WinZip AES) or 7z
+            (AES-256) archive, as for extract_archive: a ``bytearray`` only,
+            empty or over-long raises ``ValueError``, ignored for an archive
+            that is not encrypted; exarch wipes its own copy.
 
     Raises:
         TypeError: on_entry is not callable
@@ -2402,6 +2421,7 @@ def extract_archive_to_memory_with_progress(
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
     progress: ProgressCallbackFn | None = None,
+    password: bytearray | None = None,
 ) -> MemoryExtraction:
     """
     Extract an archive held in memory into memory, reporting progress.
@@ -2410,7 +2430,14 @@ def extract_archive_to_memory_with_progress(
     with (path, total, current, bytes_written). The GIL is released during
     extraction and taken once per callback.
 
+    Args:
+        password: Optional password of an encrypted ZIP (WinZip AES) or 7z
+            (AES-256) archive, as for extract_archive: a ``bytearray`` only,
+            exarch wipes its own copy.
+
     Raises:
+        TypeError: password is ``bytes`` or ``str``
+        ValueError: password is empty or longer than 1024 bytes
         Whatever progress itself raises: it cancels the extraction before the
         next entry, the collected entries are discarded and the exception
         carries writes == "discarded" (no counters) and
@@ -2887,6 +2914,7 @@ class SecurityViolationError(ArchiveError):
             entry was refused: ``"password_required"``, ``"wrong_password"``,
             ``"authentication_failed"`` (tampered or damaged data),
             ``"wrong_password_or_corrupt"`` (7z has no verifier),
+            ``"unusable_password"`` (a 7z password that is not UTF-8 text),
             ``"weak_encryption_refused"`` (ZipCrypto, 7z raw key) or
             ``"kdf_cost_exceeded"``; a future core value reads as a plain
             ``str``; ``None`` for every other violation.

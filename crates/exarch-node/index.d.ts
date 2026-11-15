@@ -211,8 +211,8 @@ export interface ExarchInvalidArchiveDetail {
 export interface ExarchSecurityViolationDetail {
   code: 'SECURITY_VIOLATION'
   subCode: SecurityViolationSubCode
-  /** On `subCode === 'ENCRYPTED'` only: why the encrypted archive or entry was refused (`'password_required'`, `'wrong_password'`, `'authentication_failed'`, `'wrong_password_or_corrupt'`, `'weak_encryption_refused'`, `'kdf_cost_exceeded'`); a token newer than this binding reads as a plain string. */
-  reason?: 'password_required' | 'wrong_password' | 'authentication_failed' | 'wrong_password_or_corrupt' | 'weak_encryption_refused' | 'kdf_cost_exceeded' | (string & {})
+  /** On `subCode === 'ENCRYPTED'` only: why the encrypted archive or entry was refused (`'password_required'`, `'wrong_password'`, `'authentication_failed'`, `'wrong_password_or_corrupt'`, `'unusable_password'`, `'weak_encryption_refused'`, `'kdf_cost_exceeded'`); a token newer than this binding reads as a plain string. */
+  reason?: 'password_required' | 'wrong_password' | 'authentication_failed' | 'wrong_password_or_corrupt' | 'unusable_password' | 'weak_encryption_refused' | 'kdf_cost_exceeded' | (string & {})
   relaxableBy?: PolicySetting
   setting?: undefined
   ioKind?: undefined
@@ -2025,6 +2025,11 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned)
  *   and at every read of a `Uint8Array` archive. A pending `onEntry` call is
  *   abandoned, not cancelled
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   an encrypted ZIP (`WinZip` AES) or 7z (AES-256) archive, as in
+ *   `extractArchive`: a string is refused, an empty or over-long password is
+ *   `InvalidArg`, exarch wipes its own copy and you wipe yours with
+ *   `buf.fill(0)`. It is the last parameter, after `signal`
  *
  * # Returns
  *
@@ -2049,7 +2054,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * });
  * ```
  */
-export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -2081,7 +2086,7 @@ export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterabl
  * extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
  * ```
  */
-export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: (entry: MemoryEntry) => void, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): ExtractionReport
+export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: (entry: MemoryEntry) => void, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, password?: Uint8Array | undefined | null): ExtractionReport
 
 /**
  * Extract an archive held in memory into memory (async).
@@ -2106,6 +2111,11 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  *   is noticed when the job starts, while it waits for JavaScript (an
  *   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
  *   archive and, for the `WithProgress` variants, at every progress callback
+ * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+ *   an encrypted ZIP (`WinZip` AES) or 7z (AES-256) archive, as in
+ *   `extractArchive`: a string is refused, an empty or over-long password is
+ *   `InvalidArg`, exarch wipes its own copy and you wipe yours with
+ *   `buf.fill(0)`. It is the last parameter, after `signal`
  *
  * # Returns
  *
@@ -2125,7 +2135,7 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  * const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
  * ```
  */
-export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory (sync).
@@ -2151,7 +2161,7 @@ export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<
  * const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
  * ```
  */
-export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): MemoryExtraction
+export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, password?: Uint8Array | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -2167,6 +2177,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  *
  * * `progress` - Optional progress callback
  * * `signal` - Optional `AbortSignal`, as in `extractArchiveToMemory`
+ * * `password` - Optional password, as in `extractArchiveToMemory`
  *
  * # Returns
  *
@@ -2193,7 +2204,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -2209,6 +2220,8 @@ export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | As
  * The arguments of `extractArchiveToMemorySync`, then:
  *
  * * `progress` - Optional progress callback
+ * * `password` - Optional password, as in `extractArchiveToMemory`; a string
+ *   is refused and an empty or over-long one is `InvalidArg`
  *
  * # Returns
  *
@@ -2228,7 +2241,7 @@ export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | As
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): MemoryExtraction
+export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: SinkOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Uint8Array | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -2678,6 +2691,11 @@ export interface ManifestDirectoryEntry {
    * clamped to it.
    */
   sizeClamped: boolean
+  /**
+   * `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+   * block), whether or not a password was supplied.
+   */
+  encrypted: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
   /**
@@ -2706,6 +2724,11 @@ export interface ManifestFileEntry {
    * clamped to it.
    */
   sizeClamped: boolean
+  /**
+   * `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+   * block), whether or not a password was supplied.
+   */
+  encrypted: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
   /**
@@ -2734,6 +2757,11 @@ export interface ManifestHardlinkEntry {
    * clamped to it.
    */
   sizeClamped: boolean
+  /**
+   * `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+   * block), whether or not a password was supplied.
+   */
+  encrypted: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
   /**
@@ -2759,6 +2787,11 @@ export interface ManifestSymlinkEntry {
    * clamped to it.
    */
   sizeClamped: boolean
+  /**
+   * `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+   * block), whether or not a password was supplied.
+   */
+  encrypted: boolean
   /** File permissions (raw Unix mode). */
   mode?: number
   /**

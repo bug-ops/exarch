@@ -58,7 +58,9 @@ mod types;
 mod writer;
 
 #[cfg(test)]
-use exarch_testkit::raw_zip;
+mod testkit;
+#[cfg(test)]
+use testkit::raw_zip;
 
 // Re-export main API types
 pub use api::create_archive;
@@ -206,6 +208,7 @@ pub use staging::BACKUP_PREFIX;
 pub use staging::STAGING_PREFIX;
 pub use staging::StagedOutputKind;
 pub use staging::StagingPlace;
+pub use staging::StagingReservation;
 pub use staging::staging_place;
 
 // Re-export creation types
@@ -225,6 +228,7 @@ pub use inspection::CheckStatus;
 pub use inspection::Disposition;
 pub use inspection::DispositionKind;
 pub use inspection::EntryCompression;
+pub use inspection::EntryEncryption;
 pub use inspection::Finding;
 pub use inspection::Heuristic;
 pub use inspection::IntegrityGaps;

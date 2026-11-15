@@ -1,6 +1,7 @@
 //! Extraction of an archive held in memory into memory.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use exarch_core::CallbackEntry;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
@@ -34,6 +35,7 @@ use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
 use crate::error::spawn_blocking_promise_with;
 use crate::mirror::mirror_into_core;
+use crate::password_of;
 use crate::report::ArchiveType;
 use crate::report::CreatableFormat;
 use crate::report::CreationReport;
@@ -233,6 +235,7 @@ struct MemoryJob<S> {
     max_bytes: Option<f64>,
     path_model: CorePathModel,
     format: Option<ArchiveType>,
+    password: Option<Arc<exarch_core::Password>>,
 }
 
 impl<S: IntoSource> MemoryJob<S> {
@@ -243,6 +246,7 @@ impl<S: IntoSource> MemoryJob<S> {
         max_bytes: Option<f64>,
         path_model: Option<PathModel>,
         format: Option<ArchiveType>,
+        password: Option<Arc<exarch_core::Password>>,
     ) -> Self {
         Self {
             data,
@@ -251,6 +255,7 @@ impl<S: IntoSource> MemoryJob<S> {
             max_bytes,
             path_model: path_model.map_or(CorePathModel::Host, Into::into),
             format,
+            password,
         }
     }
 
@@ -305,6 +310,9 @@ impl<S: IntoSource> MemoryJob<S> {
         if let Some(limit) = limit {
             request = request.with_limit(limit);
         }
+        if let Some(password) = self.password {
+            request = request.with_password(password);
+        }
         self.data.run(self.format, |reader| {
             Ok(extract_reader_to_memory(reader, &request, progress)?)
         })
@@ -338,6 +346,7 @@ fn into_memory_extraction(
 ///
 /// * `progress` - Optional progress callback
 /// * `signal` - Optional `AbortSignal`, as in `extractArchiveToMemory`
+/// * `password` - Optional password, as in `extractArchiveToMemory`
 ///
 /// # Returns
 ///
@@ -376,9 +385,13 @@ pub fn extract_archive_to_memory_with_progress<'env>(
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
+    let password = password_of(password)?;
     let (data, detach) = AbortableSource::bind(data, signal);
-    let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
+    let job = MemoryJob::new(
+        data, config, options, max_bytes, path_model, format, password,
+    );
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     spawn_blocking_promise_with(
@@ -514,6 +527,11 @@ pub fn create_archive_to_bytes_sync(
 ///   is noticed when the job starts, while it waits for JavaScript (an
 ///   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
 ///   archive and, for the `WithProgress` variants, at every progress callback
+/// * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+///   an encrypted ZIP (`WinZip` AES) or 7z (AES-256) archive, as in
+///   `extractArchive`: a string is refused, an empty or over-long password is
+///   `InvalidArg`, exarch wipes its own copy and you wipe yours with
+///   `buf.fill(0)`. It is the last parameter, after `signal`
 ///
 /// # Returns
 ///
@@ -543,9 +561,13 @@ pub fn extract_archive_to_memory<'env>(
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
+    let password = password_of(password)?;
     let (data, detach) = AbortableSource::bind(data, signal);
-    let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
+    let job = MemoryJob::new(
+        data, config, options, max_bytes, path_model, format, password,
+    );
 
     spawn_blocking_promise_with(
         env,
@@ -579,6 +601,7 @@ pub fn extract_archive_to_memory<'env>(
 /// const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
 /// ```
 #[napi]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_memory_sync(
     env: Env,
     data: Uint8Array,
@@ -587,8 +610,12 @@ pub fn extract_archive_to_memory_sync(
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
+    password: Option<Uint8Array>,
 ) -> Result<MemoryExtraction> {
-    let job = MemoryJob::new(&*data, config, options, max_bytes, path_model, format);
+    let password = password_of(password)?;
+    let job = MemoryJob::new(
+        &*data, config, options, max_bytes, path_model, format, password,
+    );
 
     run_sync(env, "archive extraction", move || job.run())
 }
@@ -606,6 +633,8 @@ pub fn extract_archive_to_memory_sync(
 /// The arguments of `extractArchiveToMemorySync`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `password` - Optional password, as in `extractArchiveToMemory`; a string
+///   is refused and an empty or over-long one is `InvalidArg`
 ///
 /// # Returns
 ///
@@ -635,8 +664,12 @@ pub fn extract_archive_to_memory_with_progress_sync(
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    password: Option<Uint8Array>,
 ) -> Result<MemoryExtraction> {
-    let job = MemoryJob::new(&*data, config, options, max_bytes, path_model, format);
+    let password = password_of(password)?;
+    let job = MemoryJob::new(
+        &*data, config, options, max_bytes, path_model, format, password,
+    );
 
     run_sync(env, "archive extraction with progress", move || {
         job.run_with_progress(progress, ProgressDispatch::Deferred)

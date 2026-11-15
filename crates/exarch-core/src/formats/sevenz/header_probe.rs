@@ -29,6 +29,8 @@ use super::admit;
 use super::header::SEVENZ_MAGIC;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
+use crate::encryption::kdf;
+use crate::encryption::kdf::KeyMode;
 use crate::formats::le;
 use crate::formats::le::le64;
 
@@ -115,7 +117,7 @@ impl DeclaredTables {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Refusal {
     /// A coder of the header is encryption.
-    Encrypted,
+    Encrypted(KeyMode),
     /// A coder of the header needs more than the memory limit.
     Memory,
 }
@@ -278,8 +280,17 @@ fn decode_header<R: Read + Seek>(
     max_bytes: u64,
     memory_kib: usize,
 ) -> Result<Vec<u8>, Stop> {
-    if record.coders.iter().any(|coder| coder.id == METHOD_AES) {
-        return Err(Stop::Refused(Refusal::Encrypted));
+    let mut aes = record.coders.iter().filter(|coder| coder.id == METHOD_AES);
+    if let Some(first) = aes.next() {
+        let raw_key = std::iter::once(first)
+            .chain(aes)
+            .any(|coder| kdf::key_mode(coder.properties) == Some(KeyMode::RawKey));
+        let key = if raw_key {
+            KeyMode::RawKey
+        } else {
+            KeyMode::Derived
+        };
+        return Err(Stop::Refused(Refusal::Encrypted(key)));
     }
     let decoded = record.decoded().ok_or(Stop::Unmodelled)?;
     let coder = record.coders.first().copied().ok_or(Stop::Unmodelled)?;
@@ -1039,8 +1050,25 @@ mod tests {
             let bytes = archive_with_record(&[0; 4], &record);
             assert_eq!(
                 entries(&bytes),
-                HeaderEntries::Refused(Refusal::Encrypted),
+                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::Derived)),
                 "{record:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_key_aes_coder_anywhere_in_the_folder_is_a_raw_key_header() {
+        let raw = [0x3F, 0];
+        let derived = [19, 0];
+        for coders in [
+            [(METHOD_AES, &raw[..]), (METHOD_LZMA, &[0; 5][..])],
+            [(METHOD_AES, &derived[..]), (METHOD_AES, &raw[..])],
+        ] {
+            let bytes = archive_with_record(&[0; 4], &record_of(&coders, 4, 4));
+            assert_eq!(
+                entries(&bytes),
+                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::RawKey)),
+                "{coders:?}"
             );
         }
     }

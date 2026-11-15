@@ -32,7 +32,7 @@ related:
 > **Subsystem**: exarch-core / `formats::{zip,sevenz}`, `config`, `request`, `security` (`QuotaTracker`, `validate_compression_ratio`), error classification; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.100
 > **Origin**: #1001 (competitive parity research, P4). Classification history: closed #83, #96, #171, #658.
-> **Status**: implemented in the batch PR #1230 (branch `feat/1230-batch-11-issues`, issue #1023), unreleased. The three Ask First items of section 9 were decided by the user on 2026-11-15. The deviations of the implementation from the text below are listed in section 9 ("Deviations") and the requirements they touch carry the live behavior.
+> **Status**: implemented in the batch PR #1230 (branch `feat/1230-batch-11-issues`, issue #1023) and refined in the batch of #1237 to #1246 (branch `feat/1244-batch-10-issues`), unreleased. The three Ask First items of section 9 were decided by the user on 2026-11-15. The deviations that remain are listed in section 9 ("Deviations"); the requirements carry the live behavior.
 > **Decision**: implement (user decision, recorded in plan rev 2; recommendations accepted 2026-11-15), read-only, not `wontfix`. The criteria of the research draft (DC-1 to DC-5) are replaced by the go/no-go criteria of section 7 that the implementation PR must meet.
 
 ## 1. Overview
@@ -149,7 +149,7 @@ SO THAT I can inspect an archive before extracting
 ```
 GIVEN an encrypted ZIP and no password
 WHEN list runs
-THEN names are listed (`list` shows no encrypted mark); verify --check-integrity counts the entries as unverified (reason encrypted, WARNING)
+THEN names are listed and each encrypted entry is marked encrypted; verify --check-integrity counts the entries as unverified (reason encrypted, WARNING)
 ```
 
 ### US-007: A clear refusal without a password
@@ -183,33 +183,31 @@ THEN the operation fails with KdfCostExceeded before the first content derivatio
 | FR-001 | THE SYSTEM SHALL provide `Password` in exarch-core (using `zeroize`, a direct dependency of exarch-core behind the `encryption` feature): bytes in a zeroizing buffer, redacted `Debug`, no `Display`, no `Clone` (shared as `Arc<Password>` where needed), a constructor that refuses empty and over-long input; it is passed per request (`with_password` on the extract, list and verify requests of [[020-reader-sink-and-in-memory-api/spec]]) and never stored in `SecurityConfig`, which is `Clone` and `Debug` | must |
 | FR-002 | THE CLI SHALL accept the password only from `--password-file <PATH>` (a regular file, first line, trailing `\n` or `\r\n` stripped, at most 1 KiB, refused on Unix when group- or world-readable), `--password-fd <N>` (Unix) or `--password-prompt` (no-echo TTY through the `rpassword` crate, a dependency of exarch-cli only; non-interactive stdin is an error, never a hang); the flags are mutually exclusive; there SHALL be no argv value and no environment variable | must |
 | FR-003 | THE Python binding SHALL take `password: bytearray | None` and THE Node binding `password?: Uint8Array` (a `Buffer` is one); a `bytes`, `str` or string SHALL be refused with a typed error. exarch zeroizes its own copy; the caller wipes theirs (the docs show `password[:] = bytes(len(password))` and `buf.fill(0)`); zeroization across the binding boundary is best-effort and documented | must |
-| FR-004 | Encoding: ZIP SHALL use the password bytes as given; 7z SHALL use the UTF-16LE of the text, so a 7z password must be valid UTF-8 (a non-UTF-8 password is reported as `WrongPasswordOrCorrupt`, no separate reason); there is no Unicode normalization (as 7-Zip) | must |
 | FR-005 | The password, derived keys and any key material SHALL NOT appear in argv, the environment, progress callbacks, reports, JSON, error messages, logs, `Debug` output or panic payloads; grep-style tests SHALL enforce it | must |
 
 ### Pipeline
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-010 | THE SYSTEM SHALL order work as decrypt, then decompress, then the existing pipeline unchanged: `SafePath` on names (including names decrypted from a 7z header), quotas and the compression ratio on decrypted, decompressed sizes, with the ciphertext overhead subtracted from the compressed size; no declared size from the encrypted container is trusted | must |
+| FR-010 | THE SYSTEM SHALL classify a 7z decode failure by the block that raised it, not by the archive: in a non-solid 7z that mixes AES and plain blocks, a failure in a plain block carries the same error kind and `sub_code` as in an all-plain 7z, and a failure in an AES block stays `WrongPasswordOrCorrupt`; a failure outside any block (container hand-over) is classified as plain. THE SYSTEM SHALL order work as decrypt, then decompress, then the existing pipeline unchanged: `SafePath` on names (including names decrypted from a 7z header), quotas and the compression ratio on decrypted, decompressed sizes, with the ciphertext overhead subtracted from the compressed size; no declared size from the encrypted container is trusted | must |
 | FR-011 | EVERY decrypted entry SHALL be read to its end so the AES HMAC is always checked (the GHSA-8hxf class), before the atomic rename publishes it; unauthenticated plaintext SHALL NOT be released to the destination | must |
 | FR-012 | The solid 7z policy SHALL apply independently of encryption (spec 002 FR-044) | must |
 | FR-013 | Decryption SHALL sit behind an additive `encryption` Cargo feature of exarch-core (zip `aes-crypto`), enabled by exarch-cli and the bindings; a default core build keeps AES compiled out; wasm targets SHALL keep building | must |
-| FR-014 | `list` and `verify` SHALL follow [[019-verify-and-list-model/spec]]: ZIP names are plaintext, so `list` works without a password and marks encrypted entries; `verify --check-integrity` without a password counts them as unverified (reason `encrypted`) and with one decrypts and checks; a header-encrypted 7z without a password is `PasswordRequired` for every command; as implemented, `list` of an encrypted ZIP lists without a password and shows no encrypted mark, the mark exists only in `verify` (`UnverifiedReason::Encrypted`, token `encrypted`), a 7z with AES content under a plain header and no password stays FAIL in `verify` with reason `not_decodable` and an `ENCRYPTED` issue (so `verify` agrees with `extract`, which refuses it), and a 7z with a plain header lists without a password while one with an encrypted header is `password_required` | must |
+| FR-014 | `list` and `verify` SHALL follow [[019-verify-and-list-model/spec]]. ZIP names are plaintext, so `list` works without a password. `list` marks encrypted entries: core `ArchiveEntry.encryption` is the `#[non_exhaustive]` enum `EntryEncryption { Plain, Encrypted }` (token `plain` or `encrypted`), set for every entry whether or not a password was given (ZIP from the entry header's encryption flag; 7z `Encrypted` when the entry's block has an AES coder, so an empty file or directory is `Plain` unless it falls inside an AES block's run; TAR always `Plain`); the CLI `--json` entries carry a boolean `encrypted` (always present), the human `list -l` line ends with `(encrypted)`, and Python `ArchiveEntry.encrypted` and Node `encrypted` (on every kind interface) are booleans. `verify --check-integrity` without a password counts encrypted entries as unverified (`UnverifiedReason::Encrypted`, token `encrypted`, WARNING, `IntegrityStatus::Incomplete`) and with one decrypts and checks. This holds for a 7z with AES content under a plain header as for an AES ZIP: without a password `verify` reports each file of the AES block as unverified with reason `encrypted` (WARNING, exit 0, no `ENCRYPTED` issue), while `extract` of it still fails with `password_required` before anything is written. A 7z with a plain header lists without a password; one with an encrypted header is `password_required` for every command | must |
 | FR-015 | WHEN an archive mixes encrypted and unencrypted entries THE SYSTEM SHALL handle each by its own state, and a failure SHALL follow the existing atomic and partial extraction policies | should |
-| FR-016 | The in-memory reader and sink API of spec 020 SHALL apply the same decrypt-then-validate rules and RAM accounting to decrypted bytes | should |
 
 ### Errors
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-020 | Errors SHALL be typed as `Violation::Encrypted { reason: EncryptionRefusal, name: Option<..> }` (`EncryptionRefusal` is a `#[non_exhaustive]` closed enum with snake_case tokens; `ArchiveError::encryption_refusal()` returns it), machine code `SECURITY_VIOLATION` with `sub_code` `ENCRYPTED` (the bindings' `SecurityViolationSubCode` stays stable; a plain `PasswordRequired` keeps `SECURITY_VIOLATION`), with these reasons: `PasswordRequired` (no password; replaces today's `Violation::EncryptedArchive` and `EncryptedEntry` refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller. The reason is machine-readable on every surface: the `--json` error `reason` key, the Python `SecurityViolationError.reason` attribute and the Node error `reason` property, with the snake_case tokens `password_required`, `wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`, `weak_encryption_refused`, `kdf_cost_exceeded` | must |
+| FR-020 | Errors SHALL be typed as `Violation::Encrypted { reason: EncryptionRefusal, name: Option<..> }` (`EncryptionRefusal` is a `#[non_exhaustive]` closed enum with snake_case tokens; `ArchiveError::encryption_refusal()` returns it), machine code `SECURITY_VIOLATION` with `sub_code` `ENCRYPTED` (the bindings' `SecurityViolationSubCode` stays stable; a plain `PasswordRequired` keeps `SECURITY_VIOLATION`), with these reasons: `PasswordRequired` (no password; replaces today's `Violation::EncryptedArchive` and `EncryptedEntry` refusal), `WrongPassword` (ZIP AES verifier mismatch), `AuthenticationFailed` (HMAC mismatch: tampered, or a wrong password that passed the 2-byte verifier), `WrongPasswordOrCorrupt` (7z has no verifier: a supplied password plus a CRC or decoder failure), `WeakEncryptionRefused` (ZipCrypto, and 7z "raw key" mode, FR-031), `KdfCostExceeded` (FR-032), `UnusablePassword` (a 7z that has an AES block or an encrypted header and was given a password that is not valid UTF-8, which cannot be encoded as the UTF-16LE 7z needs; ZIP is unaffected). Distinguishing wrong from tampered is accepted: whoever holds the archive can guess offline anyway, and rate limiting belongs to the caller. The reason is machine-readable on every surface: the `--json` error `reason` key, the Python `SecurityViolationError.reason` attribute and the Node error `reason` property, with the snake_case tokens `password_required`, `wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`, `weak_encryption_refused`, `kdf_cost_exceeded`, `unusable_password`. On every 7z path (content block and encrypted header) the refusals are checked in one order, and the first that applies wins: `password_required`, `unusable_password`, `weak_encryption_refused`, `kdf_cost_exceeded`. The `unusable_password` refusal is raised during admission, before any decode | must |
 
 ### KDF cost
 
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-030 | Per derivation, THE SYSTEM SHALL inherit sevenz-rust2 0.25's bound: `NumCyclesPower` above 24 (`MAX_AES_CYCLES_POWER`, `encryption/aes.rs`) is rejected upstream, at most 2^24 SHA-256 rounds. For a header-encrypted 7z the key is derived inside `Archive::read`, before exarch sees any coder, so v1 has no per-derivation knob; a test pins the upstream cap | must |
-| FR-031 | Power `0x3F` ("raw key" mode, no KDF) in a content coder SHALL be refused as `WeakEncryptionRefused`, detected from the coder properties during admission. It cannot be refused for an encrypted header before the header is read, because the key is built inside `Archive::read`, and after the read exarch no longer sees the header coder properties, so v1 has no check there and claims none; refusing it would need an upstream change (a hook or an error for raw-key mode in `Archive::read`). Raw-key mode runs no KDF, so it adds no CPU risk; it only means the header key is the password bytes themselves. This policy applies to content only | must |
+| FR-031 | Power `0x3F` ("raw key" mode, no KDF) in a content coder SHALL be refused as `WeakEncryptionRefused`, detected from the coder properties during admission. It cannot be refused for an encrypted header before the header is read, because the key is built inside `Archive::read`, and after the read exarch no longer sees the header coder properties, so the check is made by the header probe instead: WHEN the probe models the encoded header, ANY AES coder of it (every coder with the AES method id, not only the first) whose properties select raw-key mode (power `0x3F`) SHALL be refused as `WeakEncryptionRefused` in `list`, `verify` and `extract`, given a UTF-8 password, before `Archive::read`; with no password it stays `PasswordRequired` (FR-020 order). Coder properties that do not parse count as a derived key. WHEN the probe does not model the header (unmodelled or not applicable) behavior is unchanged and no raw-key check is claimed; refusing it there would need an upstream change. Raw-key mode runs no KDF, so it adds no CPU risk; it only means the key is the password bytes themselves | must |
 | FR-032 | `SecurityConfig::max_kdf_work` (a Rust, Python and Node setting; the CLI has no flag for it) (`NonZeroU64`, SHA-256 rounds; default 2^27) SHALL bound the total key-derivation work of one operation. Accounting (below) is charged at admission, before any content block is decoded; over budget is `KdfCostExceeded`. Admission SHALL refuse any power above 24 (power `0x3F` as `WeakEncryptionRefused` per FR-031, powers 25 to 62 as `KdfCostExceeded`) before computing `2^power`, and SHALL sum with saturating addition | must |
 | FR-033 | ZIP AES uses PBKDF2-HMAC-SHA1 at a fixed 1000 iterations per entry; its cost is bounded by `max_file_count`, stated in the docs and not charged against `max_kdf_work` | must |
 | FR-034 | WHILE a 7z has AES blocks THE SYSTEM SHALL decode those blocks sequentially (no parallel decode of encrypted blocks), so the order of derivations is the archive order the accounting assumes | must |
@@ -253,7 +251,8 @@ Consequences:
 | `PasswordSource` (CLI) | Channel the password is read from | file path, file descriptor, prompt |
 | `max_kdf_work` | `SecurityConfig` field | `NonZeroU64` rounds, default 2^27 |
 | Derivation run | Accounting unit (FR-032) | (power, salt) pair changed since the previous AES block |
-| Encryption error family | `sub_code` `ENCRYPTED` | `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `WeakEncryptionRefused`, `KdfCostExceeded` |
+| Encryption error family | `sub_code` `ENCRYPTED` | `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `WeakEncryptionRefused`, `KdfCostExceeded`, `UnusablePassword` |
+| `EntryEncryption` | Per-entry marker on `ArchiveEntry` | `Plain` (default), `Encrypted`; token `plain` or `encrypted`; a boolean `encrypted` on the CLI JSON, Python and Node surfaces |
 
 ## 6. Edge Cases and Error Handling
 
@@ -267,14 +266,17 @@ Consequences:
 | Encrypted entry with `../`, absolute path or link escape | Rejected by the standard pipeline after decryption |
 | 7z power above 24 | Rejected upstream; admission refuses powers 25 to 62 first (`KdfCostExceeded`) |
 | 7z content coder at power `0x3F` | `WeakEncryptionRefused` |
-| 7z header at power `0x3F` | Not refusable by exarch in v1 (the key is built inside `Archive::read` and the header coder is not visible afterwards); needs an upstream change; content policy only |
+| 7z header with a raw-key AES coder (power `0x3F`, in any of its AES coders) | `WeakEncryptionRefused` when the probe models the header, before `Archive::read`; no password stays `PasswordRequired` |
 | Distinct salt per block | `KdfCostExceeded` after at most `max_kdf_work / 2^power` runs (minus the header reservation) |
 | Header-encrypted 7z, no password | `PasswordRequired` for list, verify and extract |
 | Solid and encrypted 7z | Refused as solid regardless of password |
 | ZipCrypto entry | `WeakEncryptionRefused` |
 | Password file missing, unreadable, over 1 KiB or group/world-readable (Unix) | CLI error before any archive access |
 | Password with a trailing newline in the file | One trailing `\n` or `\r\n` stripped |
-| 7z password that is not valid UTF-8 | Typed refusal |
+| 7z password that is not valid UTF-8, archive with an AES block or an encrypted header | `UnusablePassword`, before any decode; order `password_required`, `unusable_password`, `weak_encryption_refused`, `kdf_cost_exceeded` |
+| 7z with AES content under a plain header, no password | `verify` unverified `encrypted` (WARNING); `extract` `PasswordRequired` |
+| Non-solid 7z mixing one AES block and one plain block, plain block corrupted, right password | Same error kind and `sub_code` as the same corruption in an all-plain 7z; a corrupted AES block stays `WrongPasswordOrCorrupt` |
+| `list` of an archive with encrypted entries | Each encrypted entry is marked (`encrypted` true, `(encrypted)` in `list -l`) |
 | Empty password | Refused at construction |
 | Prompt requested with non-interactive stdin | Error, no hang |
 | Python `bytes` or `str`, Node string | Refused with a typed error |
@@ -347,7 +349,6 @@ The implementation PR meets all of these or does not merge:
 
 | Requirement | Specified | Implemented |
 |-------------|-----------|-------------|
-| US-006, FR-014 | `list` marks encrypted entries | `list` lists without a mark; `verify` marks them unverified (`encrypted`); 7z with AES under a plain header and no password stays FAIL (`not_decodable`), unlike ZIP (WARNING) |
 | FR-020 | `Violation::Encryption(EncryptionRefusal)` | `Violation::Encrypted { reason, name }`, reason exposed on every surface |
 | FR-003 | Node `Buffer` | `Uint8Array` (a `Buffer` is accepted) |
 | FR-004 | typed refusal for a non-UTF-8 7z password | `WrongPasswordOrCorrupt` |

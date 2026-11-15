@@ -115,7 +115,7 @@ ExtractRequest::new(&config)
     .extract("secret.zip", "out")?;
 ```
 
-Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: `sevenz-rust2` keeps the last derived 7z key in process memory until the next derivation or exit, and a 7z password is converted for `sevenz-rust2` without being wiped there.
+Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `UnusablePassword` (a 7z password that is not UTF-8), `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: `sevenz-rust2` keeps the last derived 7z key in process memory until the next derivation or exit, and a 7z password is converted for `sevenz-rust2` without being wiped there.
 
 ## Archive Creation
 

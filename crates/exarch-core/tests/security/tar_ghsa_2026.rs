@@ -15,13 +15,13 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
+use crate::sink_support::testkit::pax::record as pax_record;
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::TarAmbiguity;
 use exarch_core::TarPathKey;
-use exarch_testkit::pax::record as pax_record;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;

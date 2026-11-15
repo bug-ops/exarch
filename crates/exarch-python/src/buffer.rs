@@ -30,6 +30,7 @@ use exarch_core::extract_reader_to_memory;
 use exarch_core::utf8_entry_path;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::types::PyByteArray;
 use pyo3::types::PyBytes;
 
 use crate::catch_panic_as_py_err;
@@ -41,6 +42,7 @@ use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::config::parse_existing_files;
 use crate::error::convert_error;
+use crate::password_of;
 use crate::path_to_boundary;
 use crate::report::PyArchiveManifest;
 use crate::report::PyCreationReport;
@@ -406,6 +408,8 @@ impl PyMemoryExtraction {
 /// * `path_model` - `"host"` (default) or `"portable"`: validate names against
 ///   this platform's rules or the strictest rules of every platform
 /// * `format` - The archive format; detected from the leading bytes if None
+/// * `password` - Optional `bytearray` password of an encrypted archive, as in
+///   `extract_archive`; the caller wipes its own copy
 ///
 /// # Returns
 ///
@@ -428,7 +432,11 @@ impl PyMemoryExtraction {
 ///     print(entry.path, entry.kind)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the signature mirrors the sibling function"
+)]
+#[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None, password=None))]
 pub fn extract_archive_to_memory(
     py: Python<'_>,
     data: ArchiveInput,
@@ -437,8 +445,9 @@ pub fn extract_archive_to_memory(
     max_bytes: Option<PyInteger>,
     path_model: Option<&str>,
     format: Option<&str>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyMemoryExtraction> {
-    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format)?;
+    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format, password)?;
 
     let slot = data.failure_slot();
     let result = catch_panic_as_py_err("archive extraction", || {
@@ -462,6 +471,7 @@ pub fn extract_archive_to_memory(
 /// * `path_model` - See `extract_archive_to_memory`
 /// * `format` - The archive format; detected from the leading bytes if None
 /// * `progress` - Optional progress callback function
+/// * `password` - See `extract_archive_to_memory`
 ///
 /// # Returns
 ///
@@ -501,7 +511,7 @@ pub fn extract_archive_to_memory(
     clippy::too_many_arguments,
     reason = "the signature mirrors the sibling function"
 )]
-#[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None, progress=None))]
+#[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None, progress=None, password=None))]
 pub fn extract_archive_to_memory_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
@@ -511,8 +521,9 @@ pub fn extract_archive_to_memory_with_progress(
     path_model: Option<&str>,
     format: Option<&str>,
     progress: Option<Py<PyAny>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyMemoryExtraction> {
-    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format)?;
+    let request = MemoryRequest::parse(config, options, max_bytes, path_model, format, password)?;
 
     let slot = data.failure_slot();
     let result = run_with_optional_progress(
@@ -740,7 +751,11 @@ pub fn verify_archive_bytes_with_progress(
     clippy::needless_pass_by_value,
     reason = "pyo3 extracts on_entry as an owned Py<PyAny>; the Send handle is what the py.detach closure borrows"
 )]
-#[pyo3(signature = (data, on_entry, config=None, options=None, path_model=None, format=None))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the signature mirrors the sibling functions"
+)]
+#[pyo3(signature = (data, on_entry, config=None, options=None, path_model=None, format=None, password=None))]
 pub fn extract_archive_to_callback(
     py: Python<'_>,
     data: ArchiveInput,
@@ -749,11 +764,12 @@ pub fn extract_archive_to_callback(
     options: Option<&PySinkOptions>,
     path_model: Option<&str>,
     format: Option<&str>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyExtractionReport> {
     if !on_entry.bind(py).is_callable() {
         return Err(PyTypeError::new_err("on_entry must be callable"));
     }
-    let request = MemoryRequest::parse(config, options, None, path_model, format)?;
+    let request = MemoryRequest::parse(config, options, None, path_model, format, password)?;
 
     let slot = data.failure_slot();
     // Outer `Err`: an archive or file-object failure; inner `Err`: the
@@ -799,6 +815,7 @@ impl MemoryRequest {
         max_bytes: Option<PyInteger>,
         path_model: Option<&str>,
         format: Option<&str>,
+        password: Option<&Bound<'_, PyByteArray>>,
     ) -> PyResult<Self> {
         let format = parse_format(format)?;
         let path_model = parse_path_model(path_model)?.unwrap_or_default();
@@ -812,6 +829,9 @@ impl MemoryRequest {
             .with_path_model(path_model);
         if let Some(bytes) = max_bytes {
             request = request.with_limit(MemoryLimit::new(bytes));
+        }
+        if let Some(password) = password_of(password)? {
+            request = request.with_password(password);
         }
         Ok(Self { request, format })
     }

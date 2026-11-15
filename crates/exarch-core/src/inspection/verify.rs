@@ -895,6 +895,7 @@ fn is_suspicious_extension(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::inspection::manifest::EntryCompression;
+    use crate::inspection::manifest::EntryEncryption;
     use crate::inspection::report::CheckStatus;
     use crate::inspection::report::IssueCategory;
     use crate::inspection::report::VerificationStatus;
@@ -1530,6 +1531,7 @@ mod tests {
             compression: EntryCompression::Unknown,
             mode: Some(RawMode::new(0o755)),
             modified: None,
+            encryption: EntryEncryption::Plain,
         };
 
         let issues = check_heuristics(&entry);
@@ -1551,6 +1553,7 @@ mod tests {
             compression: EntryCompression::Unknown,
             mode: Some(RawMode::new(0o644)),
             modified: None,
+            encryption: EntryEncryption::Plain,
         };
 
         let issues = check_heuristics(&entry);
@@ -1576,6 +1579,7 @@ mod tests {
             compression: EntryCompression::Unknown,
             mode: Some(RawMode::new(0o644)),
             modified: None,
+            encryption: EntryEncryption::Plain,
         };
 
         let issues = check_heuristics(&entry);
@@ -1597,6 +1601,7 @@ mod tests {
             compression: EntryCompression::Unknown,
             mode: Some(RawMode::new(0o644)),
             modified: None,
+            encryption: EntryEncryption::Plain,
         };
 
         let issues = check_heuristics(&entry);

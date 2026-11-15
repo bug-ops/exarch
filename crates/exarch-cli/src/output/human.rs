@@ -22,6 +22,7 @@ use crate::sandbox::SandboxStatus;
 use anyhow::Result;
 use console::Term;
 use console::style;
+use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::Disposition;
@@ -142,6 +143,15 @@ fn dedicated_link_suffix(target: &LinkTarget) -> Option<String> {
         LinkTarget::Oversized { bytes } => format!("  (target too long: {bytes} bytes)"),
         _ => return None,
     })
+}
+
+/// The marker after an encrypted entry's path in the long listing.
+const fn encryption_suffix(entry: &ArchiveEntry) -> &'static str {
+    if entry.is_encrypted() {
+        "  (encrypted)"
+    } else {
+        ""
+    }
 }
 
 /// What follows an entry's name when a selection is active: where it lands
@@ -332,12 +342,13 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
             emit_line(
                 &mut self.out,
                 format_args!(
-                    "{}{:<6} {:>10}  {}{}{}",
+                    "{}{:<6} {:>10}  {}{}{}{}",
                     type_char,
                     mode_str,
                     size_str,
                     TerminalEntry::new(&entry.path),
                     link_suffix(&entry.kind),
+                    encryption_suffix(entry),
                     disposition_suffix(dispositions.get(index), &entry.path)
                 ),
             )?;

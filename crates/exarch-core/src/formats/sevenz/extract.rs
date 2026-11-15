@@ -20,7 +20,9 @@ use super::classify::SevenZClass;
 use super::classify::SevenZKind;
 use super::classify::abort_with;
 use super::classify::reparse_point_refusal;
+use super::decode::DecodeFailure;
 use super::decode::decode_archive_entries;
+use super::header::BlockIndex;
 use super::iter_sevenz_refusals;
 use super::links::read_sevenz_link_target;
 use super::lzma2::DecodeKnobs;
@@ -300,16 +302,23 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut index = 0_usize;
         let is_solid = self.header.is_solid();
         let tap = SourceTap::default();
-        let faults = ReadFaults::new(ReadFamily::SevenZ, Some(&tap));
-        let faults = if self.header.content_encrypted() {
-            faults.decrypting(crate::EncryptionRefusal::WrongPasswordOrCorrupt)
-        } else {
-            faults
+        let plain = ReadFaults::new(ReadFamily::SevenZ, Some(&tap));
+        let sealed = plain.decrypting(crate::EncryptionRefusal::WrongPasswordOrCorrupt);
+        let header = &self.header;
+        let faults_of = |block: Option<BlockIndex>| {
+            if block.is_some_and(|block| header.is_block_encrypted(block)) {
+                sealed
+            } else {
+                plain
+            }
         };
+        let mut file_position = 0_usize;
 
         let mut each = |entry: &sevenz_rust2::ArchiveEntry,
                         reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
+            let faults = faults_of(header.file_block(file_position));
+            file_position = file_position.saturating_add(1);
             let kind = match SevenZClass::of(entry).present(&entry.name) {
                 Ok(Some(kind)) => kind,
                 Ok(None) => return Ok(true),
@@ -352,7 +361,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut source = SourceRead::new(&mut self.source, tap.clone());
         let result = decode_archive_entries(
             &mut source,
-            &self.header,
+            header,
             config.parallel_decode,
             DecodeKnobs::production(),
             &mut each,
@@ -363,12 +372,18 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 Ok(()) => Ok(report),
                 Err(error) => Err(ArchiveError::partial_or(report, error)),
             },
-            Err(error) => Err(ArchiveError::partial_or(
-                report,
-                pending_error
-                    .take()
-                    .unwrap_or_else(|| outside_callback(error, faults)),
-            )),
+            Err(failure) => {
+                let (block, error) = match failure {
+                    DecodeFailure::Block { block, error } => (Some(block), error),
+                    DecodeFailure::Handover(error) => (None, error),
+                };
+                Err(ArchiveError::partial_or(
+                    report,
+                    pending_error
+                        .take()
+                        .unwrap_or_else(|| outside_callback(error, faults_of(block))),
+                ))
+            }
         }
     }
 }

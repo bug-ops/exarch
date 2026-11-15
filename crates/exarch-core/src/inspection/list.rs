@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::EntryEncryption;
 use crate::EntryTotal;
 use crate::ListOptions;
 use crate::Malformation;
@@ -511,6 +512,7 @@ fn list_tar_entries<R: std::io::Read>(
                 compression: EntryCompression::Unknown,
                 mode,
                 modified,
+                encryption: EntryEncryption::Plain,
             };
 
             let ListPass {
@@ -678,6 +680,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             open_entry(archive, i, &credentials)
         }
         .map_err(|e| listed_failure(&e))?;
+        let encryption = EntryEncryption::from_flag(entry.encrypted());
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -798,6 +801,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             compression,
             mode,
             modified,
+            encryption,
         };
 
         manifest.add_entry(archive_entry)?;
@@ -1047,6 +1051,11 @@ fn list_sevenz_archive(
             compression,
             mode: None,
             modified,
+            encryption: EntryEncryption::from_flag(
+                header
+                    .file_block(index.get())
+                    .is_some_and(|block| header.is_block_encrypted(block)),
+            ),
         };
 
         if kind == SevenZKind::UnixSymlink {

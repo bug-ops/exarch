@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Core API, CLI, Python and Node: `list` marks encrypted entries of a ZIP and of a 7z (`EntryEncryption`, `encrypted` in the JSON, Python and Node types) (#TBD).
+- Core API, Python and Node: `MemoryExtractRequest::with_password` and a `password` option on the `*_to_memory` and callback extraction functions (#TBD).
+- Core API, CLI, Python and Node: a password that is not valid UTF-8 for a 7z is the distinct refusal `unusable_password` (#TBD).
+- Core API: `StagingReservation` and `ExtractRequest::extract_reserved` stage an extraction before the sandbox is confined (#TBD).
+- CLI: a sandboxed extraction into a missing destination keeps the all-or-nothing stage-and-discard outcome; the confined process may create, remove and rename directories under the destination's parent (#TBD).
 - Core API, CLI, Python and Node: opt-in `RepeatedPaths::Refuse` (`--repeated-paths refuse`) refuses an archive that writes the same path twice, as `Violation::RepeatedPath` (#1247).
 - Core API, CLI, Python and Node: extract, list and verify password-protected ZIP (AES) and 7z archives with `Password` (`--password-file`, `--password-fd`, `--password-prompt`), with typed refusals, a `reason` field on the error (CLI `--json`, Python, Node), a KDF work budget and `UnverifiedReason::Encrypted` in `verify` (#1247).
 - CLI: `--sandbox off|best-effort|require` adds a Linux Landlock backstop to extract, list and verify, and `--json` reports it under `sandbox`; a failed `--sandbox require` is the error kind `SandboxNotEnforced` (#1247).
@@ -42,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify`: a 7z with encrypted content and a plain header is unverified with reason `encrypted` (WARNING) without a password, like a ZIP (#TBD).
+- Extraction: a decode failure in a plain block of a mixed 7z keeps its corrupt-data classification, and a raw-key encrypted 7z header is refused as `weak_encryption_refused` (#TBD).
+- CLI: the forced-exit test waits for a ready line from the stall hook instead of a fixed sleep (#TBD).
+- Core: the `exarch-core` tests use an in-package testkit, so the packaged tests compile (#TBD).
 - Tests: the release-only redaction test builds `DestinationOccupied.conflicts` as `OccupiedPaths`, so the release-profile test job compiles again (#1236).
 - Core: `exarch-core` tests read their fixtures from inside the package (#1247).
 - Node: the release gate compares the packed `package.json` with the committed one, and the node tests share one archive builder (#1247).

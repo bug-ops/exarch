@@ -13,11 +13,11 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
+use crate::sink_support::testkit::raw_zip::RawEntry;
+use crate::sink_support::testkit::raw_zip::RawZip;
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
 use std::io::Cursor;
 use tempfile::TempDir;
 

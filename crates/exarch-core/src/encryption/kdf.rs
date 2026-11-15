@@ -8,7 +8,11 @@
 
 use std::num::NonZeroU64;
 
+use super::Credentials;
+use super::UnusablePassword;
+use crate::ArchiveError;
 use crate::EncryptionRefusal;
+use crate::Malformation;
 
 /// The largest `NumCyclesPower` sevenz-rust2 derives a key for.
 pub(crate) const MAX_POWER: u8 = 24;
@@ -19,6 +23,31 @@ const RAW_KEY_POWER: u8 = 0x3F;
 /// Work reserved for the key of an encrypted header, which is derived inside
 /// `Archive::read` before any coder is visible.
 pub(crate) const HEADER_RESERVE: u64 = 1 << MAX_POWER;
+
+/// How a 7z AES coder derives its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyMode {
+    /// The key is derived from the password by hashing rounds.
+    Derived,
+    /// The key is the password itself, with no derivation.
+    RawKey,
+}
+
+impl KeyMode {
+    const fn of_power(power: u8) -> Self {
+        if power == RAW_KEY_POWER {
+            Self::RawKey
+        } else {
+            Self::Derived
+        }
+    }
+}
+
+/// The key mode the AES coder `properties` declare, or `None` when they do not
+/// parse.
+pub(crate) fn key_mode(properties: &[u8]) -> Option<KeyMode> {
+    AesParams::parse(properties).map(|params| KeyMode::of_power(params.power))
+}
 
 /// What the AES coder properties of a 7z block declare.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +84,42 @@ impl AesParams {
     }
 }
 
+/// The key a 7z AES admission is for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum KeySource<'a> {
+    /// The encrypted header, whose own properties are not visible: the mode
+    /// the probe read, and the derivation reserved at its worst case.
+    Header(KeyMode),
+    /// A block's AES coder, with its properties.
+    Block(&'a [u8]),
+}
+
+/// Why a 7z AES key cannot be admitted, in the order it is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyRefusal {
+    /// No password was supplied.
+    PasswordRequired,
+    /// The password is not UTF-8 text.
+    Unusable(UnusablePassword),
+    /// The coder properties cannot be parsed.
+    Malformed,
+    /// Raw-key mode, or a derivation over the budget.
+    Refused(EncryptionRefusal),
+}
+
+impl From<KeyRefusal> for ArchiveError {
+    fn from(refusal: KeyRefusal) -> Self {
+        match refusal {
+            KeyRefusal::PasswordRequired => crate::formats::common::encrypted_archive_error(),
+            KeyRefusal::Unusable(unusable) => unusable.into(),
+            KeyRefusal::Malformed => Malformation::SevenZUnsupportedCoder.into(),
+            KeyRefusal::Refused(reason) => {
+                crate::Violation::Encrypted { reason, name: None }.into()
+            }
+        }
+    }
+}
+
 /// Why a block's AES coder cannot be admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KdfRefusal {
@@ -83,6 +148,45 @@ impl KdfRuns {
         }
     }
 
+    /// Admits one 7z AES key, the single place the refusal order lives: no
+    /// password, a password that is not UTF-8, raw-key mode, then the budget.
+    ///
+    /// Returns the password as 7z uses it.
+    ///
+    /// # Errors
+    ///
+    /// The first [`KeyRefusal`] in that order.
+    pub(crate) fn admit_key(
+        &mut self,
+        credentials: &Credentials,
+        source: KeySource<'_>,
+    ) -> Result<sevenz_rust2::Password, KeyRefusal> {
+        let password = credentials
+            .sevenz_secret()
+            .map_err(KeyRefusal::Unusable)?
+            .ok_or(KeyRefusal::PasswordRequired)?;
+        let admitted = match source {
+            KeySource::Block(properties) => {
+                self.admit(properties).map_err(|refusal| match refusal {
+                    KdfRefusal::Malformed => KeyRefusal::Malformed,
+                    KdfRefusal::Refused(reason) => KeyRefusal::Refused(reason),
+                })
+            }
+            KeySource::Header(KeyMode::RawKey) => Err(KeyRefusal::Refused(
+                EncryptionRefusal::WeakEncryptionRefused,
+            )),
+            KeySource::Header(KeyMode::Derived) => self.within_budget(),
+        };
+        admitted.map(|()| password)
+    }
+
+    fn within_budget(&self) -> Result<(), KeyRefusal> {
+        if self.spent > self.budget {
+            return Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded));
+        }
+        Ok(())
+    }
+
     /// Charges the block whose AES coder has `properties`.
     ///
     /// A power above [`MAX_POWER`] is refused before `2^power` is computed, and
@@ -95,7 +199,7 @@ impl KdfRuns {
     /// power above the cap or a total above the budget.
     pub(crate) fn admit(&mut self, properties: &[u8]) -> Result<(), KdfRefusal> {
         let params = AesParams::parse(properties).ok_or(KdfRefusal::Malformed)?;
-        if params.power == RAW_KEY_POWER {
+        if KeyMode::of_power(params.power) == KeyMode::RawKey {
             return Err(KdfRefusal::Refused(
                 EncryptionRefusal::WeakEncryptionRefused,
             ));
@@ -107,10 +211,8 @@ impl KdfRuns {
             self.spent = self.spent.saturating_add(1u64 << params.power);
             self.last = Some(params);
         }
-        if self.spent > self.budget {
-            return Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded));
-        }
-        Ok(())
+        self.within_budget()
+            .map_err(|_| KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
     }
 }
 
@@ -180,6 +282,13 @@ mod tests {
                 Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
             );
         }
+    }
+
+    #[test]
+    fn key_mode_tells_raw_keys_from_derived_ones() {
+        assert_eq!(key_mode(&[0x3F, 0]), Some(KeyMode::RawKey));
+        assert_eq!(key_mode(&[19, 0]), Some(KeyMode::Derived));
+        assert_eq!(key_mode(&[0x80, 0x30]), None);
     }
 
     #[test]

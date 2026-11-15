@@ -8,25 +8,22 @@
 
 #![allow(clippy::unwrap_used)]
 
-#[path = "../sink_support/mod.rs"]
-mod sink_support;
-
 use std::assert_matches;
 
+use crate::sink_support::tar_archive;
+use crate::sink_support::tar_file;
+use crate::sink_support::tar_hardlink;
+use crate::sink_support::tar_symlink;
+use crate::sink_support::testkit::raw_zip::RawEntry;
+use crate::sink_support::testkit::raw_zip::deflate_zeros;
+use crate::sink_support::zip_archive;
+use crate::sink_support::zip_file;
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionReport;
 use exarch_core::Limit;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::deflate_zeros;
-use sink_support::tar_archive;
-use sink_support::tar_file;
-use sink_support::tar_hardlink;
-use sink_support::tar_symlink;
-use sink_support::zip_archive;
-use sink_support::zip_file;
 use tempfile::TempDir;
 
 fn extract_bytes(

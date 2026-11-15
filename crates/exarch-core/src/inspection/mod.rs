@@ -44,6 +44,7 @@ pub(crate) use list::list_archive_with_progress;
 pub use manifest::ArchiveEntry;
 pub use manifest::ArchiveManifest;
 pub use manifest::EntryCompression;
+pub use manifest::EntryEncryption;
 pub use manifest::LinkTarget;
 pub use manifest::LinkTargetState;
 pub use manifest::ManifestEntryKind;

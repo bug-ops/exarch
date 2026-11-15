@@ -211,6 +211,8 @@ pub struct MemoryExtractRequest {
     pub(super) options: SinkOptions,
     limit: Option<MemoryLimit>,
     pub(super) model: PathModel,
+    #[cfg(feature = "encryption")]
+    password: Option<Arc<crate::Password>>,
 }
 
 impl MemoryExtractRequest {
@@ -243,6 +245,37 @@ impl MemoryExtractRequest {
     #[must_use]
     pub const fn with_path_model(mut self, model: PathModel) -> Self {
         self.model = model;
+        self
+    }
+
+    #[cfg(feature = "encryption")]
+    pub(super) const fn password(&self) -> Option<&Arc<crate::Password>> {
+        self.password.as_ref()
+    }
+
+    /// Decrypts encrypted entries with `password`; its `Debug` form never shows
+    /// the secret.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use exarch_core::MemoryExtractRequest;
+    /// use exarch_core::Password;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
+    /// let request = MemoryExtractRequest::default().with_password(password);
+    /// # let _ = request;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+    #[must_use]
+    pub fn with_password(mut self, password: Arc<crate::Password>) -> Self {
+        self.password = Some(password);
         self
     }
 }
@@ -303,6 +336,10 @@ pub fn extract_reader_to_memory(
     let limit = request
         .limit
         .unwrap_or_else(|| MemoryLimit::from_config(&request.config));
+    #[cfg(feature = "encryption")]
+    let credentials = crate::encryption::Credentials::new(request.password.clone());
+    #[cfg(not(feature = "encryption"))]
+    let credentials = crate::encryption::Credentials::NONE;
     let mut sink = MemorySink::new(limit).with_path_model(request.model);
     let reuse = SinkReuse {
         usage: sink.usage(),
@@ -315,7 +352,7 @@ pub fn extract_reader_to_memory(
         request.options,
         progress,
         Some(reuse),
-        crate::encryption::Credentials::NONE,
+        credentials,
     )
     .map_err(ArchiveError::discarded)?;
     Ok((report, sink))

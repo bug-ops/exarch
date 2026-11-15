@@ -27,9 +27,9 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: `exarch-cli` (process setup around extract, list and verify). No change to `exarch-core`, `exarch-python`, `exarch-node` or the library API.
-> **Issues**: #1025 (implementation), #1231 (the forced-exit test whose seam shares the startup order); batch PR #1230 branch `feat/1230-batch-11-issues`.
+> **Issues**: #1025 (implementation), #1231 (the forced-exit test whose seam shares the startup order); batch PR #1230 branch `feat/1230-batch-11-issues`. Refined by #1244 (stage a missing destination under the sandbox) and #1245 (stall ready line) in the batch branch `feat/1244-batch-10-issues`.
 > **Decision**: implement (user decision, 2026-11-15), Linux only, opt-in, defense in depth.
-> **Status**: implemented in the batch PR #1230, unreleased. The Linux backend is type-checked and linted on macOS; its first real execution is the Ubuntu CI job with `EXARCH_REQUIRE_LANDLOCK=1`. The deviations are in the table of section 9.
+> **Status**: implemented in the batch PR #1230 and refined in the batch of #1237 to #1246, unreleased. The Linux backend is type-checked and linted on macOS; its first real execution is the Ubuntu CI job with `EXARCH_REQUIRE_LANDLOCK=1`. The deviations are in the table of section 9.
 
 > [!abstract]
 > All containment in exarch is user-space. A kernel-enforced backstop turns a future logic bug that would write outside the destination into a failed syscall (`EACCES`). The CLI gains `--sandbox best-effort|require` on `extract`, `list` and `verify`: after the archive and destination are prepared and before untrusted parsing, the process restricts itself with Landlock to the archive and the destination subtree. The sandbox never replaces a user-space check and its status is reported honestly.
@@ -52,9 +52,9 @@ When the user opts in on a Linux kernel with Landlock ABI v2 or later, the CLI r
 |-------|----------|
 | Platform | Linux only. macOS and Windows sandboxes are non-goals; the code is `cfg(target_os = "linux")` and the dependency sits under `[target.'cfg(target_os = "linux")'.dependencies]` of `exarch-cli` |
 | Opt-in | `--sandbox best-effort|require` on `extract`, `list`, `verify`; default off. Env var and config key: none |
-| Grants | In-place `extract`: the destination subtree gets every handled filesystem right except EXECUTE, IOCTL_DEV, RESOLVE_UNIX and the MAKE_CHAR, MAKE_BLOCK, MAKE_FIFO and MAKE_SOCK rights (no core code creates those nodes); the archive file gets READ_FILE. `list` and `verify`: the archive file gets READ_FILE only. No READ_DIR anywhere else and nothing on `TMPDIR` |
+| Grants | In-place `extract` (an existing destination, a missing destination with a missing parent, ZIP, 7z): the destination subtree gets every handled filesystem right except EXECUTE, IOCTL_DEV, RESOLVE_UNIX and the MAKE_CHAR, MAKE_BLOCK, MAKE_FIFO and MAKE_SOCK rights (no core code creates those nodes); the archive file gets READ_FILE. Staged `extract` (a TAR into a MISSING destination whose parent exists): the same rights on the reserved stage, and `MAKE_DIR` and `REMOVE_DIR` on the destination's parent (user-approved widening, FR-005). `list` and `verify`: the archive file gets READ_FILE only. No READ_DIR anywhere else and nothing on `TMPDIR` |
 | Why no READ_DIR | The Linux walk opens directories with `O_PATH`, which Landlock does not mediate, and `realpath` and `lstat` are not mediated either |
-| Order | After argument parsing, destination precheck, `password::read` (spec 024) and destination creation; before `interrupt::install` and before any progress thread |
+| Order | After argument parsing, destination precheck and `password::read`: `sandbox::preflight` (predicts the status, restricts nothing), `interrupt::prepare` (registers the handlers, no thread), one destination decision, reserve or create the destination, `Preflight::confine`, `interrupt` start (the signal thread), the core call |
 | Threads | Confinement precedes every thread, so later threads inherit the domain; `RestrictSelfFlag::AllThreads` (TSYNC, ABI v8) is requested best-effort as belt and braces |
 | ABI | Floor v2 (REFER). On v1 the status is `Unavailable(AbiTooOld)` and nothing is restricted; v2 is `Partial` (truncate unhandled); `Enforced` needs ABI v3 (Linux 6.2, REFER and TRUNCATE) |
 | Excluded (documented) | `--atomic`, `create`, macOS and Windows, and chmod, chown, xattr and utimens coverage. Each becomes a follow-up issue |
@@ -141,14 +141,14 @@ THEN the JSON has a `sandbox` key: enforced with ABI, partial with the unhandled
 |----|------------|----------|
 | FR-001 | WHEN `--sandbox` is given THE CLI SHALL apply a Landlock ruleset to its own process before parsing any archive entry | must |
 | FR-002 | THE sandbox SHALL be off by default | must |
-| FR-003 | WHEN `extract` runs in place THE ruleset SHALL grant every handled filesystem right except EXECUTE, IOCTL_DEV, RESOLVE_UNIX, MAKE_CHAR, MAKE_BLOCK, MAKE_FIFO and MAKE_SOCK beneath the destination subtree, and READ_FILE on the archive file | must |
+| FR-003 | WHEN `extract` runs in place THE ruleset SHALL grant every handled filesystem right except EXECUTE, IOCTL_DEV, RESOLVE_UNIX, MAKE_CHAR, MAKE_BLOCK, MAKE_FIFO and MAKE_SOCK beneath the destination subtree, and READ_FILE on the archive file; WHEN `extract` runs staged (FR-007) the same rights SHALL apply to the reserved stage, and the rule SHALL be built from the reservation's open descriptor, not from a path | must |
 | FR-004 | WHEN `list` or `verify` runs THE ruleset SHALL grant READ_FILE on the archive file only | must |
-| FR-005 | THE ruleset SHALL NOT grant READ_DIR outside the destination, nor any access to `TMPDIR`; WHEN a path beyond this set is found to be needed THE implementation SHALL report it as a scope change, never grant it automatically | must |
-| FR-006 | Confinement SHALL run in this order in `extract`, `list` and `verify`: argument parsing, destination precheck, `password::read`, destination creation, `sandbox::confine`, `interrupt::install`, the core call. A password source SHALL be consumed before confinement and SHALL never widen the grant | must |
-| FR-007 | A missing destination SHALL be created by the CLI before confinement with the same call the core in-place path uses; a test pins that the report and the tree are identical with and without `--sandbox` | must |
+| FR-005 | THE ruleset SHALL NOT grant READ_DIR outside the destination, nor any access to `TMPDIR`; WHEN a path beyond this set is found to be needed THE implementation SHALL report it as a scope change, never grant it automatically. The one user-approved widening (2026-11-15) is the staged `extract`: the destination's parent gets `MAKE_DIR` and `REMOVE_DIR` only, built from the reservation's parent descriptor (the publish rename and the stage removal need them). A Landlock rule covers the whole subtree beneath that parent, so the confined process can, at any depth beneath the parent, create directories, remove empty directories, and rename or exchange directories within the directory they are in (no reparenting: `REFER` is not granted outside the stage); it cannot create, write, truncate or remove files there. The same text is in the `sandbox.rs` module docs | must |
+| FR-006 | Confinement SHALL run in this order in `extract`: argument parsing, destination precheck, `password::read`, `sandbox::preflight`, `interrupt::prepare`, one destination decision (route and destination state decided once), reserve or create the destination, `Preflight::confine`, interrupt start (the signal thread), the core call. `list` and `verify` run `preflight` immediately followed by `confine`. `Preflight` is consumed by `confine`, so confining without a prediction cannot be expressed. A password source SHALL be consumed before confinement and SHALL never widen the grant | must |
+| FR-007 | WHEN `--sandbox` is on and the TAR destination is MISSING with an existing parent, THE CLI SHALL reserve a staging directory beside it through core's `StagingReservation` (the stage and the pinned parent, held open) before confinement and run `extract_reserved`, so a failed or interrupted run discards its output and publishes whole on success exactly as an unsandboxed run does; the report and the tree are identical with and without `--sandbox`. An existing destination (even an empty one), a missing parent, ZIP and 7z SHALL be created or used before confinement and written in place, as before. The reservation is also made when the plan is `Skip` (best-effort on a host without Landlock), so that run is the same all-or-nothing extraction as an unsandboxed one. There is no `Scope::ExtractStaged`: `--atomic` is refused or skipped by `preflight` (FR-014) before any grant exists | must |
 | FR-008 | THE CLI SHALL request `RestrictSelfFlag::AllThreads` best-effort and report `all_threads` in the status | should |
 | FR-009 | WHEN the kernel ABI is below v2 THE status SHALL be `Unavailable(AbiTooOld)` and nothing SHALL be restricted; ABI v2 yields `Partial` (truncate unhandled) and `Enforced` is reported only from ABI v3 (Linux 6.2); a failure before `restrict_self` is `Unavailable::Kernel { errno }` | must |
-| FR-010 | WHEN the kernel lacks Landlock, supports an older ABI than needed, or the platform is not Linux THE CLI SHALL continue under `best-effort` and report exactly what is and is not enforced; under `require` it SHALL exit non-zero before any archive access | must |
+| FR-010 | WHEN the kernel lacks Landlock, supports an older ABI than needed, or the platform is not Linux THE CLI SHALL continue under `best-effort` and report exactly what is and is not enforced; under `require` it SHALL exit non-zero with `SandboxNotEnforced` when `preflight` predicts a status other than `Enforced`, before any archive access. Under `require`, no archive access SHALL happen before `confine` except the 512-byte signature probe, and only after `preflight` predicted `Enforced`. WHEN `confine` then yields any status other than `Enforced` (`Kernel { errno }`, or a prediction miss that is `Partial` or `Unavailable`) THE CLI SHALL exit non-zero with `SandboxNotEnforced` after at most that probe and before any entry is parsed | must |
 | FR-011 | THE CLI SHALL NOT claim sandboxing in any message, log or JSON field unless the kernel reported the ruleset as fully or partially enforced; `Enforced` is reported only on full enforcement | must |
 | FR-012 | THE status SHALL be the typed `SandboxStatus { Enforced { abi, all_threads }, Partial { abi, all_threads, unhandled }, Unavailable(Unavailable) }`, never a boolean or string | must |
 | FR-013 | `--json` output SHALL carry the status under a top-level `sandbox` key, beside `status` and `operation`, on success and in the error envelope whenever `--sandbox` is given (absent without the flag, and absent from the forced-exit envelope, where the status is not known); the human output prints `Sandbox: <status>` on stderr, silent only for `Enforced` under `--quiet` | must |
@@ -162,7 +162,7 @@ THEN the JSON has a `sandbox` key: enforced with ABI, partial with the unhandled
 | ID | Category | Requirement |
 |----|----------|-------------|
 | NFR-001 | Security | The sandbox is defense in depth. It SHALL NOT replace or relax any validation, and its absence SHALL NOT change extraction results |
-| NFR-002 | Security | The restriction is applied after handles are opened and before untrusted parsing |
+| NFR-002 | Security | The restriction is applied after the destination (or its staging reservation) is open and before untrusted parsing; the only archive read before it is the 512-byte signature probe of `extract` |
 | NFR-003 | Honesty | Reporting never overstates; unknown or partial coverage is `Partial` |
 | NFR-004 | Performance | Applying the ruleset is negligible against extraction; throughput with the sandbox on regresses at most 10% |
 | NFR-005 | Compatibility | Defined for kernels 5.13 and later; ABI v2 is the floor, negotiation is best-effort above it |
@@ -184,13 +184,14 @@ THEN the JSON has a `sandbox` key: enforced with ABI, partial with the unhandled
 | Kernel without Landlock or LSM disabled | `best-effort` continues, `Unavailable` with reason; `require` exits non-zero before archive access |
 | Landlock blocked by a container runtime | Same; the reason names the failing syscall |
 | ABI v1 (no REFER) | `Unavailable(AbiTooOld)`, nothing restricted |
-| Destination missing | Created before confinement; same report as without `--sandbox` |
+| Destination missing (TAR, parent exists) | Staged through a reservation before confinement; same report and tree as without `--sandbox`; an interrupted or failed run leaves no destination and reports `Cancelled`, not `PartialExtraction` |
+| Destination exists (even empty), parent missing, ZIP, 7z | Created or used before confinement and written in place; an interrupted or failed run leaves partial output and reports `PartialExtraction` |
 | Password file, fd or `/dev/tty` outside the destination | Consumed before confinement; extraction succeeds with the same tree; non-interactive `--password-prompt` fails with the prompt error before confinement, not `EACCES` |
 | Hardlink or symlink entries | Created beneath the destination under the same rights; user-space policy decides first |
 | 7z or ZIP spool | Falls back as today; nothing granted on `TMPDIR` |
 | Progress bars and terminal output | Already-open handles; no path-based reopen |
 | A legitimate extraction hits `EACCES` | The error distinguishes a sandbox denial from an ordinary permission failure where detectable |
-| `interrupt::install` thread | Spawned after confinement, so it inherits the domain; T4 verifies it does not spawn earlier and moves the spawn if it does |
+| Signal handlers and thread | `interrupt::prepare` registers the handlers through a self-pipe with no thread, so from then on a SIGINT is buffered and the default action never runs; the signal thread starts after `confine` and inherits the domain. A SIGINT between `prepare` and start is held, not acted on (the window is the probe, the reserve and `confine`, short except on a stalled filesystem); it is discarded when `confine` then fails under `require`, so the exit is `SandboxNotEnforced`, not 130. A `PendingInterrupt` dropped without starting restores the default signal behavior |
 
 ## 7. Success Criteria
 
@@ -230,7 +231,8 @@ None open. Follow-up issues for the documented exclusions are filed at the end o
 | Requirement | Specified | Implemented |
 |-------------|-----------|-------------|
 | FR-014, US-004 | `--sandbox` with `--atomic` is a usage error | `best-effort --atomic` runs unconfined with status `Unavailable(AtomicStaging)` and exit 0; `require --atomic` fails with `SandboxNotEnforced`; `create --sandbox` is a usage error |
-| FR-007, US-001 | identical report with and without `--sandbox` | a missing destination is created before confinement, so a sandboxed extract no longer takes the implicit stage-and-discard of a fresh tar destination: an interrupted or failed run leaves partial output and reports `PartialExtraction` (accurate, not "discarded"); granting rights on the parent or CLI-side cleanup would widen the sandbox and was not done |
+| FR-005, FR-007 | grant limited to the destination subtree | staged `extract` also grants `MAKE_DIR` and `REMOVE_DIR` on the destination's parent (user-approved 2026-11-15, consequence in FR-005) |
+| FR-006, FR-010 | `sandbox::confine` only | `preflight` then `confine`; under `require` the archive is read only for the signature probe, and only after an `Enforced` prediction |
 | FR-009, FR-011 | `Enforced` from ABI v2 | `Enforced` needs ABI v3; v2 is `Partial` |
 | FR-003 | grant minus EXECUTE and IOCTL_DEV | also minus RESOLVE_UNIX and MAKE_CHAR, MAKE_BLOCK, MAKE_FIFO, MAKE_SOCK |
 | FR-013 | `sandbox` key on every output | present on success and in the error envelope when the flag is given; the forced-exit envelope has none |

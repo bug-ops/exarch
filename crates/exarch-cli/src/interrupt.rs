@@ -1,7 +1,8 @@
 //! Turns SIGINT and SIGTERM into a cancelled run, for exactly as long as the
 //! run can honour it.
 //!
-//! Only `extract` and `create` arm the handler, through [`install`]: they stage
+//! Only `extract` and `create` arm the handler, through [`prepare`] and
+//! [`PendingInterrupt::start`] (or [`install`], which does both): they stage
 //! their output, and core removes the staging entry when
 //! [`ProgressCallback::is_cancelled`] reports a stop. The returned
 //! [`InterruptGuard`] is the armed window. Dropping it, which the commands do
@@ -34,6 +35,14 @@
 //! On Unix the signals are read on a helper thread through `signal-hook`; on
 //! Windows `ctrlc` reports Ctrl-C and Ctrl-Break as an interrupt. WASI has no
 //! signals, so nothing is installed there.
+//!
+//! Arming is split so that a sandbox can restrict the process between the two
+//! halves and still have the thread inherit the restriction. [`prepare`] opens
+//! the window and registers the Unix handlers through a self-pipe, which needs
+//! no thread and no filesystem access: from then on a signal is buffered and
+//! never takes the default action. [`PendingInterrupt::start`] spawns the
+//! thread that drains the buffer. A request that arrives in between waits for
+//! `start`; if the run ends before it, the pending request is dropped.
 
 #[cfg(not(target_os = "wasi"))]
 use crate::error::Part;
@@ -520,17 +529,30 @@ fn ignored_on_entry(signal: std::ffi::c_int) -> bool {
     }
 }
 
+/// The registered handlers that still have to start reading: the buffered
+/// signals on Unix, nothing on Windows (`ctrlc` registers when it starts).
 #[cfg(unix)]
-fn register(handler: fn(Stop)) -> std::io::Result<()> {
+type Handlers = signal_hook::iterator::Signals;
+#[cfg(windows)]
+type Handlers = ();
+
+/// Registers the handlers for the signals the process did not inherit as
+/// ignored; `None` when there is nothing to handle.
+#[cfg(unix)]
+fn register() -> std::io::Result<Option<Handlers>> {
     let kept: Vec<_> = Stop::ALL
         .into_iter()
         .map(Stop::raw_signal)
         .filter(|&signal| !ignored_on_entry(signal))
         .collect();
     if kept.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let mut signals = signal_hook::iterator::Signals::new(kept)?;
+    signal_hook::iterator::Signals::new(kept).map(Some)
+}
+
+#[cfg(unix)]
+fn start_reading(mut signals: Handlers, handler: fn(Stop)) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("exarch-signals".to_owned())
         .spawn(move || {
@@ -542,29 +564,126 @@ fn register(handler: fn(Stop)) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn register(handler: fn(Stop)) -> std::io::Result<()> {
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the Unix registration, which can fail"
+)]
+const fn register() -> std::io::Result<Option<Handlers>> {
+    Ok(Some(()))
+}
+
+#[cfg(windows)]
+fn start_reading((): Handlers, handler: fn(Stop)) -> std::io::Result<()> {
     ctrlc::set_handler(move || handler(Stop::Interrupt)).map_err(std::io::Error::other)
 }
 
-/// Arms the handler for the command that writes `output` and returns the
-/// window it stays armed for. A handler that cannot be installed is reported
-/// and the default signal action stays.
+/// Registered handlers that nothing reads yet.
+///
+/// Dropping them unread would leave SIGINT and SIGTERM swallowed for the rest
+/// of the process, since registering took their default action away; so the
+/// drop drops what was buffered and starts the reader, which finds the window
+/// closed and gives every later signal its default action.
 #[cfg(not(target_os = "wasi"))]
-pub fn install(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+#[derive(Debug)]
+struct Unread(Option<Handlers>);
+
+#[cfg(not(target_os = "wasi"))]
+impl Unread {
+    fn start(mut self) {
+        if let Some(handlers) = self.0.take() {
+            read_from(handlers);
+        }
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for Unread {
+    fn drop(&mut self) {
+        if let Some(mut handlers) = self.0.take() {
+            discard_buffered(&mut handlers);
+            read_from(handlers);
+        }
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn read_from(handlers: Handlers) {
+    if let Err(error) = start_reading(handlers, on_stop) {
+        warn_handler(&error);
+    }
+}
+
+#[cfg(unix)]
+fn discard_buffered(signals: &mut Handlers) {
+    signals.pending().for_each(drop);
+}
+
+#[cfg(windows)]
+const fn discard_buffered(_: &mut Handlers) {}
+
+/// An armed window whose handlers are registered but not yet reading: a
+/// signal is buffered, not acted on, until [`start`](Self::start).
+///
+/// Made by [`prepare`]. Dropping it without starting disarms the window,
+/// drops the buffered signals and restores the default action for later ones.
+#[cfg(not(target_os = "wasi"))]
+#[must_use = "a prepared interrupt does nothing until it is started"]
+#[derive(Debug)]
+pub struct PendingInterrupt {
+    // Declared first: the window closes before an unread drop starts the
+    // reader.
+    guard: InterruptGuard,
+    unread: Unread,
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl PendingInterrupt {
+    /// Starts reading the buffered signals and returns the armed window. A
+    /// handler that cannot be started is reported and the default signal
+    /// action stays.
+    pub fn start(self) -> InterruptGuard {
+        let Self { guard, unread } = self;
+        unread.start();
+        guard
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn warn_handler(error: &std::io::Error) {
     use std::io::Write as _;
 
+    let _ = writeln!(
+        std::io::stderr(),
+        "warning: cannot install the interrupt handler: {error}"
+    );
+}
+
+/// Opens the window for the command that writes `output` and registers the
+/// process's signal handlers without a thread, so a signal from here on is
+/// buffered instead of taking the default action. A handler that cannot be
+/// registered is reported and the default signal action stays.
+#[cfg(not(target_os = "wasi"))]
+pub fn prepare(output: &Path, run: Run, mode: OutputMode) -> PendingInterrupt {
     static REGISTERED: std::sync::Once = std::sync::Once::new();
 
     let guard = arm(&WINDOW, output, run, mode);
-    REGISTERED.call_once(|| {
-        if let Err(error) = register(on_stop) {
-            let _ = writeln!(
-                std::io::stderr(),
-                "warning: cannot install the interrupt handler: {error}"
-            );
-        }
+    let mut handlers = None;
+    REGISTERED.call_once(|| match register() {
+        Ok(registered) => handlers = registered,
+        Err(error) => warn_handler(&error),
     });
-    guard
+    PendingInterrupt {
+        guard,
+        unread: Unread(handlers),
+    }
+}
+
+/// Arms the handler for the command that writes `output` and returns the
+/// window it stays armed for: [`prepare`] followed by
+/// [`PendingInterrupt::start`].
+#[cfg(not(target_os = "wasi"))]
+pub fn install(output: &Path, run: Run, mode: OutputMode) -> InterruptGuard {
+    prepare(output, run, mode).start()
 }
 
 /// Opens `window` without touching the process's signal handlers.
@@ -590,6 +709,26 @@ pub const fn install(_output: &Path, _run: Run, _mode: OutputMode) -> InterruptG
     }
 }
 
+/// WASI has no signals; there is nothing to register.
+#[cfg(target_os = "wasi")]
+#[must_use = "a prepared interrupt does nothing until it is started"]
+#[derive(Debug)]
+pub struct PendingInterrupt(InterruptGuard);
+
+#[cfg(target_os = "wasi")]
+impl PendingInterrupt {
+    /// Returns the guard; WASI has no thread to start.
+    pub fn start(self) -> InterruptGuard {
+        self.0
+    }
+}
+
+/// WASI has no signals; there is nothing to register.
+#[cfg(target_os = "wasi")]
+pub const fn prepare(output: &Path, run: Run, mode: OutputMode) -> PendingInterrupt {
+    PendingInterrupt(install(output, run, mode))
+}
+
 /// Test-only seam: blocks the run in a real `read(2)` on stdin so the forced
 /// exit can be exercised end to end. Compiled out of release builds.
 #[cfg(all(unix, feature = "test-hooks", debug_assertions))]
@@ -597,6 +736,7 @@ mod stall_hook {
     use exarch_core::EntryPosition;
     use std::io::ErrorKind;
     use std::io::Read as _;
+    use std::io::Write as _;
     use std::sync::OnceLock;
 
     const VARIABLE: &str = "EXARCH_TEST_STALL_AT_ENTRY";
@@ -614,6 +754,11 @@ mod stall_hook {
         }
         let mut byte = [0_u8; 1];
         let mut stdin = std::io::stdin().lock();
+        let _ = writeln!(
+            std::io::stderr(),
+            "exarch-test: stalled at entry {}",
+            position.current.get()
+        );
         loop {
             match stdin.read(&mut byte) {
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}

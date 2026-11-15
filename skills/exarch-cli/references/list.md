@@ -16,7 +16,7 @@
 | `--destination <DIR>` | none | Destination `extract` would write to. It only affects the [selection preview](#selection-preview), so it changes nothing without a selection flag. With one, on a volume that reports no file ids (Windows without `FileIdInfo`) a differently spelled repeat of a name (`x` then `X`) shows `[refused]` instead of `duplicate`, as `extract` refuses it; on every other volume the output is unchanged. `list` probes the volume of the nearest existing ancestor and creates nothing, only when a selection flag is given. A path that cannot be resolved (for example below a file) then fails `list` before the archive is read, with `IoError` (`io_kind` such as `NotADirectory`) naming the destination, exit `1`; without a selection flag the destination is ignored and never fails the listing. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Under `enforce` an ambiguous ZIP fails `ZipInconsistency` instead of being listed. |
 | `--repeated-paths <keep-first\|refuse>` | keep-first | Under `refuse` a TAR or 7z repeat shows `refuse` in its `disposition` (also without a selection flag) instead of `skip`/`duplicate`. A ZIP that repeats a name fails `list` with `SecurityViolation` `REPEATED_PATH` (exit `1`). |
-| `--sandbox`, `--password-file` / `--password-fd` / `--password-prompt` | as `extract` | See [extract.md](extract.md). A ZIP list without a password shows the entries of an encrypted ZIP unmarked; an encrypted 7z header fails `password_required`. |
+| `--sandbox`, `--password-file` / `--password-fd` / `--password-prompt` | as `extract` | See [extract.md](extract.md). Encrypted entries are listed without a password and marked (see [Encrypted entries](#encrypted-entries)); an encrypted 7z header fails `password_required`. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | Same grammar as `extract` ([extract.md](extract.md)). |
 
 ## Selection preview
@@ -33,6 +33,10 @@ Under any selection flag `list` shows what extraction would do:
 ## Link targets
 
 With `--json -l`, each symlink/hardlink entry has a `link_target` object tagged by `state`: `{"state": "recorded", "path": "..."}`, or without a path `missing`, `unread` (7z, not decoded), `unreadable`, `{"state": "oversized", "bytes": N}`. Files and directories have no `link_target` key. Text `list -l` prints `(target missing)`, `(target not read)`, `(target unreadable)`, `(target too long: N bytes)`.
+
+## Encrypted entries
+
+An entry whose data is encrypted (a ZIP entry with the encryption flag, every file of a 7z AES block) is marked, whether or not a password was given. A directory, an empty 7z file and every TAR entry are not. With `-l`, text appends `  (encrypted)` to the entry's line; with `--json -l`, every entry has `"encrypted": true|false` (always present).
 
 ## Failure modes
 

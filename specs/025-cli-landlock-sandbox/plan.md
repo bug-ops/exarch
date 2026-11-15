@@ -28,8 +28,8 @@ One module `exarch-cli/src/sandbox.rs`, compiled for Linux only, exposing `confi
 | Decision | Choice | Rationale | Alternatives Considered |
 |----------|--------|-----------|-------------------------|
 | Crate | `landlock` under `[target.'cfg(target_os = "linux")'.dependencies]` | Maintained, best-effort ABI negotiation, encapsulates the syscalls | Hand-written syscalls (needs `unsafe`) |
-| Grant set | Destination subtree: all handled rights except EXECUTE, IOCTL_DEV; archive: READ_FILE; no READ_DIR | The walk uses `O_PATH` (not mediated); `realpath` and `lstat` are not mediated | Broad read on `/` |
-| Position | After `password::read` and destination creation, before `interrupt::install` | Threads spawned later inherit the domain; a password source never widens the grant | Confine first |
+| Grant set | Destination subtree (or the reserved stage): all handled rights except EXECUTE, IOCTL_DEV and the special-node rights; staged extract also `MAKE_DIR` and `REMOVE_DIR` on the destination's parent (user-approved, spec FR-005); archive: READ_FILE; no READ_DIR | The walk uses `O_PATH` (not mediated); `realpath` and `lstat` are not mediated | Broad read on `/` |
+| Position | After `password::read`, `preflight`, `interrupt::prepare` and the reserve or create of the destination; before the signal thread starts | Threads spawned later inherit the domain; a password source never widens the grant | Confine first |
 | TSYNC | Best-effort `AllThreads` | Covers threads that exist before confinement on ABI v8 | Skip |
 | ABI floor | v2 | REFER is needed for link and rename inside the destination | v1 |
 
@@ -99,14 +99,16 @@ Opt-in flag; CHANGELOG; skill update. Follow-up issues for the documented exclus
 | Risk | Impact | Probability | Mitigation |
 |------|--------|-------------|------------|
 | CI runner lacks Landlock | med | low | probe job; stop and report if absent |
-| `interrupt::install` spawns before confinement | low | med | verify, move the spawn after confinement |
+| A SIGINT between `interrupt::prepare` and start | low | low | held, not acted on; discarded when `confine` fails under `require` (exit `SandboxNotEnforced`) |
 
 ## 12. Contracts
 
 | Item | Preconditions | Postconditions | Undefined behaviour |
 |------|---------------|----------------|---------------------|
 | `--sandbox best-effort\|require` | Linux; `extract` with in-place staging, or `list` or `verify` | the grant set is exactly the one of FR-003 to FR-005; `Enforced` only if the kernel reported full enforcement (ABI v3); `require` exits non-zero before any archive access with `error.kind` `SandboxNotEnforced` when enforcement is not full | `best-effort --atomic` runs unconfined (status `AtomicStaging`); use with `create` is a usage error |
-| `sandbox::confine` | arguments parsed, password read, destination exists | the process (and later threads) cannot access paths outside the grant | non-Linux: returns `Unavailable` |
+| `sandbox::preflight` | arguments parsed, password read | predicts the status from the kernel ABI and the write mode; restricts nothing; under `require` a status other than `Enforced` fails before archive access | non-Linux: `Unavailable` |
+| `Preflight::confine` | `preflight` ran (it is consumed), the destination or reservation exists | the process (and later threads) cannot access paths outside the grant; any status other than `Enforced` under `require` fails after at most the signature probe | non-Linux: returns `Unavailable` |
+| `StagingReservation::reserve` / `ExtractRequest::extract_reserved` (core) | destination missing, parent exists | the stage and the pinned parent are held open; `extract_reserved` publishes whole or discards; a dropped unused reservation removes its stage | the staging mode of the options is never read |
 
 ## See Also
 

@@ -34,7 +34,6 @@ use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_testkit::raw_zip::RawEntry;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sevenz_rust2::ArchiveEntry;
@@ -43,6 +42,7 @@ use sevenz_rust2::EncoderMethod;
 use sink_support::RecordingSink;
 use sink_support::tar_archive;
 use sink_support::tar_file;
+use sink_support::testkit::raw_zip::RawEntry;
 use sink_support::zip_archive;
 
 const EIO: i32 = 5;

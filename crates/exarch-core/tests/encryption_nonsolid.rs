@@ -200,7 +200,7 @@ fn a_non_utf8_password_cannot_open_a_7z() {
 
         assert_eq!(
             refusal(&result.unwrap_err()),
-            EncryptionRefusal::WrongPasswordOrCorrupt,
+            EncryptionRefusal::UnusablePassword,
             "{archive}"
         );
     }

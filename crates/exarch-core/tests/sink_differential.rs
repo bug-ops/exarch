@@ -567,7 +567,7 @@ fn zip_symlinks_follow_policy_and_resolve_parents() {
 
 #[test]
 fn zip_forged_declared_size_is_a_security_violation() {
-    use exarch_testkit::raw_zip::RawEntry;
+    use sink_support::testkit::raw_zip::RawEntry;
     let payload = vec![0x41u8; 1024 * 1024];
     let entry = RawEntry {
         date: 0,
@@ -579,7 +579,7 @@ fn zip_forged_declared_size_is_a_security_violation() {
 
 #[test]
 fn zip_zero_compressed_entry_is_a_ratio_bomb() {
-    use exarch_testkit::raw_zip::RawEntry;
+    use sink_support::testkit::raw_zip::RawEntry;
     let entry = RawEntry {
         declared_compressed: Some(0),
         local_sizes: Some((0, 64)),
@@ -590,7 +590,7 @@ fn zip_zero_compressed_entry_is_a_ratio_bomb() {
 
 #[test]
 fn zip_ratio_bomb_is_rejected() {
-    use exarch_testkit::raw_zip::RawEntry;
+    use sink_support::testkit::raw_zip::RawEntry;
     let payload = vec![0u8; 8 * 1024 * 1024];
     rejected(
         Kind::Zip,

@@ -34,12 +34,7 @@ pub(super) struct DestinationHold(
 /// Only Unix reuses an inode number that quickly, and only Unix holds the
 /// destination.
 #[cfg(not(unix))]
-#[derive(Debug)]
-#[allow(
-    clippy::empty_enums,
-    reason = "uninhabited on purpose, stable has no `!`"
-)]
-pub(super) enum DestinationHold {}
+pub(super) type DestinationHold = !;
 
 /// What is at a destination's name.
 #[derive(Debug)]

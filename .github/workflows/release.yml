@@ -205,8 +205,8 @@ jobs:
               }
               trap fix_owner EXIT
               rm -rf "$RUSTUP_HOME/toolchains"
-              rustup toolchain install 1.99.1 --profile minimal
-              rustup override set 1.99.1
+              rustup toolchain install 1.100 --profile minimal
+              rustup override set 1.100
               rustup target add "$TARGET"
               python3 -m pip install --user --require-hashes --only-binary :all: -r /tmp/release-musl-requirements.txt
               export PATH="$PATH:$HOME/.local/bin"

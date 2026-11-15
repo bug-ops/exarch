@@ -116,7 +116,7 @@ fn run_stalled_until_repeated_sigint(json: bool) -> (std::process::ExitStatus, S
         .read_to_end(&mut stdout)
         .unwrap();
     drop(held_stdin);
-    (status, String::from_utf8_lossy(&stdout).into_owned(), temp)
+    (status, String::from_utf8_lossy_owned(stdout), temp)
 }
 
 #[test]

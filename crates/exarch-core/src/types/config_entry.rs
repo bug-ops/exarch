@@ -86,7 +86,7 @@ impl TryFrom<&str> for Extension {
     /// bytes.
     fn try_from(value: &str) -> Result<Self> {
         check_length_and_nul(value, Self::SETTING)?;
-        let name = value.strip_prefix('.').unwrap_or(value);
+        let name = value.trim_prefix('.');
         if name.is_empty() {
             return Err(invalid(Self::SETTING, ConfigProblem::Empty));
         }

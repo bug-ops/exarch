@@ -1000,7 +1000,7 @@ impl BannedComponentsArg {
 /// Parses `--compression-level` into what the user asked for, so a whole number
 /// of any size reaches core's range check instead of failing as a usage error.
 fn parse_requested_level(s: &str) -> Result<RequestedLevel, String> {
-    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let digits = s.trim_prefix(['+', '-']);
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!("`{s}` is not a whole number"));
     }

@@ -146,7 +146,6 @@
 //! an entry is already fully framed by `tar` itself), not as a reason to add
 //! a peek here.
 
-use std::convert::Infallible;
 use std::io;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -929,7 +928,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
         if self.mark_skipped(limits) == SkipAdmission::Admitted {
             return Ok(());
         }
-        let Ok(()) = self.0.drain::<Infallible>(|_| Ok(()));
+        let Ok(()) = self.0.drain::<!>(|_| Ok(()));
         self.0
             .budget
             .skip_trip()
@@ -998,7 +997,7 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
         if self.abandoned {
             return;
         }
-        let Ok(()) = self.drain::<Infallible>(|_| Ok(()));
+        let Ok(()) = self.drain::<!>(|_| Ok(()));
     }
 }
 

@@ -7,6 +7,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::os::windows::fs::symlink_dir;
 use std::os::windows::fs::symlink_file;
 use std::path::Path;
@@ -176,22 +177,20 @@ fn extract_nested_file_over_an_escaping_junction_or_dir_symlink_is_the_occupant_
     for_each_leaf_link("d\\l", |archive, dest, outside, policy| {
         let result = run(archive, dest, policy);
 
-        assert!(
-            matches!(
-                (policy, result.as_ref().map_err(cause)),
-                (ExistingFiles::Skip, Ok(()))
-                    | (
-                        ExistingFiles::Refuse,
-                        Err(ArchiveError::DestinationOccupied { .. })
-                    )
-                    | (
-                        ExistingFiles::Overwrite,
-                        Err(ArchiveError::SecurityViolation {
-                            kind: Violation::ReplacesSymlink { .. },
-                            ..
-                        })
-                    )
-            ),
+        assert_matches!(
+            (policy, result.as_ref().map_err(cause)),
+            (ExistingFiles::Skip, Ok(()))
+                | (
+                    ExistingFiles::Refuse,
+                    Err(ArchiveError::DestinationOccupied { .. })
+                )
+                | (
+                    ExistingFiles::Overwrite,
+                    Err(ArchiveError::SecurityViolation {
+                        kind: Violation::ReplacesSymlink { .. },
+                        ..
+                    })
+                ),
             "{policy:?} {}: {result:?}",
             archive.display()
         );

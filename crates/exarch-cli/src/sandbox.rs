@@ -554,6 +554,7 @@ mod platform {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn enforced() -> SandboxStatus {
         SandboxStatus::Enforced {
@@ -582,7 +583,7 @@ mod tests {
             archive: Path::new("a.tar"),
             scope: Scope::ReadOnly,
         };
-        assert!(matches!(confine(SandboxMode::Off, &grant), Ok(None)));
+        assert_matches!(confine(SandboxMode::Off, &grant), Ok(None));
     }
 
     #[test]
@@ -630,12 +631,12 @@ mod tests {
             archive: Path::new("a.tar"),
             scope: Scope::ReadOnly,
         };
-        assert!(matches!(
+        assert_matches!(
             confine(SandboxMode::BestEffort, &grant),
             Ok(Some(SandboxStatus::Unavailable {
                 reason: Unavailable::NotLinux
             }))
-        ));
+        );
         assert!(confine(SandboxMode::Require, &grant).is_err());
     }
 }

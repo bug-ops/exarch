@@ -12,7 +12,8 @@ import pytest
 import exarch
 
 # Written with sevenz-rust2: `a.txt` and a Unix-mode symlink `link` -> `a.txt`.
-SYMLINK_7Z = Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures" / "symlink-mode.7z"
+_CORE_FIXTURES = Path(__file__).resolve().parents[2] / "exarch-core" / "tests" / "fixtures"
+SYMLINK_7Z = _CORE_FIXTURES / "symlink-mode.7z"
 
 
 def _tar_with_symlinks(path, count):

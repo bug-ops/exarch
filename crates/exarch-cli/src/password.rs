@@ -140,6 +140,7 @@ fn prompt() -> Result<Vec<u8>> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
     use std::io::Write as _;
 
     use super::*;
@@ -163,7 +164,7 @@ mod tests {
 
     #[test]
     fn no_source_means_no_password() {
-        assert!(matches!(read(None), Ok(None)));
+        assert_matches!(read(None), Ok(None));
     }
 
     #[test]

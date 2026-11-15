@@ -23,9 +23,7 @@ def _password():
 
 @pytest.mark.parametrize("name", ARCHIVES)
 def test_extract_with_the_password_decrypts(temp_dir, name):
-    report = exarch.extract_archive(
-        FIXTURES / name, temp_dir / "out", password=_password()
-    )
+    report = exarch.extract_archive(FIXTURES / name, temp_dir / "out", password=_password())
 
     assert report.files_extracted == 2
     assert (temp_dir / "out" / "hello.txt").read_bytes() == b"hello encrypted\n"
@@ -65,9 +63,7 @@ def test_list_and_verify_take_the_password(name):
 @pytest.mark.parametrize("secret", [b"correct-horse", "correct-horse"])
 def test_bytes_and_str_passwords_are_refused(temp_dir, secret):
     with pytest.raises(TypeError):
-        exarch.extract_archive(
-            FIXTURES / "encrypted-aes256.zip", temp_dir / "out", password=secret
-        )
+        exarch.extract_archive(FIXTURES / "encrypted-aes256.zip", temp_dir / "out", password=secret)
 
 
 def test_an_empty_password_is_a_value_error(temp_dir):

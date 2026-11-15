@@ -7,6 +7,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Write as _;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -487,9 +488,6 @@ fn a_descriptor_and_header_planted_in_aes_ciphertext_are_refused() {
 
     let (dest, result) = extract_bytes(&bytes, Some(password(RIGHT)));
 
-    assert!(
-        matches!(result, Err(ArchiveError::ZipInconsistency(_))),
-        "{result:?}"
-    );
+    assert_matches!(result, Err(ArchiveError::ZipInconsistency(_)), "{result:?}");
     assert_eq!(entries(&dest), 0);
 }

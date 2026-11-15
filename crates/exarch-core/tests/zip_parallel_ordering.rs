@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
+use std::assert_matches;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -172,8 +173,9 @@ fn the_earliest_failing_entry_is_the_one_reported_in_every_mode() {
         )
         .unwrap_err();
 
-        assert!(
-            matches!(&error, ArchiveError::SourceNotAccessible { path, .. } if path == &early),
+        assert_matches!(
+            &error,
+            ArchiveError::SourceNotAccessible { path, .. } if path == &early,
             "{mode:?}: {error:?}"
         );
         assert!(!path.exists(), "{mode:?}");
@@ -202,10 +204,7 @@ fn cancellation_stops_every_mode_with_no_output() {
             &mut recorder,
         );
 
-        assert!(
-            matches!(result, Err(ArchiveError::Cancelled)),
-            "{mode:?}: {result:?}"
-        );
+        assert_matches!(result, Err(ArchiveError::Cancelled), "{mode:?}: {result:?}");
         assert!(!path.exists(), "{mode:?}");
     }
 }

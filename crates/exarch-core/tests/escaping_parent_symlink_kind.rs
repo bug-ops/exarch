@@ -7,6 +7,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
@@ -141,10 +142,7 @@ fn extract_escaping_parent_symlink_error_is_a_critical_symlink_escape_not_a_part
 
     let error = extract(&seven, &dest, ExistingFiles::Refuse).unwrap_err();
 
-    assert!(
-        matches!(cause(&error), ArchiveError::SymlinkEscape { .. }),
-        "{error}"
-    );
+    assert_matches!(cause(&error), ArchiveError::SymlinkEscape { .. }, "{error}");
 }
 
 #[test]

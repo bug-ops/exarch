@@ -2,7 +2,8 @@
 // Release gate for the npm tarball (#1200, #1208, #1225). Gates the exact tarball that gets
 // published: pass its path, or pass nothing to pack one into a temp dir. The packed index.js
 // must be byte-equal to both the committed index.js and the loader generated from
-// napi.targets, so any deviation fails; a sandbox run then checks its behaviour per platform.
+// napi.targets, and the packed package.json must equal the committed one (#1233), so any
+// deviation fails; a sandbox run then checks its behaviour per platform.
 // `--write-loader` regenerates the committed index.js (export list kept as committed).
 // The package directory is the parent of this script.
 
@@ -173,6 +174,27 @@ function checkLoaderBehaviour(source, targets, errors) {
   }
 }
 
+// Fields `pnpm pack` (the release path) rewrites in the packed package.json; measured empty
+// for this package, so the packed file must equal the committed one.
+const REWRITTEN_BY_PACK = new Set();
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function differingPaths(packed, committed, path = '') {
+  if (isRecord(packed) && isRecord(committed)) {
+    const keys = new Set([...Object.keys(packed), ...Object.keys(committed)]);
+    return [...keys].flatMap((key) => {
+      const here = path === '' ? key : `${path}.${key}`;
+      return REWRITTEN_BY_PACK.has(here)
+        ? []
+        : differingPaths(packed[key], committed[key], here);
+    });
+  }
+  return JSON.stringify(packed) === JSON.stringify(committed) ? [] : [path];
+}
+
 function check(tarball) {
   const errors = [];
   const work = mkdtempSync(join(tmpdir(), 'exarch-gate-'));
@@ -181,6 +203,10 @@ function check(tarball) {
     const names = packedFileNames(root, errors);
 
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    const committedPkg = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
+    for (const field of differingPaths(pkg, committedPkg)) {
+      errors.push(`packed package.json field ${field} differs from the committed package.json`);
+    }
     const targets = pkg.napi.targets.map(targetAddon);
     const addons = names.filter((name) => name.endsWith('.node')).sort();
     const wantAddons = targets.map((target) => target.file).sort();

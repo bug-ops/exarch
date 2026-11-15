@@ -6,7 +6,7 @@ tags:
   - plan
   - sandbox
 created: 2026-11-15
-status: ready
+status: implemented
 related:
   - "[[spec]]"
   - "[[constitution]]"
@@ -105,7 +105,7 @@ Opt-in flag; CHANGELOG; skill update. Follow-up issues for the documented exclus
 
 | Item | Preconditions | Postconditions | Undefined behaviour |
 |------|---------------|----------------|---------------------|
-| `--sandbox best-effort\|require` | Linux; `extract` with in-place staging, or `list` or `verify` | the grant set is exactly the one of FR-003 to FR-005; `Enforced` only if the kernel reported full enforcement; `require` exits non-zero before any archive access when enforcement is not full | combination with `--atomic` and use with `create` are usage errors, not defined behavior |
+| `--sandbox best-effort\|require` | Linux; `extract` with in-place staging, or `list` or `verify` | the grant set is exactly the one of FR-003 to FR-005; `Enforced` only if the kernel reported full enforcement (ABI v3); `require` exits non-zero before any archive access with `error.kind` `SandboxNotEnforced` when enforcement is not full | `best-effort --atomic` runs unconfined (status `AtomicStaging`); use with `create` is a usage error |
 | `sandbox::confine` | arguments parsed, password read, destination exists | the process (and later threads) cannot access paths outside the grant | non-Linux: returns `Unavailable` |
 
 ## See Also

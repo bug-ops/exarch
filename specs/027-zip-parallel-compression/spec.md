@@ -10,7 +10,7 @@ tags:
   - creation
 created: 2026-11-08
 updated: 2026-11-15
-status: ready
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -23,6 +23,7 @@ related:
 > [!info] Metadata
 > **Issue**: #1027 (batch PR #1230 branch `feat/1230-batch-11-issues`)
 > **Decision**: implement (user decision, 2026-11-15): byte identity between sequential and parallel output, CLI `--threads`.
+> **Status**: implemented in the batch PR #1230, unreleased. Measured on a loaded host with 2000 files of 128 KiB (deflate): `Sequential` +1% against the base, `Threads(4)` median 3.5x (worst round 2.7x). Deviations are listed in section 9.
 
 > [!abstract]
 > `create_archive` compresses ZIP entries one at a time. This spec adds `Parallelism::{Sequential, Threads(NonZeroUsize)}` on `CreationConfig` and `create --threads <N>`. Both modes route regular files through the same prepared-entry path, so the output depends on the tree and the configuration only, never on the thread count. Sequential output bytes change once relative to 0.10 (documented breaking note).
@@ -156,7 +157,7 @@ Output SHALL go through the staged-create path of spec 021 (staged file, fsync, 
 
 ### FR-010
 
-Symlinks, hardlinks, directories and special files SHALL be processed on the sequential path (no compression is involved). On `wasm32-wasip1` and from the Python and Node bindings the sequential path SHALL be used whatever is configured.
+A panic of a worker SHALL surface on the calling thread instead of hanging the call. Symlinks, hardlinks, directories and special files SHALL be processed on the sequential path (no compression is involved). On `wasm32-wasip1` and from the Python and Node bindings the sequential path SHALL be used whatever is configured.
 
 **Priority**: must
 
@@ -180,7 +181,7 @@ THE zip-prepared-entry APIs SHALL be used only through one internal module of `e
 
 ### NFR-DET-001
 
-Output bytes are a pure function of the tree and the `CreationConfig` content, excluding parallelism. The sequential bytes differ once from 0.10 (CHANGELOG breaking note).
+Output bytes are a pure function of the tree and the `CreationConfig` content, excluding parallelism. The walk is sorted by file name inside each directory for every format (TAR and ZIP) and a ZIP entry stores the source modification time, so two runs agree. The sequential bytes differ once from 0.10 (CHANGELOG breaking note).
 
 ### NFR-MEM-001
 
@@ -246,6 +247,15 @@ Builds and passes on all CI targets, including `wasm32-wasip1` and Windows.
 ## 9. Open Questions
 
 None open. Results of the benchmark gates are recorded in `.local/testing/benchmarks.md`.
+
+### Deviations (approved by the lead during the batch)
+
+| Requirement | Specified | Implemented |
+|-------------|-----------|-------------|
+| FR-005, NFR-DET-001 | same order and headers as today | the walk is now sorted by file name inside each directory for every format, and ZIP entries store the source mtime (UTC, DOS range, epoch fallback) instead of "now at start"; both are needed for byte identity and are part of the CHANGELOG breaking note |
+| FR-007 | progress per entry | a prepared entry reports one `on_bytes_written` call with the entry size (per-entry granularity) |
+| FR-006 | `SourceChanged` in both modes | for a prepared entry it is raised by the exact-length reader inside the worker job; the source tests for the grow and shrink cases use files above 8 MiB (stream route), and the prepared route is covered by unit tests |
+| NFR-PERF-001 | gates on an idle host | measured on a loaded host (see the status note); a rerun on an idle host is recommended before release |
 
 ## 10. See Also
 

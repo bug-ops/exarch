@@ -35,7 +35,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core (`reader`, `sink`, `sink::memory`, `writer`, `api`, `formats::target`, `formats::sevenz::{extract,host,sink}`, `security::{admitted,fs_view}`), `exarch-python` (`buffer`), `exarch-node` (`memory`, `buffer`)
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Origin**: v0.8.0 — #771 (reader APIs, WASI), #787 (sink, memory sink, detection, writers, bindings), #790 (progress variants, `of_type`, `create_to_bytes`), #808 (`SinkOptions`, `SinkFull`, `CreatableFormat`, typed `ExtractTarget`)
 > **Status**: implemented — documents shipped behavior; the archive-from-a-path API of [[002-format-handlers/spec]] is unchanged
 

@@ -7,7 +7,7 @@ tags:
   - zip
   - performance
 created: 2026-11-15
-status: ready
+status: implemented
 related:
   - "[[spec]]"
   - "[[constitution]]"

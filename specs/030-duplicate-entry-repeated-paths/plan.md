@@ -6,7 +6,7 @@ tags:
   - plan
   - extraction/duplicates
 created: 2026-11-15
-status: ready
+status: implemented
 related:
   - "[[spec]]"
   - "[[constitution]]"

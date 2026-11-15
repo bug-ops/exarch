@@ -35,7 +35,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / `config` (extraction options), `request` (`ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest`), `security` (`SafePath`, `ValidatorCore`), `inspection::landing`, `formats::{tar,zip,sevenz}`; surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Origin**: #967 (competitive parity research, P2). No prior request or `wontfix` found in open or closed issues.
 > **Status**: implemented in the #981 batch PR; the pattern grammar was replaced by globs in #1024 (spec 023). The open questions are resolved in section 9; HOW is in [[plan]], the task list in [[tasks]]. Section 11 lists where the as-built behavior differs from the first plan.
 

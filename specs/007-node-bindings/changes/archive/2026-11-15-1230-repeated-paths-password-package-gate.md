@@ -3,7 +3,7 @@ tags:
   - sdd
   - delta
 created: 2026-11-15
-status: open
+status: merged
 related:
   - "[[007-node-bindings/spec]]"
 ---

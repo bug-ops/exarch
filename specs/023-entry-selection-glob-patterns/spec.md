@@ -30,7 +30,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / `EntryPattern` (grammar and matcher shared by creation excludes and extraction `EntrySelection`); surfaces in `exarch-cli`, `exarch-python`, `exarch-node`
-> **MSRV**: Rust 1.99.1
+> **MSRV**: Rust 1.100
 > **Origin**: #1000 (research finding, P3, enhancement), found after PR #999. Spec 022 lists a glob engine as out of scope.
 > **Status**: implemented in #1024 (closes #1000). Verified against `crates/exarch-core/src/creation/exclude_pattern.rs` (now `pattern.rs`, #1041) on 2026-11-08: grammar, refusal reasons, `Shape`, `Engine` and `Display` match the requirements below; no divergence from the design was found. Section 9 lists what stays open.
 

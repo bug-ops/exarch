@@ -3,7 +3,7 @@ tags:
   - sdd
   - delta
 created: 2026-11-15
-status: open
+status: merged
 related:
   - "[[021-create-staging-and-output-policy/spec]]"
 ---

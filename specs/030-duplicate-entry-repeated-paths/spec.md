@@ -10,7 +10,7 @@ tags:
   - extraction/duplicates
 created: 2026-11-14
 updated: 2026-11-15
-status: ready
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -30,6 +30,7 @@ related:
 > **Issue**: #1201 (batch PR #1230 branch `feat/1230-batch-11-issues`)
 > **Origin**: tar-minefield parity run (research finding, P2). Suite commit e3060bda2a54631c37d088914a24dddac34e7360.
 > **Decision**: direction A, an opt-in reject mode (user decision, 2026-11-15). The default stays first-wins.
+> **Status**: implemented in the batch PR #1230, unreleased. Deviations are listed in section 9.
 
 > [!abstract]
 > When an archive names one path more than once, exarch keeps the first entry and exits 0, while the reference implementations of the minefield matrix keep the last. A checker that reads the archive with another tool can see different content from what exarch installs. This spec adds `RepeatedPaths::Refuse`, an opt-in policy on `SecurityConfig` under which such an archive is refused with a typed `Violation::RepeatedPath`. Last-wins and a status-quo signal were considered and not chosen.
@@ -171,7 +172,7 @@ ZIP repeats SHALL be handled as follows. The `zip` crate dedupes exact names whe
 | Exact repeated name, `zip_consistency` Ignore | collapses silently (status quo, documented) | `Violation::RepeatedPath`, before any write |
 | Landing collision (case variant, strip or rewrite) | duplicate skip | `Violation::RepeatedPath` |
 
-Under `Refuse`, `verify` reports the same finding. The `ZipInconsistency` variant shape is unchanged.
+Under `Refuse`, `verify` reports the same finding once, as `RepeatedPath`, under both `zip_consistency` policies (the structure finding it came from is not reported a second time). The `ZipInconsistency` variant shape is unchanged.
 
 **Priority**: must
 
@@ -284,6 +285,15 @@ Output, exit status and JSON for archives that do not repeat a path, and for eve
 ## 9. Open Questions
 
 None open. Resolved with the user on 2026-11-15: direction A, opt-in, default `KeepFirst`, setting on `SecurityConfig`, identical content refused, `verify` reports the repeat, `list` marks the later copy `refuse`, uniform refusal across formats (a forced ZIP duplicate is `RepeatedPath`).
+
+### Deviations (approved by the lead during the batch)
+
+| Requirement | Specified | Implemented |
+|-------------|-----------|-------------|
+| FR-003 | `earlier` and `later` are the real entry kinds | for a ZIP `DuplicateName` the finding carries no kinds, so both are taken from the name (a trailing `/` is a directory) and are equal |
+| FR-009 | tar refuses at the repeat | the CLI list pass already marks a tar repeat `refuse`, yet extract writes the first copy and then fails (`PartialExtraction`); a pre-write refusal needs `--atomic` (documented) |
+| NFR-REL-001 | agreement per entry | unchanged; past the host record cap and after a failed identity lookup extraction fails closed where `list` may report `skip` (documented) |
+| SC-001 | S14 and S17 rows | the `KeepFirst` outcomes of S14 and S17 were re-checked against the base binary and the upstream archives and equal the table above |
 
 ## 10. See Also
 

@@ -17,7 +17,7 @@ const {
 } = require('../index.js');
 
 const ARCHIVES = ['encrypted-aes256.zip', 'encrypted-header.7z'].map((name) =>
-  path.join(__dirname, 'fixtures', name),
+  path.join(__dirname, 'fixtures', name)
 );
 const WRONG_REASON = {
   'encrypted-aes256.zip': 'wrong_password',
@@ -45,10 +45,7 @@ describe('encrypted archives', () => {
       const report = extractArchiveSync(archive, out, null, null, password());
 
       assert.strictEqual(report.filesExtracted, 2);
-      assert.strictEqual(
-        fs.readFileSync(path.join(out, 'hello.txt'), 'utf8'),
-        'hello encrypted\n',
-      );
+      assert.strictEqual(fs.readFileSync(path.join(out, 'hello.txt'), 'utf8'), 'hello encrypted\n');
     });
 
     it(`${name}: async extract takes the password too`, async () => {
@@ -78,7 +75,7 @@ describe('encrypted archives', () => {
             path.join(tempDir, 'out'),
             null,
             null,
-            Buffer.from('s3cr3t-wrong'),
+            Buffer.from('s3cr3t-wrong')
           ),
         (err) =>
           err.subCode === 'ENCRYPTED' &&
@@ -98,13 +95,13 @@ describe('encrypted archives', () => {
 
   it('refuses a string password', () => {
     assert.throws(() =>
-      extractArchiveSync(ARCHIVES[0], path.join(tempDir, 'out'), null, null, 'correct-horse'),
+      extractArchiveSync(ARCHIVES[0], path.join(tempDir, 'out'), null, null, 'correct-horse')
     );
   });
 
   it('refuses an empty password', () => {
     assert.throws(() =>
-      extractArchiveSync(ARCHIVES[0], path.join(tempDir, 'out'), null, null, Buffer.alloc(0)),
+      extractArchiveSync(ARCHIVES[0], path.join(tempDir, 'out'), null, null, Buffer.alloc(0))
     );
   });
 

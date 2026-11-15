@@ -82,9 +82,7 @@ describe('entry over an escaping existing symlink', () => {
     return {
       tar: write(
         'a.tar',
-        tarArchive(
-          files.map((f) => tarEntry({ ...f, type: f.name.endsWith('/') ? '5' : '0' }))
-        )
+        tarArchive(files.map((f) => tarEntry({ ...f, type: f.name.endsWith('/') ? '5' : '0' })))
       ),
       zip: write('a.zip', zipArchive(files)),
     };

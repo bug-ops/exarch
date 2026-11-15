@@ -238,7 +238,7 @@ pub fn extract_archive<'env>(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     // Owned copies: the work outlives this call on the blocking pool.
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
@@ -264,15 +264,16 @@ pub fn extract_archive<'env>(
     )
 }
 
-/// Copies a JavaScript `Buffer` password into core's zeroizing `Password`.
+/// Copies a JavaScript `Uint8Array` (or `Buffer`) password into core's
+/// zeroizing `Password`.
 ///
-/// The caller wipes its own buffer (`buf.fill(0)`); only a `Buffer` is
+/// The caller wipes its own buffer (`buf.fill(0)`); only a `Uint8Array` is
 /// accepted, so a string is refused by napi's argument conversion.
 ///
 /// # Errors
 ///
 /// `InvalidArg` if the password is empty or longer than 1024 bytes.
-fn password_of(password: Option<Buffer>) -> Result<Option<Arc<exarch_core::Password>>> {
+fn password_of(password: Option<Uint8Array>) -> Result<Option<Arc<exarch_core::Password>>> {
     password
         .map(|buffer| {
             exarch_core::Password::new(buffer.to_vec())
@@ -348,7 +349,7 @@ pub fn extract_archive_sync(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<ExtractionReport> {
     let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
@@ -807,7 +808,7 @@ pub fn list_archive<'env>(
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
     destination: Option<String>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
@@ -889,7 +890,7 @@ pub fn list_archive_sync(
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
     destination: Option<String>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<ArchiveManifest> {
     let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
@@ -953,7 +954,7 @@ pub fn verify_archive<'env>(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
@@ -1022,7 +1023,7 @@ pub fn verify_archive_sync(
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<VerificationReport> {
     let password = password_of(password)?;
     let default_config = exarch_core::SecurityConfig::default();
@@ -1145,7 +1146,7 @@ pub fn extract_archive_with_progress<'env>(
     options: Option<&ExtractionOptions>,
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
-    password: Option<Buffer>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =

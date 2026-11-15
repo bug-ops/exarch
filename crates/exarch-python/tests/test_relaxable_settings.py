@@ -78,6 +78,7 @@ def test_every_policy_setting_an_error_can_name_is_settable():
         "max_path_depth": "max_path_depth",
         "windows_reserved_names": "allow_windows_reserved_names",
         "max_tar_metadata_bytes": "max_tar_metadata_bytes",
+        "repeated_paths": "repeated_paths",
     }
     assert policy == set(spellings), "a relaxable setting was added: map it to its property"
     config = exarch.SecurityConfig()

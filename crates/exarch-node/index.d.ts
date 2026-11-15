@@ -1004,17 +1004,6 @@ export declare class SecurityConfig {
    */
   withMaxDecoderMemory(size: number): this
   /**
-   * Sets the most SHA-256 rounds of key derivation one operation may spend.
-   *
-   * Default: 2^27.
-   *
-   * # Errors
-   *
-   * Throws `INVALID_CONFIGURATION` (`setting` is `max_kdf_work`) if `rounds`
-   * is not a positive whole number.
-   */
-  withMaxKdfWork(rounds: number): this
-  /**
    * Sets the base number of gzip members or bzip2 streams a compressed TAR
    * may hold; every 16 KiB of decoded output adds one more.
    *
@@ -1042,6 +1031,17 @@ export declare class SecurityConfig {
   withMaxSolidCompressionRatio(ratio: number): this
   /** Sets how ZIP archives with ambiguous structure are handled. */
   withZipConsistency(policy: ZipConsistencyPolicy): this
+  /**
+   * Sets the most SHA-256 rounds of key derivation one operation may spend.
+   *
+   * Default: 2^27.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_kdf_work`) if `rounds`
+   * is not a positive whole number.
+   */
+  withMaxKdfWork(rounds: number): this
   /** Sets how an archive that names one landing twice is handled. */
   withRepeatedPaths(policy: RepeatedPaths): this
   /**
@@ -1266,10 +1266,10 @@ export declare class SecurityConfig {
   get allowWindowsReservedNames(): boolean
   /** Budget in bytes for TAR metadata. */
   get maxTarMetadataBytes(): number
-  /** Memory in bytes a decoder may use for its dictionary or window. */
-  get maxDecoderMemory(): number
   /** Most SHA-256 rounds of key derivation one operation may spend. */
   get maxKdfWork(): number
+  /** Memory in bytes a decoder may use for its dictionary or window. */
+  get maxDecoderMemory(): number
   /**
    * Base number of gzip members or bzip2 streams a compressed TAR may
    * hold.
@@ -1939,7 +1939,7 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
-export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Buffer | undefined | null): Promise<ExtractionReport>
+export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Uint8Array | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive to the specified directory (sync).
@@ -1981,7 +1981,7 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
  * ```
  */
-export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Buffer | undefined | null): ExtractionReport
+export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, password?: Uint8Array | undefined | null): ExtractionReport
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -2333,7 +2333,7 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Buffer | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Uint8Array | undefined | null): Promise<ExtractionReport>
 
 /** An entry that extraction writes. */
 export interface ExtractDisposition {
@@ -2481,7 +2481,7 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * }
  * ```
  */
-export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Buffer | undefined | null): Promise<ArchiveManifest>
+export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Uint8Array | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (async).
@@ -2663,7 +2663,7 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * }
  * ```
  */
-export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Buffer | undefined | null): ArchiveManifest
+export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, destination?: string | undefined | null, password?: Uint8Array | undefined | null): ArchiveManifest
 
 /** A directory in a listing. */
 export interface ManifestDirectoryEntry {
@@ -2922,16 +2922,6 @@ export type ProtectedPath = 'filesystem_root' | 'archive_ancestor' | 'working_di
  */
 export type QuotaSubCode = 'FILE_COUNT' | 'TOTAL_SIZE' | 'FILE_SIZE' | 'INTEGER_OVERFLOW' | 'DECODER_MEMORY' | 'COMPRESSED_MEMBERS' | 'TREE_NODES' | 'SINK_CAPACITY' | 'SOLID_BLOCK_MEMORY' | 'HEADER_SIZE' | 'HEADER_ENTRY_COUNT'
 
-/**
- * How an archive that names one landing twice is handled.
- *
- * `keep_first` (the default, also for `SecurityConfig.permissive()`) keeps the
- * first copy and lets the existing-files policy decide every repeat. `refuse`
- * rejects the archive instead, under every existing-files mode; combine it
- * with `staging: 'atomic'` to leave nothing behind.
- */
-export type RepeatedPaths = 'keep_first' | 'refuse'
-
 /** A link target the archive stores. */
 export interface RecordedLinkTarget {
   /** Always `'recorded'`. */
@@ -2947,6 +2937,16 @@ export interface RefuseDisposition {
   /** The entry's path in the archive. */
   path: string
 }
+
+/**
+ * How an archive that names one landing twice is handled.
+ *
+ * `keep_first` (the default, also for `SecurityConfig.permissive()`) keeps the
+ * first copy and lets the existing-files policy decide every repeat. `refuse`
+ * rejects the archive instead, under every existing-files mode; combine it
+ * with `staging: 'atomic'` to leave nothing behind.
+ */
+export type RepeatedPaths = 'keep_first' | 'refuse'
 
 /**
  * What became of the original destination after a failed replace
@@ -3257,7 +3257,7 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * }
  * ```
  */
-export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Buffer | undefined | null): Promise<VerificationReport>
+export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Uint8Array | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (async).
@@ -3430,7 +3430,7 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * }
  * ```
  */
-export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Buffer | undefined | null): VerificationReport
+export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, password?: Uint8Array | undefined | null): VerificationReport
 
 /**
  * Value of the `subCode` property of a `ZIP_BOMB` error: what the refused

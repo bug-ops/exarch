@@ -29,7 +29,7 @@ describe('repeated paths', () => {
       tarArchive([
         tarEntry({ name: 'a', data: Buffer.from('first\n') }),
         tarEntry({ name: 'a', data: Buffer.from('last\n') }),
-      ]),
+      ])
     );
     directories = path.join(tempDir, 'dirs.tar');
     fs.writeFileSync(
@@ -38,7 +38,7 @@ describe('repeated paths', () => {
         tarEntry({ name: 'd', type: '5' }),
         tarEntry({ name: 'd', type: '5' }),
         tarEntry({ name: 'd/f', data: Buffer.from('x') }),
-      ]),
+      ])
     );
   });
 
@@ -75,7 +75,7 @@ describe('repeated paths', () => {
         assert.strictEqual(err.subCode, 'REPEATED_PATH');
         assert.strictEqual(err.relaxableBy, 'repeated_paths');
         return true;
-      },
+      }
     );
   });
 
@@ -89,7 +89,7 @@ describe('repeated paths', () => {
     const kept = listArchiveSync(repeatedFile).dispositions.map((d) => d.action);
     const refused = listArchiveSync(
       repeatedFile,
-      new SecurityConfig().withRepeatedPaths('refuse'),
+      new SecurityConfig().withRepeatedPaths('refuse')
     ).dispositions.map((d) => d.action);
     assert.deepStrictEqual(kept, ['extract', 'skip']);
     assert.deepStrictEqual(refused, ['extract', 'refuse']);
@@ -100,7 +100,7 @@ describe('repeated paths', () => {
     assert.strictEqual(named(verifyArchiveSync(repeatedFile)), false);
     const strict = verifyArchiveSync(
       repeatedFile,
-      new SecurityConfig().withRepeatedPaths('refuse'),
+      new SecurityConfig().withRepeatedPaths('refuse')
     );
     assert.strictEqual(named(strict), true);
   });

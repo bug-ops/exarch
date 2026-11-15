@@ -221,3 +221,37 @@ fn sevenz_directory_over_a_symlink_inside_the_destination_stays_accepted() {
 
     assert!(dest.join("real/a").is_file());
 }
+
+#[test]
+fn a_directory_entry_under_an_escaping_parent_symlink_is_refused_without_writing() {
+    let dir = TempDir::new().unwrap();
+    let archive = write(&dir, "d.tar", &tar_archive(&[tar_dir("x/sub/")]));
+    for allow in [false, true] {
+        let (_root, dest, outside) = destination_with_escaping_link("x");
+
+        let error = ExtractRequest::new(&SecurityConfig::default().with_allow_symlinks(allow))
+            .extract(&archive, &dest)
+            .unwrap_err();
+
+        eprintln!("{allow}: {error:?}");
+        assert!(!is_existing_symlink_refusal(&error), "{allow}: {error}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn missing_and_existing_directory_landings_extract() {
+    let dir = TempDir::new().unwrap();
+    let archive = write(
+        &dir,
+        "d.tar",
+        &tar_archive(&[tar_dir("new/"), tar_dir("old/")]),
+    );
+    let root = TempDir::new().unwrap();
+    let dest = root.path().join("out");
+    std::fs::create_dir_all(dest.join("old")).unwrap();
+
+    extract(&archive, &dest, ExistingFiles::Refuse).unwrap();
+
+    assert!(dest.join("new").is_dir() && dest.join("old").is_dir());
+}

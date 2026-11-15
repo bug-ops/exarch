@@ -797,6 +797,10 @@ pub(crate) fn check_directory_occupant(
 
 /// Whether one path `lstat` finds nothing, or a directory, at `rel`: the
 /// common landing of a directory entry, which needs no pinned probe.
+///
+/// The `lstat` follows symlinks in intermediate components, so this is not
+/// containment: `ensure_dir`'s fd-relative no-follow walk enforces. A `true`
+/// only spares the classification walk and never chooses an error.
 pub(crate) fn landing_is_free_or_directory(root: &PinnedRoot, rel: &Path) -> bool {
     match root.dest().probe(rel).lstat() {
         Ok(metadata) => metadata.is_dir(),

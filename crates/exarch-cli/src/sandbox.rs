@@ -148,6 +148,13 @@ pub struct UnhandledSet(pub Vec<AccessRight>);
 #[serde(rename_all = "snake_case")]
 pub enum Unavailable {
     /// The platform is not Linux.
+    #[cfg_attr(
+        all(target_os = "linux", not(test)),
+        expect(
+            dead_code,
+            reason = "only the non-Linux backend and tests construct it"
+        )
+    )]
     NotLinux,
     /// The kernel has Landlock disabled or not built in.
     Disabled,

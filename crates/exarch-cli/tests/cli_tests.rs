@@ -6792,9 +6792,10 @@ fn test_extract_directory_over_file_names_the_entry() {
         .arg(&archive)
         .assert()
         .code(0)
-        .stdout(predicate::str::contains(
-            "[MEDIUM] x/: refusing to replace the existing file at x",
-        ));
+        .stdout(
+            predicate::str::is_match(r"\[MEDIUM\] x/?: refusing to replace the existing file at x")
+                .unwrap(),
+        );
     exarch_cmd()
         .arg("verify")
         .arg("--strict")

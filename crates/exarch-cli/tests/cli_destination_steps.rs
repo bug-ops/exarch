@@ -36,10 +36,12 @@ fn test_extract_destination_below_a_file_reports_the_create_step_in_every_mode()
         let json = extract_error(&archive, &dest, flags);
 
         assert_eq!(json["error"]["kind"], "IoError", "{flags:?}: {json}");
-        assert_eq!(
-            json["error"]["io_kind"], "NotADirectory",
-            "{flags:?}: {json}"
-        );
+        let io_kind = if cfg!(windows) {
+            "AlreadyExists"
+        } else {
+            "NotADirectory"
+        };
+        assert_eq!(json["error"]["io_kind"], io_kind, "{flags:?}: {json}");
         assert_eq!(step(&json), "create", "{flags:?}: {json}");
         assert!(STEPS.contains(&step(&json)));
     }

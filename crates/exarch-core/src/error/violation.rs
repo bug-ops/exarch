@@ -166,6 +166,9 @@ closed_enum! {
         WeakEncryptionRefused => "weak_encryption_refused",
         /// Deriving the keys would exceed `SecurityConfig::max_kdf_work`.
         KdfCostExceeded => "kdf_cost_exceeded",
+        /// A 7z archive needs a password and the one supplied is not UTF-8 text,
+        /// so it cannot match any 7z key.
+        UnusablePassword => "unusable_password",
     }
 }
 
@@ -190,6 +193,7 @@ impl EncryptionRefusal {
             Self::KdfCostExceeded => {
                 "key derivation would exceed the max_kdf_work budget of this operation"
             }
+            Self::UnusablePassword => "the password is not valid UTF-8 text, which 7z requires",
         }
     }
 }

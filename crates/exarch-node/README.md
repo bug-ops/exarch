@@ -145,7 +145,9 @@ the promise.
 ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
 a `Uint8Array` (a `Buffer` works) as the `password` argument of `extractArchive`,
 `extractArchiveSync`, `extractArchiveWithProgress`, `listArchive`,
-`listArchiveSync`, `verifyArchive` or `verifyArchiveSync`. A string is refused
+`listArchiveSync`, `verifyArchive`, `verifyArchiveSync`,
+`extractArchiveToMemory[WithProgress][Sync]` or `extractArchiveToCallback[Sync]`
+(the last parameter, after `signal`). A string is refused
 because it cannot be wiped; exarch wipes its own copy and you wipe yours.
 
 ```javascript
@@ -161,7 +163,9 @@ try {
 
 A missing, wrong or weak (ZipCrypto) password throws a `SECURITY_VIOLATION`
 error with `subCode === 'ENCRYPTED'`; a password for an archive that is not
-encrypted is ignored. `SecurityConfig.maxKdfWork` bounds the key-derivation work
+encrypted is ignored; a 7z password that is not UTF-8 text throws it with
+`reason === 'unusable_password'`. `encrypted` on a listed entry tells whether its
+data is encrypted, with or without a password. `SecurityConfig.maxKdfWork` bounds the key-derivation work
 of one 7z operation. Zeroization across the binding boundary is best effort.
 
 **Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation requests.

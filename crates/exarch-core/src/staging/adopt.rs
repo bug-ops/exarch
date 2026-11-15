@@ -296,7 +296,7 @@ mod imp {
         }
     }
 
-    impl StagingDir<'_> {
+    impl StagingDir {
         /// The adoption of a root made for an absent destination: the mode a
         /// new directory gets under the process umask, read from a throwaway
         /// directory made inside the private staging directory (so the umask
@@ -835,7 +835,7 @@ mod imp {
         clippy::needless_pass_by_ref_mut,
         reason = "keeps the call sites platform-neutral"
     )]
-    impl StagingDir<'_> {
+    impl StagingDir {
         /// The adoption of a root made for an absent destination.
         pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
             Ok(Adoption::Fresh)
@@ -925,7 +925,7 @@ mod imp {
         clippy::unnecessary_wraps,
         clippy::needless_pass_by_ref_mut
     )]
-    impl StagingDir<'_> {
+    impl StagingDir {
         pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {
             Ok(Adoption)
         }

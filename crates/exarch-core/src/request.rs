@@ -258,6 +258,59 @@ impl<'a> ExtractRequest<'a> {
             )
         })
     }
+
+    /// Extracts `archive` into the destination held by `reservation`,
+    /// always atomically: the output is published when the archive is
+    /// complete and discarded otherwise.
+    ///
+    /// `options.staging` is ignored because the reservation is the staging.
+    /// The result and the tree are those of [`extract`](Self::extract) under
+    /// [`Staging::Atomic`](crate::Staging::Atomic); nothing is resolved by
+    /// path between the reservation and the publish.
+    ///
+    /// # Errors
+    ///
+    /// See [`ExtractRequest`]; on failure or cancellation the stage is
+    /// discarded and the destination stays absent.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::ExtractRequest;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::StagingReservation;
+    ///
+    /// let config = SecurityConfig::default();
+    /// let reservation = StagingReservation::reserve("out")?;
+    /// let report = ExtractRequest::new(&config).extract_reserved("a.tar", reservation)?;
+    /// # let _ = report;
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn extract_reserved(
+        self,
+        archive: impl AsRef<Path>,
+        reservation: crate::StagingReservation,
+    ) -> Result<ExtractionReport> {
+        let Self(request) = self;
+        let credentials = request.credentials();
+        request.run(|config, options, progress| {
+            crate::staging::extract_reserved(
+                reservation,
+                &options,
+                progress,
+                |dir, options, progress| {
+                    extract_validated(
+                        archive.as_ref(),
+                        dir,
+                        config,
+                        options,
+                        progress,
+                        credentials.clone(),
+                    )
+                },
+            )
+        })
+    }
 }
 
 /// Lists the contents of an archive without extracting it.

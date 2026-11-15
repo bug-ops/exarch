@@ -46,7 +46,7 @@ status: permanent
 - Python and Node.js crates are excluded from `cargo nextest` — tested separately via `pytest` / `npm test`
 - Doc-tests must pass: `cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node`
 - Every new `pub` item requires a `///` doc comment; non-trivial APIs require `# Examples` with runnable doc-tests
-- Verification infrastructure: the unpublished `exarch-testkit` crate builds raw ZIP and PAX fixtures for malformed-archive tests; `fuzz/` holds the cargo-fuzz targets (`detect`, `extract_archive`, `glob`, `safe_path`, `sevenz`, `sink`, `tar`, `zip`) with an OSS-Fuzz integration under `fuzz/oss-fuzz/` and a CI format check of the fuzz crate; the `zip-drift.yml` workflow weekly checks the `zip` header refusals against upstream releases
+- Verification infrastructure: the testkit in `crates/exarch-core/src/testkit` builds raw ZIP and PAX fixtures for malformed-archive tests (the unpublished `exarch-testkit` crate is a facade over it for the CLI); `fuzz/` holds the cargo-fuzz targets (`detect`, `extract_archive`, `glob`, `safe_path`, `sevenz`, `sink`, `tar`, `zip`) with an OSS-Fuzz integration under `fuzz/oss-fuzz/` and a CI format check of the fuzz crate; the `zip-drift.yml` workflow weekly checks the `zip` header refusals against upstream releases
 - Security-critical paths (path traversal, symlink/hardlink validation, zip bomb detection, permission sanitization) require live integration tests before any PR touching them
 
 ## IV. Code Style

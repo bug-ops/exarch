@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use tempfile::TempDir;
 
@@ -808,7 +809,7 @@ fn a_staging_directory_that_cannot_be_reserved_names_the_caller_destination() {
     let temp = TempDir::new().unwrap();
     let parent = temp.path().canonicalize().unwrap().join("readonly");
     std::fs::create_dir(&parent).unwrap();
-    let pin = VettedDir::open_path(&parent).unwrap();
+    let pin = Rc::new(VettedDir::open_path(&parent).unwrap());
     let Some(_locked) = Locked::new(&parent, 0o555) else {
         return;
     };
@@ -818,7 +819,9 @@ fn a_staging_directory_that_cannot_be_reserved_names_the_caller_destination() {
         destination: &destination,
     };
 
-    let error = StagingDir::create(&pin, site, Seed::Absent).err().unwrap();
+    let error = StagingDir::create(Rc::clone(&pin), site, Seed::Absent)
+        .err()
+        .unwrap();
 
     assert_eq!(
         not_accessible(&error),
@@ -1283,16 +1286,17 @@ mod adoption {
     use crate::formats::pinned_dir::Uid;
     use crate::formats::pinned_dir::VettedDir;
 
-    fn staging_in(parent: &Path) -> (VettedDir, PathBuf) {
+    fn staging_in(parent: &Path) -> (Rc<VettedDir>, PathBuf) {
         let parent = parent.canonicalize().unwrap();
-        (VettedDir::open_path(&parent).unwrap(), parent)
+        (Rc::new(VettedDir::open_path(&parent).unwrap()), parent)
     }
 
     #[test]
     fn an_adopted_mode_is_applied_through_the_descriptor() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -1312,7 +1316,8 @@ mod adoption {
     fn a_group_the_directory_cannot_join_loses_its_group_access() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign = Gid::of(&std::fs::metadata("/").unwrap());
         if foreign == Gid::of(&own) || own.uid() == 0 {
@@ -1337,7 +1342,8 @@ mod adoption {
     fn a_cautious_adoption_never_takes_a_foreign_uid_nor_its_write_bits() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         let foreign_uid = Uid::from_raw(own.uid().wrapping_add(1));
 
@@ -1360,7 +1366,8 @@ mod adoption {
     fn a_cautious_adoption_of_an_own_destination_keeps_its_mode() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
 
         let narrowed = staging
@@ -1380,7 +1387,8 @@ mod adoption {
     fn a_read_only_adopted_directory_can_still_be_discarded() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let own = std::fs::metadata(&parent).unwrap();
         std::fs::write(staging.path().join("f"), b"x").unwrap();
 
@@ -1403,7 +1411,8 @@ mod adoption {
     fn dropping_a_staging_directory_removes_it() {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = staging_in(temp.path());
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let path = staging.path().to_path_buf();
         assert_eq!(mode_of(&path), 0o700);
 
@@ -1493,7 +1502,7 @@ mod narrowing {
         let output = parent.join("dest");
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
-            &destination.pin,
+            Rc::clone(&destination.pin),
             StagingSite::at(&destination.parent),
             Seed::Absent,
         )
@@ -1570,7 +1579,7 @@ mod narrowing {
     /// The root published as `parent/dest` is `0700` and carries no ACL.
     #[cfg(acl_copy)]
     fn assert_private_without_acl(parent: &Path) {
-        let pin = crate::formats::pinned_dir::VettedDir::open_path(parent).unwrap();
+        let pin = Rc::new(crate::formats::pinned_dir::VettedDir::open_path(parent).unwrap());
         let name = crate::formats::pinned_dir::LeafBuf::of(&parent.join("dest")).unwrap();
         let id = pin.status(name.as_leaf()).unwrap().unwrap().identity;
         assert_eq!(mode_of(&parent.join("dest")), 0o700);
@@ -1586,8 +1595,9 @@ mod narrowing {
         let me = own();
         let temp = TempDir::new().unwrap();
         let parent = temp.path().canonicalize().unwrap();
-        let pin = crate::formats::pinned_dir::VettedDir::open_path(&parent).unwrap();
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let pin = Rc::new(crate::formats::pinned_dir::VettedDir::open_path(&parent).unwrap());
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
 
         let root = staging
             .adopt(Adoption::for_test_with_acl(
@@ -1622,7 +1632,7 @@ mod narrowing {
         let output = parent.join("dest");
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
-            &destination.pin,
+            Rc::clone(&destination.pin),
             StagingSite::at(&destination.parent),
             Seed::Absent,
         )
@@ -1700,7 +1710,7 @@ mod narrowing {
         let output = parent.join("dest");
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
-            &destination.pin,
+            Rc::clone(&destination.pin),
             StagingSite::at(&destination.parent),
             Seed::Absent,
         )
@@ -1757,10 +1767,10 @@ mod seeding {
         Adoption::for_test(0o755, Uid::of(&owner), Gid::of(&owner), Claim::Full)
     }
 
-    fn stage(seed: impl FnOnce(&TempDir) -> Seed) -> (TempDir, PathBuf, VettedDir, Seed) {
+    fn stage(seed: impl FnOnce(&TempDir) -> Seed) -> (TempDir, PathBuf, Rc<VettedDir>, Seed) {
         let temp = TempDir::new().unwrap();
         let parent = temp.path().canonicalize().unwrap();
-        let pin = VettedDir::open_path(&parent).unwrap();
+        let pin = Rc::new(VettedDir::open_path(&parent).unwrap());
         let seed = seed(&temp);
         (temp, parent, pin, seed)
     }
@@ -1771,7 +1781,8 @@ mod seeding {
         let withheld = || Seed::FillEmpty(FileIdentity::Unknown, Inheritance::Withheld(reason));
 
         let (_temp, parent, pin, seed) = stage(|_| withheld());
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
         let narrowed = staging.adopt(adoption()).unwrap();
         assert_eq!(narrowed.reasons(), [reason]);
         assert_eq!(mode_of(staging.path()), 0o700);
@@ -1781,7 +1792,7 @@ mod seeding {
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut report = ExtractionReport::new();
         let mut staging = StagingDir::create(
-            &destination.pin,
+            Rc::clone(&destination.pin),
             StagingSite::at(&destination.parent),
             withheld(),
         )
@@ -1804,7 +1815,7 @@ mod seeding {
         (Uid::of(&metadata), Gid::of(&metadata))
     }
 
-    fn withheld_stage(reason: NarrowingReason) -> (TempDir, PathBuf, VettedDir, Seed) {
+    fn withheld_stage(reason: NarrowingReason) -> (TempDir, PathBuf, Rc<VettedDir>, Seed) {
         stage(|_| Seed::FillEmpty(FileIdentity::Unknown, Inheritance::Withheld(reason)))
     }
 
@@ -1818,7 +1829,8 @@ mod seeding {
         }
         let reason = NarrowingReason::AclUnreadable;
         let (_temp, parent, pin, seed) = withheld_stage(reason);
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(Adoption::for_test(0o775, uid, foreign, Claim::Full))
@@ -1837,7 +1849,8 @@ mod seeding {
         }
         let reason = NarrowingReason::AclUnreadable;
         let (_temp, parent, pin, seed) = withheld_stage(reason);
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(Adoption::for_test(
@@ -1858,7 +1871,8 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
         let adopted_from = identity(&temp, "adopted-from");
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(
@@ -1880,7 +1894,8 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "seeded-from"), Inheritance::None));
         let adopted_from = identity(&temp, "adopted-from");
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(adoption().of_destination_identity(adopted_from))
@@ -1895,7 +1910,8 @@ mod seeding {
         let (temp, parent, pin, seed) =
             stage(|temp| Seed::FillEmpty(identity(temp, "dest"), Inheritance::None));
         let same = identity_of(&temp.path().join("dest")).unwrap();
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         let narrowed = staging
             .adopt(adoption().of_destination_identity(same))
@@ -1927,7 +1943,7 @@ mod seeding {
         let output = temp.path().canonicalize().unwrap().join("dest");
         let destination = AtomicDestination::resolve(&output).unwrap();
         let mut staging = StagingDir::create(
-            &destination.pin,
+            Rc::clone(&destination.pin),
             StagingSite {
                 parent: &destination.parent,
                 destination: &output,
@@ -1949,7 +1965,8 @@ mod seeding {
     fn an_absent_destination_probes_the_umask_and_removes_the_probe() {
         let (_temp, parent, pin, seed) = stage(|_| Seed::Absent);
 
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         assert!(staging.take_fresh().is_some());
         assert!(
@@ -1963,7 +1980,8 @@ mod seeding {
         let (_temp, parent, pin, seed) =
             stage(|temp| Seed::Replace(identity(temp, "dest"), Inheritance::None));
 
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
         assert!(staging.take_fresh().is_none());
     }
@@ -1997,7 +2015,8 @@ mod seeding {
         #[test]
         fn a_seeded_stage_whose_destination_vanished_is_private_without_the_seed() {
             let (_temp, parent, pin, seed) = stage(seeded_from);
-            let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+            let mut staging =
+                StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
             let fresh = staging.take_fresh().unwrap();
 
             let narrowed = staging.adopt(fresh).unwrap();
@@ -2021,9 +2040,12 @@ mod seeding {
                 identity(&temp, "gone"),
                 Inheritance::Stage(InheritedAcl::valid_for_test()),
             );
-            let mut staging =
-                StagingDir::create(&destination.pin, StagingSite::at(&destination.parent), seed)
-                    .unwrap();
+            let mut staging = StagingDir::create(
+                Rc::clone(&destination.pin),
+                StagingSite::at(&destination.parent),
+                seed,
+            )
+            .unwrap();
             let mut report = ExtractionReport::new();
 
             publish_adopted(&mut staging, &destination, None, &output, &mut report).unwrap();
@@ -2050,7 +2072,8 @@ mod seeding {
                 )
             });
 
-            let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), seed).unwrap();
+            let mut staging =
+                StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed).unwrap();
 
             let plan =
                 acl::read_destination(&pin, staging.name.as_leaf(), &parent, staging.id).unwrap();

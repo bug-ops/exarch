@@ -22,9 +22,8 @@ use crate::progress::BarLength;
 use crate::progress::progress_for;
 use crate::sandbox;
 use crate::sandbox::Grant;
-use crate::sandbox::Placement;
-use crate::sandbox::SandboxMode;
 use crate::sandbox::Scope;
+use crate::sandbox::Writes;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveError;
@@ -57,6 +56,7 @@ use exarch_core::PathOccupant;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::Staging as CoreStaging;
+use exarch_core::StagingReservation;
 use exarch_core::StoredTargets;
 use exarch_core::Violation;
 use exarch_core::detect_format;
@@ -217,11 +217,11 @@ impl WriteMode {
         }
     }
 
-    const fn placement(self) -> Placement {
+    const fn writes(self) -> Writes {
         if self.stages() {
-            Placement::Staged
+            Writes::CoreStaged
         } else {
-            Placement::InPlace
+            Writes::Destination
         }
     }
 
@@ -349,14 +349,50 @@ enum Requested {
     InPlace,
 }
 
+/// Which way an extraction runs, decided once from the write mode, the archive
+/// signature and the destination.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtractRoute {
+    /// One streaming pass over the archive.
+    Stream(Requested),
+    /// Extraction from a listing whose destination is checked up front.
+    Listed,
+}
+
+impl ExtractRoute {
+    /// A staged run refuses occupied paths on its own, and a fresh destination
+    /// has nothing to conflict with, so neither needs the list pass. Only TAR
+    /// streams: its list pass costs a second decode.
+    fn decide(args: &ExtractArgs, mode: WriteMode, output_dir: &Path) -> Self {
+        if !is_tar_archive(&args.archive) {
+            return Self::Listed;
+        }
+        if mode.stages() {
+            Self::Stream(Requested::Staged)
+        } else if DestinationState::probe(output_dir) == DestinationState::Fresh {
+            Self::Stream(Requested::InPlace)
+        } else {
+            Self::Listed
+        }
+    }
+}
+
+/// A route together with the stage the run already holds for it, if any.
+struct Prepared {
+    route: ExtractRoute,
+    reservation: Option<Box<StagingReservation>>,
+}
+
 /// How an extraction runs, decided once from the write mode and the
 /// destination.
 enum ExtractPlan {
     /// One streaming pass over the archive; core stages it or refuses
-    /// occupied paths as it writes.
+    /// occupied paths as it writes. A `reservation` is the stage the run
+    /// already holds.
     Stream {
         options: ExtractionOptions,
         staging: Requested,
+        reservation: Option<Box<StagingReservation>>,
     },
     /// Extraction from a listing whose destination was checked up front.
     Listed {
@@ -383,19 +419,25 @@ impl ExtractPlan {
         advice: &ConflictAdvice,
     ) -> Result<ExtractionReport> {
         let result = match self {
-            Self::Stream { options, staging } => {
+            Self::Stream {
+                options,
+                staging,
+                reservation,
+            } => {
                 let mut request = ExtractRequest::new(config)
                     .with_options(options)
                     .with_progress(progress);
                 if let Some(password) = password {
                     request = request.with_password(password);
                 }
-                request
-                    .extract(archive, output_dir)
-                    .map_err(|err| match staging {
-                        Requested::InPlace => as_unstaged(err),
-                        Requested::Staged => err,
-                    })
+                match reservation {
+                    Some(reservation) => request.extract_reserved(archive, *reservation),
+                    None => request.extract(archive, output_dir),
+                }
+                .map_err(|err| match staging {
+                    Requested::InPlace => as_unstaged(err),
+                    Requested::Staged => err,
+                })
             }
             Self::Listed { listed, options } => (*listed).extract(output_dir, &options, progress),
         };
@@ -404,6 +446,7 @@ impl ExtractPlan {
 }
 
 fn plan_extraction(
+    prepared: Prepared,
     args: &ExtractArgs,
     mode: WriteMode,
     output_dir: &Path,
@@ -421,19 +464,16 @@ fn plan_extraction(
             .with_decode_reuse(reuse)
     };
 
-    // A staged run refuses occupied paths on its own, and a fresh destination
-    // has nothing to conflict with, so neither needs the list pass.
-    if is_tar_archive(&args.archive)
-        && (mode.stages() || DestinationState::probe(output_dir) == DestinationState::Fresh)
-    {
-        let (requested, staging) = if mode.stages() {
-            (Requested::Staged, mode.staging())
-        } else {
-            (Requested::InPlace, CoreStaging::Atomic)
+    let Prepared { route, reservation } = prepared;
+    if let ExtractRoute::Stream(requested) = route {
+        let staging = match requested {
+            Requested::Staged => mode.staging(),
+            Requested::InPlace => CoreStaging::Atomic,
         };
         return Ok(ExtractPlan::Stream {
             options: options(staging),
             staging: requested,
+            reservation,
         });
     }
 
@@ -446,6 +486,37 @@ fn plan_extraction(
             .with_existing_files(mode.existing_files())
             .with_mark_propagation(marks),
     })
+}
+
+/// Prepares the destination a sandbox grant attaches to, on Linux: a TAR
+/// destination that is missing (parent existing) is reserved as a stage (core
+/// publishes it, so a failed run discards its output), any other destination is
+/// created in place.
+fn destination_for_sandbox(
+    sandboxed: bool,
+    route: ExtractRoute,
+    mode: WriteMode,
+    output_dir: &Path,
+    archive: &Path,
+) -> Result<Option<Box<StagingReservation>>> {
+    if !cfg!(target_os = "linux") || !sandboxed || mode.stages() {
+        return Ok(None);
+    }
+    if route == ExtractRoute::Stream(Requested::InPlace) {
+        let reservation = StagingReservation::reserve(output_dir).map_err(|err| {
+            convert_error_with_advice(
+                Operation::Extract,
+                as_unstaged(err),
+                archive,
+                &mode.write_advice(),
+            )
+        })?;
+        return Ok(Some(Box::new(reservation)));
+    }
+    // The grant needs a directory to attach to; core creates it with the same
+    // call for an unsandboxed in-place run.
+    DestDir::new_or_create(output_dir)?;
+    Ok(None)
 }
 
 /// Runs `extract`: plans the extraction, runs it inside the armed interrupt
@@ -479,26 +550,35 @@ pub fn execute(
     };
     let config = security_config(args, base)?;
     let password = password::read(args.password.source().as_ref())?;
-    if cfg!(target_os = "linux") && args.sandbox.mode != SandboxMode::Off && !write_mode.stages() {
-        // The grant needs a directory to attach to; core creates it with the
-        // same call for an unsandboxed in-place run.
-        DestDir::new_or_create(&output_dir)?;
-    }
-    sandbox::confine_and_report(
-        args.sandbox.mode,
+    let preflight =
+        sandbox::preflight(args.sandbox.mode, write_mode.writes()).map_err(anyhow::Error::new)?;
+    let pending = interrupt::prepare(&output_dir, write_mode.run(), mode);
+    let route = ExtractRoute::decide(args, write_mode, &output_dir);
+    let reservation = destination_for_sandbox(
+        preflight.is_some(),
+        route,
+        write_mode,
+        &output_dir,
+        &args.archive,
+    )?;
+    sandbox::report(
+        preflight,
         &Grant {
             archive: &args.archive,
-            scope: Scope::Extract {
-                destination: &output_dir,
-                placement: write_mode.placement(),
-            },
+            scope: reservation.as_deref().map_or(
+                Scope::ExtractInPlace {
+                    destination: &output_dir,
+                },
+                Scope::ExtractReserved,
+            ),
         },
         formatter,
     )
     .map_err(anyhow::Error::new)?;
 
-    let guard = interrupt::install(&output_dir, write_mode.run(), mode);
+    let guard = pending.start();
     let plan = plan_extraction(
+        Prepared { route, reservation },
         args,
         write_mode,
         &output_dir,

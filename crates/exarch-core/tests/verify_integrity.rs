@@ -923,13 +923,7 @@ fn sevenz_extract_refuses_lzma2_over_decoder_memory() {
 
 #[test]
 fn sevenz_verify_and_extract_agree_on_every_refusal() {
-    let refused = [
-        ("solid.7z", SecurityConfig::default()),
-        (
-            "encrypted-content-plain-header.7z",
-            SecurityConfig::default(),
-        ),
-    ];
+    let refused = [("solid.7z", SecurityConfig::default())];
     for (name, config) in refused {
         let path = fixture(name);
         extract_refusal(&path, &config);
@@ -963,13 +957,22 @@ fn sevenz_plain_verify_fails_a_solid_archive_with_one_policy_issue() {
 }
 
 #[test]
-fn sevenz_content_encrypted_archive_with_a_plain_header_is_refused() {
+fn sevenz_content_encrypted_archive_with_a_plain_header_verifies_as_unverified_and_extract_refuses()
+{
     let path = fixture("encrypted-content-plain-header.7z");
 
-    let report = verify(&path, VerificationOptions::default());
-    assert_eq!(report.status(), VerificationStatus::Fail);
-    // One issue per encrypted block: the fixture holds two non-solid files.
-    assert_eq!(count(&report, IssueCategory::SecurityPolicy), 2);
+    let plain = verify(&path, VerificationOptions::default());
+    assert_eq!(plain.status(), VerificationStatus::Pass);
+    assert_eq!(count(&plain, IssueCategory::SecurityPolicy), 0);
+
+    let checked = verify(&path, default_integrity());
+    assert_eq!(checked.status(), VerificationStatus::Warning);
+    assert_eq!(checked.integrity_status(), IntegrityStatus::Incomplete);
+    assert_eq!(count(&checked, IssueCategory::SecurityPolicy), 0);
+    let gaps = checked.integrity_gaps().unwrap();
+    assert_eq!(gaps.count(UnverifiedReason::Encrypted), 2);
+    assert_eq!(gaps.total(), 2);
+
     assert_matches!(
         extract_refusal(&path, &SecurityConfig::default()),
         ArchiveError::SecurityViolation { .. }

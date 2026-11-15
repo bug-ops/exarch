@@ -483,6 +483,8 @@ impl From<CoreCreationReport> for PyCreationReport {
 /// * `mode` - Unix permission bits when the archive records them
 /// * `modified` - Modification time as seconds since the Unix epoch (negative
 ///   before it) when the archive records one
+/// * `encrypted` - Whether the entry's data is encrypted (ZIP entry flag, 7z
+///   AES block); reported whether or not a password was supplied
 #[pyclass(name = "ArchiveEntry", subclass, frozen)]
 #[derive(Clone)]
 pub struct PyArchiveEntry {
@@ -504,6 +506,11 @@ impl PyArchiveEntry {
     #[getter]
     fn compressed_size(&self) -> Option<u64> {
         self.inner.compressed_size()
+    }
+
+    #[getter]
+    fn encrypted(&self) -> bool {
+        self.inner.is_encrypted()
     }
 
     #[getter]

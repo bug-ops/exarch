@@ -2489,7 +2489,10 @@ fn visit(
             Ok(true)
         },
     );
-    (names, result)
+    (
+        names,
+        result.map_err(super::decode::DecodeFailure::into_error),
+    )
 }
 
 #[test]

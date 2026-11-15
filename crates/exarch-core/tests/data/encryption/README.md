@@ -5,3 +5,4 @@ Encrypted fixtures for the #1023 acceptance tests, generated with `7z` (p7zip 17
 - `content.7z`: 7z, non-solid (`-ms=off`), encrypted content, plain header (`-p`, `-mhc=off`)
 - `header.7z`: 7z, non-solid (`-ms=off`), encrypted header and content (`-mhe=on`)
 - `plain.zip`, `plain.7z` (non-solid, `-ms=off`): unencrypted twins
+- `mixed-blocks.7z`: 7z, non-solid (`-ms=off`), plain block `plain.txt` then AES block `sealed.txt` (password `correct-horse`), plain header

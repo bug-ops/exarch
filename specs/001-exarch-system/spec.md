@@ -276,6 +276,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | NFR-010 | Compatibility | MSRV 1.99.1; no const generics or APIs introduced after 1.99 |
 | NFR-011 | Portability | Path separator handling must be tested on Windows (backslash vs forward slash edge cases in path validation) |
 | NFR-012 | Observability | CLI progress bar uses `indicatif` in human mode; suppressed in `--json` and `--quiet` modes |
+| NFR-013 | Packaging | The `exarch-core` tests use an in-package testkit under `crates/exarch-core/src/testkit` (compiled in the lib's test build and included by integration-test roots through `#[path]`), so the packaged crate names no `exarch_testkit` and its tests compile and pass when unpacked; `exarch-testkit` stays an unpublished facade over the same files for the CLI (#1237) |
 
 ## 5. Data Model
 

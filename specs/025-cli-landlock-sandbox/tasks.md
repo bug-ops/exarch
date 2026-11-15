@@ -15,7 +15,7 @@ related:
 # Implementation Tasks: CLI Landlock Sandbox
 
 > [!info] References
-> **Spec**: [[spec]]. **Plan**: [[plan]]. All tasks landed in the batch PR #1230. The Linux backend has not run on a Linux host yet: the Ubuntu CI job with `EXARCH_REQUIRE_LANDLOCK=1` is the first execution.
+> **Spec**: [[spec]]. **Plan**: [[plan]]. T001 to T006 landed in the batch PR #1230, T007 in the batch of #1237 to #1246. The Linux backend has not run on a Linux host yet: the Ubuntu CI job with `EXARCH_REQUIRE_LANDLOCK=1` is the first execution.
 
 ## Progress
 
@@ -25,6 +25,7 @@ related:
 - [x] T004: `sandbox` JSON key, human line, typed `SandboxNotEnforced` ([[spec#FR-013]], [[spec#FR-014]])
 - [x] T005: probe hook and `tests/sandbox.rs`, CI env `EXARCH_REQUIRE_LANDLOCK=1` ([[spec#NFR-007]])
 - [x] T006: docs and the CLI skill ([[spec#FR-017]])
+- [x] T007: `preflight` then `confine`, interrupt `prepare` and start, staged extract through `StagingReservation` with the parent grant (#1244; [[spec#FR-005]], [[spec#FR-006]], [[spec#FR-007]], [[spec#FR-010]])
 
 ## See Also
 

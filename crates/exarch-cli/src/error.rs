@@ -1216,6 +1216,9 @@ fn encryption_hint(reason: EncryptionRefusal) -> String {
         EncryptionRefusal::WrongPassword | EncryptionRefusal::WrongPasswordOrCorrupt => {
             "Check the password and try again; the archive may also be damaged.".to_owned()
         }
+        EncryptionRefusal::UnusablePassword => {
+            "7z passwords are UTF-8 text; supply the password as UTF-8 text.".to_owned()
+        }
         EncryptionRefusal::AuthenticationFailed => {
             "The encrypted data was altered or damaged; do not trust the archive.".to_owned()
         }
@@ -1725,6 +1728,7 @@ mod tests {
             (Reason::WrongPassword, false),
             (Reason::WrongPasswordOrCorrupt, false),
             (Reason::AuthenticationFailed, false),
+            (Reason::UnusablePassword, false),
             (Reason::WeakEncryptionRefused, true),
             (Reason::KdfCostExceeded, true),
         ] {

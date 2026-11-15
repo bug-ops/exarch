@@ -7,8 +7,6 @@ use crate::commands::security_config;
 use crate::output::OutputFormatter;
 use crate::password;
 use crate::sandbox;
-use crate::sandbox::Grant;
-use crate::sandbox::Scope;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
@@ -26,15 +24,8 @@ use exarch_core::VerifyRequest;
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
     let password = password::read(args.password.source().as_ref())?;
-    sandbox::confine_and_report(
-        args.sandbox.mode,
-        &Grant {
-            archive: &args.archive,
-            scope: Scope::ReadOnly,
-        },
-        formatter,
-    )
-    .map_err(anyhow::Error::new)?;
+    sandbox::confine_read_only(args.sandbox.mode, &args.archive, formatter)
+        .map_err(anyhow::Error::new)?;
 
     let options = if args.check_integrity {
         let budget = match args.decompression_budget {

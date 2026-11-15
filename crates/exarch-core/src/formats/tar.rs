@@ -2429,7 +2429,7 @@ mod tests {
     fn create_tar_with_pax_size_override(filename: &str, pax_size: u64, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
 
-        let pax_bytes = &exarch_testkit::pax::record(b"size", pax_size.to_string().as_bytes());
+        let pax_bytes = &crate::testkit::pax::record(b"size", pax_size.to_string().as_bytes());
 
         // PAX extended header (type 'x') with the computed size
         let mut pax_header = tar::Header::new_ustar();

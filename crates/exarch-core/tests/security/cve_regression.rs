@@ -7,12 +7,12 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
+use crate::sink_support::testkit::raw_zip::RawEntry;
+use crate::sink_support::testkit::raw_zip::RawZip;
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::TarAmbiguity;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -934,7 +934,7 @@ fn extract_tar(bytes: Vec<u8>) -> exarch_core::Result<exarch_core::ExtractionRep
 #[test]
 fn test_cpython_gh_161955_repeated_pax_key_refused() {
     let records: Vec<u8> = (0..1000)
-        .flat_map(|_| exarch_testkit::pax::record(b"comment", b"x"))
+        .flat_map(|_| crate::sink_support::testkit::pax::record(b"comment", b"x"))
         .collect();
 
     assert_matches!(
@@ -947,7 +947,12 @@ fn test_cpython_gh_161955_repeated_pax_key_refused() {
 #[test]
 fn test_cpython_gh_161955_pax_record_flood_stops_at_the_metadata_budget() {
     let records: Vec<u8> = (0..200_000)
-        .flat_map(|n| exarch_testkit::pax::record(format!("comment{n}").as_bytes(), b"xxxxxxxxxx"))
+        .flat_map(|n| {
+            crate::sink_support::testkit::pax::record(
+                format!("comment{n}").as_bytes(),
+                b"xxxxxxxxxx",
+            )
+        })
         .collect();
     assert!(records.len() > 4 * 1024 * 1024);
 

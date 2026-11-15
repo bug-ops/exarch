@@ -1371,6 +1371,9 @@ pub struct ManifestFileEntry {
     /// `true` when a size field of this entry exceeded `2^53 - 1` and was
     /// clamped to it.
     pub size_clamped: bool,
+    /// `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+    /// block), whether or not a password was supplied.
+    pub encrypted: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time in milliseconds since the Unix epoch, negative
@@ -1396,6 +1399,9 @@ pub struct ManifestDirectoryEntry {
     /// `true` when a size field of this entry exceeded `2^53 - 1` and was
     /// clamped to it.
     pub size_clamped: bool,
+    /// `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+    /// block), whether or not a password was supplied.
+    pub encrypted: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time in milliseconds since the Unix epoch, negative
@@ -1418,6 +1424,9 @@ pub struct ManifestSymlinkEntry {
     /// `true` when a size field of this entry exceeded `2^53 - 1` and was
     /// clamped to it.
     pub size_clamped: bool,
+    /// `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+    /// block), whether or not a password was supplied.
+    pub encrypted: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time in milliseconds since the Unix epoch, negative
@@ -1444,6 +1453,9 @@ pub struct ManifestHardlinkEntry {
     /// `true` when a size field of this entry exceeded `2^53 - 1` and was
     /// clamped to it.
     pub size_clamped: bool,
+    /// `true` when the entry's data is encrypted (a ZIP entry's flag, a 7z AES
+    /// block), whether or not a password was supplied.
+    pub encrypted: bool,
     /// File permissions (raw Unix mode).
     pub mode: Option<u32>,
     /// Modification time in milliseconds since the Unix epoch, negative
@@ -1478,6 +1490,7 @@ pub type ArchiveEntry = Either5<
 struct EntryCommon {
     path: String,
     compressed_size: Option<ByteSize>,
+    encrypted: bool,
     mode: Option<u32>,
     modified: Option<i64>,
 }
@@ -1489,6 +1502,7 @@ fn entry_common(entry: &exarch_core::ArchiveEntry) -> CoreResult<EntryCommon> {
             .map_err(|malformation| Failure::from(CoreError::from(malformation)))?
             .to_owned(),
         compressed_size: entry.compressed_size().map(ByteSize::new),
+        encrypted: entry.is_encrypted(),
         mode: entry.mode.map(exarch_core::RawMode::get),
         modified: entry
             .modified
@@ -1502,6 +1516,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
     let EntryCommon {
         path,
         compressed_size,
+        encrypted,
         mode,
         modified,
     } = entry_common(entry)?;
@@ -1516,6 +1531,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
                 size: size.value,
                 compressed_size: compressed,
                 size_clamped: size.clamped || compressed_clamped,
+                encrypted,
                 mode,
                 modified,
                 compression_ratio: entry.compression_ratio(),
@@ -1526,6 +1542,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
             entry_type: ManifestEntryType::Directory,
             compressed_size: compressed,
             size_clamped: compressed_clamped,
+            encrypted,
             mode,
             modified,
         }),
@@ -1534,6 +1551,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
             entry_type: ManifestEntryType::Symlink,
             compressed_size: compressed,
             size_clamped: compressed_clamped,
+            encrypted,
             mode,
             modified,
             target: link_target(target)?,
@@ -1543,6 +1561,7 @@ fn archive_entry(entry: &exarch_core::ArchiveEntry) -> CoreResult<ArchiveEntry> 
             entry_type: ManifestEntryType::Hardlink,
             compressed_size: compressed,
             size_clamped: compressed_clamped,
+            encrypted,
             mode,
             modified,
             target: link_target(target)?,

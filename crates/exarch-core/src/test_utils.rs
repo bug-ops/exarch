@@ -118,8 +118,8 @@ pub(crate) fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
 /// the `zip` crate's own writer refuses to produce.
 #[must_use]
 pub(crate) fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
-    use exarch_testkit::raw_zip::RawEntry;
-    use exarch_testkit::raw_zip::RawZip;
+    use crate::testkit::raw_zip::RawEntry;
+    use crate::testkit::raw_zip::RawZip;
 
     let entry = RawEntry {
         crc: 0,
@@ -190,9 +190,9 @@ impl Default for TarTestBuilder {
 /// `unix_permissions()` path, which does not set external attributes reliably.
 #[must_use]
 pub(crate) fn create_zip_with_symlink(link_path: &str, target: &str) -> Vec<u8> {
-    use exarch_testkit::raw_zip::RawEntry;
-    use exarch_testkit::raw_zip::RawZip;
-    use exarch_testkit::raw_zip::SYMLINK_MODE;
+    use crate::testkit::raw_zip::RawEntry;
+    use crate::testkit::raw_zip::RawZip;
+    use crate::testkit::raw_zip::SYMLINK_MODE;
 
     let entry = RawEntry {
         date: 0,
@@ -301,7 +301,7 @@ pub(crate) fn tar_with_pax_record(
     typeflag: u8,
     data: &[u8],
 ) -> Vec<u8> {
-    let record = exarch_testkit::pax::record(pax_key.as_bytes(), pax_value);
+    let record = crate::testkit::pax::record(pax_key.as_bytes(), pax_value);
 
     let mut tar = Vec::new();
     tar.extend_from_slice(&raw_tar_header(b"PaxHeaders/entry", record.len(), b'x'));
@@ -521,6 +521,25 @@ mod tests {
 
         for (name, zip) in structural_zip_seeds() {
             write_seed("zip", name, &zip.build().bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod pax_record_tests {
+    use crate::testkit::pax::record;
+
+    #[test]
+    fn the_length_prefix_counts_its_own_digits_at_every_rollover() {
+        for value_len in (0..1200).chain(999_980..1_000_020) {
+            let built = record(b"k", &vec![b'v'; value_len]);
+            let space = built.iter().position(|&b| b == b' ').unwrap();
+            let declared: usize = std::str::from_utf8(&built[..space])
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(declared, built.len(), "value length {value_len}");
         }
     }
 }

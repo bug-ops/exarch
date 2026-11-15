@@ -11,6 +11,9 @@
     clippy::cast_possible_truncation
 )]
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use exarch_core::ArchiveError;
 use exarch_core::CreatableFormat;
 use exarch_core::CreateRequest;
@@ -21,12 +24,12 @@ use exarch_core::create_archive;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
 use std::assert_matches;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
+use testkit::raw_zip::RawEntry;
+use testkit::raw_zip::RawZip;
 
 fn fixture(name: &str) -> PathBuf {
     // Fixtures ship inside the package, same as the 7z fixtures.

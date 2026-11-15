@@ -185,7 +185,7 @@ exarch extract --password-file ~/.secrets/archive.pw backup.zip out/
 exarch list --password-prompt backup.7z
 ```
 
-A password for an archive that is not encrypted is ignored. Without a password, `list` shows a ZIP's entries (encrypted entries are not decrypted; `verify --check-integrity` reports them as unverified with reason `encrypted`), and `extract` refuses with `SECURITY_VIOLATION` / `ENCRYPTED` before it writes anything. A wrong password and tampered data are different errors (`wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`). ZipCrypto, the legacy ZIP cipher, and 7z raw-key mode are refused as too weak. Solid 7z archives stay refused whether or not they are encrypted.
+A password for an archive that is not encrypted is ignored. Without a password, `list` shows a ZIP's entries (encrypted entries are not decrypted; `verify --check-integrity` reports them as unverified with reason `encrypted`), and `extract` refuses with `SECURITY_VIOLATION` / `ENCRYPTED` before it writes anything. A wrong password and tampered data are different errors (`wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`); a 7z password that is not UTF-8 text is refused as `unusable_password`. `list -l` marks every encrypted entry `(encrypted)` and `list --json -l` carries `"encrypted": true|false` on every entry, with or without a password. ZipCrypto, the legacy ZIP cipher, and 7z raw-key mode are refused as too weak. Solid 7z archives stay refused whether or not they are encrypted.
 
 Key derivation is bounded: a 7z may not cost more than `max_kdf_work` (default 2^27 SHA-256 rounds, a library setting with no CLI flag). The last 7z key stays in process memory until the process exits (an upstream behavior of `sevenz-rust2`).
 

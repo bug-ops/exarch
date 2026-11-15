@@ -31,6 +31,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::ArchiveError;
 use crate::ConfigProblem;
@@ -73,6 +74,114 @@ pub const STAGING_PREFIX: &str = ".exarch-";
 /// The name prefix of the backup an atomic replace renames the previous
 /// destination to; it extends [`STAGING_PREFIX`].
 pub const BACKUP_PREFIX: &str = ".exarch-backup-";
+
+/// A staging directory built beside a destination, with the pinned parent
+/// that publishes it: the first half of an atomic extraction.
+///
+/// [`ExtractRequest::extract_reserved`](crate::ExtractRequest::extract_reserved)
+/// consumes it; dropping an unused reservation removes the stage. Not `Send`:
+/// the pinned parent stays on the thread that reserved it.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::StagingReservation;
+///
+/// let reservation = StagingReservation::reserve("out")?;
+/// drop(reservation);
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[must_use = "dropping a reservation removes its stage"]
+pub struct StagingReservation {
+    destination: AtomicDestination,
+    output_dir: PathBuf,
+    staging: StagingDir,
+    _hold: Option<DestinationHold>,
+}
+
+impl std::fmt::Debug for StagingReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagingReservation")
+            .field("output_dir", &self.output_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StagingReservation {
+    /// Reserves a staging directory beside `output_dir`, which must be absent
+    /// or an empty directory. Nothing is created at the destination.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Staging::Atomic`]: [`ArchiveError::OutputExists`],
+    /// [`ArchiveError::InvalidConfiguration`] for an unusable output path and
+    /// [`ArchiveError::DestinationNotAccessible`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::StagingReservation;
+    ///
+    /// let reservation = StagingReservation::reserve("out")?;
+    /// # drop(reservation);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn reserve(output_dir: impl AsRef<Path>) -> Result<Self> {
+        let output_dir = output_dir.as_ref();
+        let destination = AtomicDestination::resolve(output_dir)?;
+        let (seed, hold) = atomic_seed(&destination, output_dir)?;
+        let site = StagingSite {
+            parent: &destination.parent,
+            destination: output_dir,
+        };
+        let staging = StagingDir::create(Rc::clone(&destination.pin), site, seed)?;
+        Ok(Self {
+            destination,
+            output_dir: output_dir.to_path_buf(),
+            staging,
+            _hold: hold,
+        })
+    }
+
+    /// The staging directory, as the handle the extraction writes through.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::StagingReservation;
+    ///
+    /// let reservation = StagingReservation::reserve("out")?;
+    /// #[cfg(unix)]
+    /// let _stage = reservation.staging_fd();
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    #[cfg(unix)]
+    #[cfg_attr(docsrs, doc(cfg(unix)))]
+    #[must_use]
+    pub fn staging_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.staging.as_fd()
+    }
+
+    /// The pinned parent of the destination: the handle the stage is published
+    /// through.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::StagingReservation;
+    ///
+    /// let reservation = StagingReservation::reserve("out")?;
+    /// #[cfg(unix)]
+    /// let _parent = reservation.parent_fd();
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    #[cfg(unix)]
+    #[cfg_attr(docsrs, doc(cfg(unix)))]
+    #[must_use]
+    pub fn parent_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&*self.destination.pin)
+    }
+}
 
 /// What a staged output is, which fixes how its destination is resolved.
 ///
@@ -196,7 +305,7 @@ impl<F> StagedRun for F where
 /// The extraction's own error, or the I/O error of pinning the directory. The
 /// staging directory is left for the caller to discard.
 fn extract_in(
-    staging: &StagingDir<'_>,
+    staging: &StagingDir,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     extract: impl StagedRun,
@@ -261,7 +370,7 @@ fn staged_options(options: &ExtractionOptions) -> ExtractionOptions {
 struct AtomicDestination {
     name: LeafBuf,
     parent: PathBuf,
-    pin: VettedDir,
+    pin: Rc<VettedDir>,
 }
 
 impl AtomicDestination {
@@ -321,9 +430,9 @@ impl AtomicDestination {
             })?;
             (parent, name)
         };
-        let pin = VettedDir::open_path(&parent).map_err(|e| {
+        let pin = Rc::new(VettedDir::open_path(&parent).map_err(|e| {
             ArchiveError::destination_not_accessible(output_dir, DestinationStep::Open, e)
-        })?;
+        })?);
         if !destination_exists {
             pin.status(name.as_leaf()).map_err(|e| {
                 ArchiveError::destination_not_accessible(output_dir, DestinationStep::Create, e)
@@ -432,13 +541,34 @@ fn extract_atomic(
     progress: &mut dyn ProgressCallback,
     extract: impl StagedRun,
 ) -> Result<ExtractionReport> {
-    let destination = AtomicDestination::resolve(output_dir)?;
-    let (seed, _hold) = atomic_seed(&destination, output_dir)?;
-    let site = StagingSite {
-        parent: &destination.parent,
-        destination: output_dir,
-    };
-    let mut staging = StagingDir::create(&destination.pin, site, seed)?;
+    extract_reserved(
+        StagingReservation::reserve(output_dir)?,
+        options,
+        progress,
+        extract,
+    )
+}
+
+/// Runs `extract` into the stage `reservation` holds and publishes it, or
+/// discards it on failure or cancellation. `options.staging` is not read.
+///
+/// # Errors
+///
+/// The extraction's own error, rolled back, or a typed refusal or failure of
+/// the publish.
+pub(crate) fn extract_reserved(
+    reservation: StagingReservation,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+    extract: impl StagedRun,
+) -> Result<ExtractionReport> {
+    let StagingReservation {
+        destination,
+        output_dir,
+        mut staging,
+        _hold,
+    } = reservation;
+    let output_dir = output_dir.as_path();
 
     let mut report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
@@ -509,7 +639,7 @@ fn adoption_for(
 /// private; a failure up to and including the rename leaves the caller to
 /// discard it.
 fn publish_adopted(
-    staging: &mut StagingDir<'_>,
+    staging: &mut StagingDir,
     destination: &AtomicDestination,
     adoption: Option<Adoption>,
     output_dir: &Path,

@@ -292,8 +292,8 @@ pub(super) struct OwnContents(());
 
 /// A staging directory inside the pinned directory `parent`.
 #[must_use = "dropping a staging directory removes it"]
-pub(super) struct StagingDir<'p> {
-    pub(super) parent: &'p VettedDir,
+pub(super) struct StagingDir {
+    pub(super) parent: Rc<VettedDir>,
     pub(super) name: LeafBuf,
     path: PathBuf,
     destination: PathBuf,
@@ -331,7 +331,7 @@ impl StagingSite<'_> {
     }
 }
 
-impl<'p> StagingDir<'p> {
+impl StagingDir {
     /// Creates a fresh `0700` staging directory in `parent`, whose logical
     /// path is `site.parent`, and prepares it as `seed` says. A failure names
     /// `site.destination`, the path the caller asked to extract to.
@@ -341,7 +341,7 @@ impl<'p> StagingDir<'p> {
     /// [`ArchiveError::DestinationNotAccessible`] when no unused name could be
     /// created; another error when a step `seed` makes mandatory failed. The
     /// directory is removed then.
-    pub(super) fn create(parent: &'p VettedDir, site: StagingSite<'_>, seed: Seed) -> Result<Self> {
+    pub(super) fn create(parent: Rc<VettedDir>, site: StagingSite<'_>, seed: Seed) -> Result<Self> {
         let parent_path = site.parent;
         let failure = |error: io::Error| {
             ArchiveError::destination_not_accessible(
@@ -388,7 +388,7 @@ impl<'p> StagingDir<'p> {
     /// The I/O error of the open or the check that failed.
     #[cfg(unix)]
     fn claim(
-        parent: &'p VettedDir,
+        parent: Rc<VettedDir>,
         site: StagingSite<'_>,
         name: LeafBuf,
     ) -> std::result::Result<Self, ClaimRefused> {
@@ -401,7 +401,7 @@ impl<'p> StagingDir<'p> {
             }
         };
         if let Err(error) = VerifiedStage::verify_created(&dir) {
-            let leftover = Self::remove_refused(parent, &parent_path.join(&name), &name, &dir);
+            let leftover = Self::remove_refused(&parent, &parent_path.join(&name), &name, &dir);
             return Err(ClaimRefused { error, leftover });
         }
         let pin = VerifiedStage(dir);
@@ -443,7 +443,7 @@ impl<'p> StagingDir<'p> {
     /// failure removes it through the armed guard.
     #[cfg(not(unix))]
     fn claim(
-        parent: &'p VettedDir,
+        parent: Rc<VettedDir>,
         site: StagingSite<'_>,
         name: LeafBuf,
     ) -> std::result::Result<Self, ClaimRefused> {
@@ -467,6 +467,12 @@ impl<'p> StagingDir<'p> {
     #[cfg(all(test, target_os = "macos"))]
     pub(super) fn ledger(&self) -> &RunRecord {
         &self.ledger
+    }
+
+    /// The descriptor the stage was claimed through.
+    #[cfg(unix)]
+    pub(super) fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(self.pin.as_file())
     }
 
     /// The directory an extraction writes into: the descriptor the stage was
@@ -836,7 +842,7 @@ impl<'p> StagingDir<'p> {
     }
 }
 
-impl Drop for StagingDir<'_> {
+impl Drop for StagingDir {
     fn drop(&mut self) {
         if self.armed {
             self.remove_tree();
@@ -853,17 +859,17 @@ mod tests {
 
     use super::*;
 
-    fn pin_of(temp: &TempDir) -> (VettedDir, PathBuf) {
+    fn pin_of(temp: &TempDir) -> (Rc<VettedDir>, PathBuf) {
         let parent = temp.path().canonicalize().unwrap();
-        (VettedDir::open_path(&parent).unwrap(), parent)
+        (Rc::new(VettedDir::open_path(&parent).unwrap()), parent)
     }
 
     /// A staging directory created and claimed, but not yet prepared: the
     /// window in which another user could plant something.
-    fn claimed<'p>(pin: &'p VettedDir, parent: &Path) -> StagingDir<'p> {
+    fn claimed(pin: &Rc<VettedDir>, parent: &Path) -> StagingDir {
         let name = LeafBuf::random(STAGING_PREFIX);
         pin.make_private_dir(name.as_leaf()).unwrap();
-        StagingDir::claim(pin, StagingSite::at(parent), name).unwrap()
+        StagingDir::claim(Rc::clone(pin), StagingSite::at(parent), name).unwrap()
     }
 
     fn seeds() -> [Seed; 3] {
@@ -978,7 +984,7 @@ mod tests {
         let victim = root.join("victim");
         std::fs::write(&victim, b"x").unwrap();
         add_ace(&victim, "everyone deny delete");
-        let pin = VettedDir::open_path(&parent).unwrap();
+        let pin = Rc::new(VettedDir::open_path(&parent).unwrap());
         let stage = claimed(&pin, &parent);
         std::fs::hard_link(&victim, stage.path().join("link")).unwrap();
 
@@ -1011,7 +1017,7 @@ mod tests {
         let (name, moved) = replaced_at_name(&pin, &parent, 0o755);
         let at = parent.join(&name);
 
-        assert!(StagingDir::claim(&pin, StagingSite::at(&parent), name).is_err());
+        assert!(StagingDir::claim(Rc::clone(&pin), StagingSite::at(&parent), name).is_err());
 
         assert!(
             !at.exists(),
@@ -1032,7 +1038,7 @@ mod tests {
         let (name, _moved) = replaced_at_name(&pin, &parent, 0o700);
         add_ace(&parent.join(&name), "everyone allow list");
 
-        assert!(StagingDir::claim(&pin, StagingSite::at(&parent), name).is_err());
+        assert!(StagingDir::claim(Rc::clone(&pin), StagingSite::at(&parent), name).is_err());
     }
 
     #[test]
@@ -1063,7 +1069,7 @@ mod tests {
         let at = parent.join(&name);
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let refused = StagingDir::claim(&pin, StagingSite::at(&parent), name)
+        let refused = StagingDir::claim(Rc::clone(&pin), StagingSite::at(&parent), name)
             .err()
             .unwrap();
 

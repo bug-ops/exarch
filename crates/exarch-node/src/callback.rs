@@ -20,6 +20,8 @@ use napi::bindgen_prelude::ValidateNapiValue;
 use napi::sys;
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
+use std::sync::Arc;
+
 use tokio::runtime::Handle;
 
 use crate::CoreResult;
@@ -34,6 +36,7 @@ use crate::error::spawn_blocking_promise_with;
 use crate::memory::MemoryEntry;
 use crate::memory::PathModel;
 use crate::memory::callback_entry;
+use crate::password_of;
 use crate::report::ArchiveType;
 use crate::report::ExtractionReport;
 use crate::stream::AbortableSource;
@@ -124,6 +127,7 @@ struct CallbackJob {
     options: exarch_core::SinkOptions,
     path_model: CorePathModel,
     format: Option<ArchiveType>,
+    password: Option<Arc<exarch_core::Password>>,
 }
 
 impl CallbackJob {
@@ -132,12 +136,14 @@ impl CallbackJob {
         options: Option<&SinkOptions>,
         path_model: Option<PathModel>,
         format: Option<ArchiveType>,
+        password: Option<Arc<exarch_core::Password>>,
     ) -> Self {
         Self {
             config: config.map_or_default(|c| c.as_core().clone()),
             options: options.map_or_default(SinkOptions::to_core),
             path_model: path_model.map_or(CorePathModel::Host, Into::into),
             format,
+            password,
         }
     }
 
@@ -148,10 +154,13 @@ impl CallbackJob {
         source: impl IntoSource,
         mut deliver: impl FnMut(MemoryEntry) -> std::result::Result<(), Failure>,
     ) -> CoreResult<exarch_core::ExtractionReport> {
-        let request = MemoryExtractRequest::default()
+        let mut request = MemoryExtractRequest::default()
             .with_config(self.config)
             .with_options(self.options)
             .with_path_model(self.path_model);
+        if let Some(password) = self.password {
+            request = request.with_password(password);
+        }
         source.run(self.format, |reader| {
             extract_reader_to_callback(
                 reader,
@@ -208,6 +217,11 @@ impl CallbackJob {
 ///   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned)
 ///   and at every read of a `Uint8Array` archive. A pending `onEntry` call is
 ///   abandoned, not cancelled
+/// * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
+///   an encrypted ZIP (`WinZip` AES) or 7z (AES-256) archive, as in
+///   `extractArchive`: a string is refused, an empty or over-long password is
+///   `InvalidArg`, exarch wipes its own copy and you wipe yours with
+///   `buf.fill(0)`. It is the last parameter, after `signal`
 ///
 /// # Returns
 ///
@@ -242,8 +256,10 @@ pub fn extract_archive_to_callback<'env>(
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
-    let job = CallbackJob::new(config, options, path_model, format);
+    let password = password_of(password)?;
+    let job = CallbackJob::new(config, options, path_model, format, password);
     let EntryCallback(tsfn) = on_entry;
     let (data, detach) = AbortableSource::bind(data, signal);
     let abort = data.abort();
@@ -296,6 +312,7 @@ pub fn extract_archive_to_callback<'env>(
 /// extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
 /// ```
 #[napi]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn extract_archive_to_callback_sync<'env>(
     env: Env,
     data: Uint8Array,
@@ -308,8 +325,10 @@ pub fn extract_archive_to_callback_sync<'env>(
     options: Option<&SinkOptions>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
+    password: Option<Uint8Array>,
 ) -> Result<ExtractionReport> {
-    let job = CallbackJob::new(config, options, path_model, format);
+    let password = password_of(password)?;
+    let job = CallbackJob::new(config, options, path_model, format, password);
     let factory: Function<'_, Unknown<'_>, Function<'_, MemoryEntry, Unknown<'_>>> =
         env.run_script(WRAP_ENTRY_CALLBACK_SYNC_JS)?;
     let wrapped = factory.call(on_entry.to_unknown())?;

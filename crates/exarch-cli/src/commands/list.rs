@@ -13,8 +13,6 @@ use crate::output::OutputFormatter;
 use crate::output::SizeUnits;
 use crate::password;
 use crate::sandbox;
-use crate::sandbox::Grant;
-use crate::sandbox::Scope;
 use exarch_core::EntrySelection;
 use exarch_core::ListOptions;
 use exarch_core::ListRequest;
@@ -57,15 +55,8 @@ fn destination_volume(
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandResult {
     let config = security_config(args, SecurityConfig::default())?;
     let password = password::read(args.password.source().as_ref())?;
-    sandbox::confine_and_report(
-        args.sandbox.mode,
-        &Grant {
-            archive: &args.archive,
-            scope: Scope::ReadOnly,
-        },
-        formatter,
-    )
-    .map_err(anyhow::Error::new)?;
+    sandbox::confine_read_only(args.sandbox.mode, &args.archive, formatter)
+        .map_err(anyhow::Error::new)?;
 
     let volume = destination_volume(
         args.destination.as_deref(),

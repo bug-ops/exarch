@@ -20,7 +20,7 @@
 
 ## Result
 
-- `--check-integrity` without a password: encrypted ZIP entries are unverified (`WARNING`, `INCOMPLETE`, reason `encrypted`); a 7z with encrypted content and a plain header is `FAIL` (`ENCRYPTED` issues) with `INCOMPLETE` and reason `not_decodable`. With the right password both are `PASS`/`OK`.
+- `--check-integrity` without a password: encrypted ZIP entries are unverified (`WARNING`, `INCOMPLETE`, reason `encrypted`); so are the files of a 7z with encrypted content and a plain header (same `WARNING`, `INCOMPLETE`, reason `encrypted`, exit `0`). With the right password both are `PASS`/`OK`.
 
 - `data.status`: `PASS` / `WARNING` / `FAIL`. Envelope `status` stays `"success"`; exit `1` on `FAIL`. Text: `Archive verification: PASS|WARNING|FAIL`, issue tags `[HIGH]`/`[MEDIUM]`/`[LOW]` (same words with and without color).
 - `security_status` (`Security: OK|WARNING|FAILED`) and `integrity_status` (`OK|FAILED|INCOMPLETE|SKIPPED`).
@@ -64,7 +64,7 @@ What `OK` covers:
 - A TAR entry whose content fails to decode is a hard error (exit `1`, `invalid archive: integrity check failed at <path>: ...`); trailer-only corruption is a `FAILED` report.
 - For a compressed TAR, `extract`, `list`, and `verify --check-integrity` read to the stream end after the marker; a corrupt later member fails with `integrity check failed after the TAR end-of-archive marker`, and the partial extraction is discarded.
 
-`verify` reports as archive-level issues, exit `1`, everything `extract` refuses in a 7z archive: solid without the flag (`Security Policy`), coder memory over the limit (`Quota Exceeded`), AES-encrypted content under a plain header, an unknown coder, a block whose files do not add up to its decoded size, and a sub-stream count that differs from the streamed-file count (`Invalid Archive`).
+`verify` reports as archive-level issues, exit `1`, everything `extract` refuses in a 7z archive: solid without the flag (`Security Policy`), coder memory over the limit (`Quota Exceeded`), an unknown coder, a block whose files do not add up to its decoded size, and a sub-stream count that differs from the streamed-file count (`Invalid Archive`).
 
 ## 7z link targets
 

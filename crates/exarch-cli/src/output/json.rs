@@ -232,6 +232,7 @@ fn long_manifest(
         path: String,
         entry_type: &'static str,
         size: u64,
+        encrypted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         compressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,6 +265,7 @@ fn long_manifest(
                 path: path_text(&e.path),
                 entry_type: e.kind.entry_type().as_str(),
                 size: e.size(),
+                encrypted: e.is_encrypted(),
                 compressed_size: e.compressed_size(),
                 mode: e.mode.map(exarch_core::RawMode::get),
                 modified: e.modified.and_then(|t| {

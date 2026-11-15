@@ -287,6 +287,27 @@ pub(super) fn parallel_stream(
     })
 }
 
+/// Where a decode failure that did not come from the entry callback arose.
+#[derive(Debug)]
+pub(super) enum DecodeFailure {
+    /// While decoding or draining `block`.
+    Block {
+        block: BlockIndex,
+        error: sevenz_rust2::Error,
+    },
+    /// In the walk itself: entries not handed over exactly once.
+    Handover(sevenz_rust2::Error),
+}
+
+#[cfg(test)]
+impl DecodeFailure {
+    pub(super) fn into_error(self) -> sevenz_rust2::Error {
+        match self {
+            Self::Block { error, .. } | Self::Handover(error) => error,
+        }
+    }
+}
+
 /// Hands each entry to `each` in archive order.
 ///
 /// A file without data is handed over where it stands; the first file of a
@@ -304,14 +325,14 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
     parallel: ParallelDecode,
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
-) -> std::result::Result<(), sevenz_rust2::Error> {
+) -> std::result::Result<(), DecodeFailure> {
     let mut next_block = 0;
     let mut handed = 0usize;
     for (index, file) in header.files().iter().enumerate() {
         match header.file_block(index) {
             None => {
                 let empty: &mut dyn Read = &mut io::empty();
-                if !each(file, empty)? {
+                if !each(file, empty).map_err(DecodeFailure::Handover)? {
                     return Ok(());
                 }
                 handed = handed.saturating_add(1);
@@ -322,10 +343,17 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
                     .skip(next_block)
                     .take(block.get().saturating_sub(next_block))
                 {
-                    decode_block_entries(source, header, fileless, parallel, knobs, each)?;
+                    decode_block_entries(source, header, fileless, parallel, knobs, each).map_err(
+                        |error| DecodeFailure::Block {
+                            block: fileless,
+                            error,
+                        },
+                    )?;
                 }
                 let span = block_span(header, block);
-                if !decode_block_entries(source, header, block, parallel, knobs, each)? {
+                let walked = decode_block_entries(source, header, block, parallel, knobs, each)
+                    .map_err(|error| DecodeFailure::Block { block, error })?;
+                if !walked {
                     return Ok(());
                 }
                 handed = handed.saturating_add(span.len());
@@ -334,7 +362,7 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
             Some(_) => {}
         }
     }
-    (handed == header.files().len()).ok_or_else(handover_violation)
+    (handed == header.files().len()).ok_or_else(|| DecodeFailure::Handover(handover_violation()))
 }
 
 /// Reads past a payload file that has no integrity slot (an entry the listing

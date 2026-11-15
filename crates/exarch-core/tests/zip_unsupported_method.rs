@@ -4,6 +4,9 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use std::assert_matches;
 use std::path::PathBuf;
 
@@ -12,9 +15,9 @@ use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
 use tempfile::TempDir;
+use testkit::raw_zip::RawEntry;
+use testkit::raw_zip::RawZip;
 
 const DEFLATE64_METHOD: u16 = 9;
 

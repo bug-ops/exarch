@@ -2,6 +2,9 @@
 
 #![allow(dead_code, clippy::unwrap_used)]
 
+#[path = "../../src/testkit/mod.rs"]
+pub mod testkit;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
@@ -14,8 +17,8 @@ use exarch_core::CheckedLinkTarget;
 use exarch_core::EntrySink;
 use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
+use testkit::raw_zip::RawEntry;
+use testkit::raw_zip::RawZip;
 
 /// What an extraction left behind, by resolved path.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]

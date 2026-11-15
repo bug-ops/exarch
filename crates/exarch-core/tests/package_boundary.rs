@@ -143,11 +143,11 @@ fn packaged_sources_never_reach_outside_the_package() {
 #[test]
 fn excluded_list_mirrors_cargo_toml() {
     let manifest = std::fs::read_to_string(package_root().join("Cargo.toml")).unwrap();
-    let line = manifest
-        .lines()
-        .find(|line| line.trim_start().starts_with("exclude"))
+    let at = manifest
+        .find("\nexclude")
         .unwrap_or_else(|| panic!("Cargo.toml has an exclude list"));
-    let listed: Vec<&str> = line
+    let list = manifest[at..].split(']').next().unwrap();
+    let listed: Vec<&str> = list
         .split('"')
         .skip(1)
         .step_by(2)

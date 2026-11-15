@@ -602,7 +602,8 @@ pub struct JsonError {
     /// Why an encrypted archive or entry was refused: the token of an
     /// `EncryptionRefusal` (`password_required`, `wrong_password`,
     /// `authentication_failed`, `wrong_password_or_corrupt`,
-    /// `weak_encryption_refused`, `kdf_cost_exceeded`); present only on a
+    /// `unusable_password`, `weak_encryption_refused`, `kdf_cost_exceeded`);
+    /// present only on a
     /// `SECURITY_VIOLATION` with sub-code `ENCRYPTED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,

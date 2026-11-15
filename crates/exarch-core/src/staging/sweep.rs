@@ -259,6 +259,8 @@ mod tests {
     use crate::formats::pinned_dir::Gid;
     use crate::formats::pinned_dir::Uid;
 
+    use std::rc::Rc;
+
     use tempfile::TempDir;
 
     use super::super::adopt::Adoption;
@@ -279,16 +281,16 @@ mod tests {
     const DENY_DELETE: &str = "everyone deny delete,file_inherit,directory_inherit";
 
     /// A parent whose children inherit a `deny delete` entry, pinned.
-    fn denying_parent(temp: &TempDir) -> (VettedDir, PathBuf) {
+    fn denying_parent(temp: &TempDir) -> (Rc<VettedDir>, PathBuf) {
         let parent = temp.path().canonicalize().unwrap().join("parent");
         std::fs::create_dir(&parent).unwrap();
         add_ace(&parent, DENY_DELETE);
-        (VettedDir::open_path(&parent).unwrap(), parent)
+        (Rc::new(VettedDir::open_path(&parent).unwrap()), parent)
     }
 
     /// Records everything now in the stage as made by the run, as the
     /// extraction would have.
-    fn record_tree(staging: &StagingDir<'_>) {
+    fn record_tree(staging: &StagingDir) {
         fn walk(ledger: &RunRecord, dir: &std::path::Path) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -313,7 +315,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir_all(root.join("d/e")).unwrap();
         std::fs::write(root.join("d/e/f"), b"x").unwrap();
@@ -386,7 +389,9 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let _cleanup = AclCleanup(temp.path());
             let (pin, parent) = denying_parent(&temp);
-            let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+            let staging =
+                StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent)
+                    .unwrap();
             let mut deepest = staging.path().to_path_buf();
             for _ in 0..levels {
                 deepest.push("d");
@@ -407,7 +412,7 @@ mod tests {
         }
     }
 
-    fn adopt_for_test(staging: &mut StagingDir<'_>, parent: &Path, mode: u32) {
+    fn adopt_for_test(staging: &mut StagingDir, parent: &Path, mode: u32) {
         let own = std::fs::metadata(parent).unwrap();
         let _adopted = staging
             .adopt(Adoption::for_test(
@@ -420,8 +425,9 @@ mod tests {
     }
 
     /// A stage with one recorded file, adopted with `mode`.
-    fn adopted_stage<'p>(pin: &'p VettedDir, parent: &Path, mode: u32) -> StagingDir<'p> {
-        let mut staging = StagingDir::create(pin, StagingSite::at(parent), Seed::Absent).unwrap();
+    fn adopted_stage(pin: &Rc<VettedDir>, parent: &Path, mode: u32) -> StagingDir {
+        let mut staging =
+            StagingDir::create(Rc::clone(pin), StagingSite::at(parent), Seed::Absent).unwrap();
         std::fs::write(staging.path().join("f"), b"x").unwrap();
         record_tree(&staging);
         adopt_for_test(&mut staging, parent, mode);
@@ -459,7 +465,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::set_permissions(root.join("sub"), std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -479,7 +486,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/first"), b"x").unwrap();
@@ -501,9 +509,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let mut staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let mut staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
-        let proof = |staging: &mut StagingDir<'_>| {
+        let proof = |staging: &mut StagingDir| {
             let own = staging.own.take();
             staging.keep_own_after_adoption(own);
             staging.own.is_some()
@@ -528,7 +537,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::write(root.join("z"), b"x").unwrap();
         std::fs::set_permissions(root.join("z"), std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -544,7 +554,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         std::fs::write(root.join("first"), b"x").unwrap();
@@ -562,7 +573,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::write(root.join("first"), b"x").unwrap();
         std::fs::hard_link(root.join("first"), root.join("second")).unwrap();
@@ -582,7 +594,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::write(root.join("kept"), b"x").unwrap();
         add_ace(&root.join("kept"), "everyone deny delete");
@@ -607,7 +620,8 @@ mod tests {
         let held = aces_of(&victim);
         assert_eq!(held.len(), 1, "{held:?}");
         assert!(held[0].contains("inherited"), "{held:?}");
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::hard_link(&victim, root.join("sub/link")).unwrap();
@@ -633,7 +647,8 @@ mod tests {
         clear_acl(&moved);
         let held = aces_of(&kept);
         assert_eq!(held.len(), 1, "{held:?}");
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::write(root.join("own"), b"x").unwrap();
         record_tree(&staging);
@@ -652,7 +667,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _cleanup = AclCleanup(temp.path());
         let (pin, parent) = denying_parent(&temp);
-        let staging = StagingDir::create(&pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+        let staging =
+            StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), Seed::Absent).unwrap();
         let root = staging.path().to_path_buf();
         std::fs::create_dir(root.join("d")).unwrap();
         std::fs::write(root.join("d/f"), b"x").unwrap();

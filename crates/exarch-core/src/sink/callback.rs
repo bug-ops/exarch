@@ -368,10 +368,15 @@ where
         })
     })
     .with_path_model(request.model);
-    let result = crate::SinkExtractRequest::new(&request.config)
+    let extract = crate::SinkExtractRequest::new(&request.config)
         .with_options(request.options)
-        .with_progress(progress)
-        .extract(reader, &mut sink);
+        .with_progress(progress);
+    #[cfg(feature = "encryption")]
+    let extract = match request.password().cloned() {
+        Some(password) => extract.with_password(password),
+        None => extract,
+    };
+    let result = extract.extract(reader, &mut sink);
     match (failure, result) {
         (Some(err), _) => Err(CallbackError::Callback(err)),
         (None, Ok(report)) => Ok(report),

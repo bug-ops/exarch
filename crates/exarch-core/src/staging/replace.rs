@@ -24,6 +24,7 @@
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use super::StagedRun;
 use super::acl;
@@ -71,7 +72,7 @@ const BACKUP_ATTEMPTS: usize = 16;
 /// An existing destination directory, resolved and pinned before extraction
 /// starts.
 pub(super) struct ReplaceTarget {
-    pin: VettedDir,
+    pin: Rc<VettedDir>,
     name: LeafBuf,
     id: FileIdentity,
     parent: PathBuf,
@@ -167,7 +168,7 @@ pub(super) fn resolve(output_dir: &Path, archive: Option<&Path>) -> Result<Optio
         }
     };
     let pin = match VettedDir::open_path(&parent) {
-        Ok(pin) => pin,
+        Ok(pin) => Rc::new(pin),
         Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(None),
         Err(e) => {
             return Err(ArchiveError::destination_not_accessible(
@@ -415,7 +416,7 @@ pub(super) fn run(
         parent: &parent,
         destination: &destination,
     };
-    let staging = StagingDir::create(&pin, site, Seed::Replace(id, inheritance))?;
+    let staging = StagingDir::create(Rc::clone(&pin), site, Seed::Replace(id, inheritance))?;
 
     let report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
@@ -673,11 +674,12 @@ fn verify_unchanged(pin: &VettedDir, name: &LeafBuf, expected: FileIdentity) -> 
 /// is published, so a failure anywhere earlier leaves it private. A failure to
 /// do that or to rename puts the original back.
 fn swap(
-    staging: StagingDir<'_>,
+    staging: StagingDir,
     dest: &Dest<'_>,
     report: ExtractionReport,
 ) -> Result<ExtractionReport> {
-    let displaced = match Displaced::displace(staging.parent, dest) {
+    let parent = Rc::clone(&staging.parent);
+    let displaced = match Displaced::displace(&parent, dest) {
         Ok(displaced) => displaced,
         Err(refusal) => return Err(refusal.into_error(report, staging.discard())),
     };
@@ -690,7 +692,7 @@ fn swap(
 /// backup, recording on `report` every way the root ended up with less access
 /// than the destination had.
 fn swap_adopted(
-    mut staging: StagingDir<'_>,
+    mut staging: StagingDir,
     dest: &Dest<'_>,
     displaced: Displaced<'_>,
     adoption: io::Result<Adoption>,
@@ -721,7 +723,7 @@ fn swap_adopted(
 /// staging directory.
 fn roll_back(
     displaced: Displaced<'_>,
-    staging: StagingDir<'_>,
+    staging: StagingDir,
     error: &io::Error,
     context: &'static str,
     dest_path: &Path,
@@ -789,8 +791,9 @@ pub(super) fn swap_adoption_in(
         path: &dest_path,
         parent: &parent,
     };
-    let pin = crate::formats::pinned_dir::support::pinned_at(&parent);
-    let staging = StagingDir::create(&pin, StagingSite::at(&parent), seed(dest.id)).unwrap();
+    let pin = Rc::new(crate::formats::pinned_dir::support::pinned_at(&parent));
+    let staging =
+        StagingDir::create(Rc::clone(&pin), StagingSite::at(&parent), seed(dest.id)).unwrap();
     let Ok(displaced) = Displaced::displace(&pin, &dest) else {
         panic!("the destination should be displaced");
     };

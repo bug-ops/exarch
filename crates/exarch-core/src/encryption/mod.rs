@@ -120,3 +120,13 @@ impl Credentials {
 /// A password that cannot match any 7z archive because it is not UTF-8 text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UnusablePassword;
+
+impl From<UnusablePassword> for crate::ArchiveError {
+    fn from(_: UnusablePassword) -> Self {
+        crate::Violation::Encrypted {
+            reason: crate::EncryptionRefusal::UnusablePassword,
+            name: None,
+        }
+        .into()
+    }
+}

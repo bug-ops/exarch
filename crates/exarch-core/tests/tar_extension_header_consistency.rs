@@ -9,6 +9,9 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use std::assert_matches;
 use std::path::Path;
 
@@ -60,7 +63,7 @@ fn link(name: &str, typeflag: u8, linkname: &str) -> Vec<u8> {
 }
 
 fn pax_record(key: &str, value: &str) -> String {
-    let record = exarch_testkit::pax::record(key.as_bytes(), value.as_bytes());
+    let record = testkit::pax::record(key.as_bytes(), value.as_bytes());
     String::from_utf8_lossy_owned(record)
 }
 

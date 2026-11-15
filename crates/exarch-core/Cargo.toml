@@ -42,7 +42,6 @@ rustix = { workspace = true, features = ["fs", "alloc"] }
 
 [dev-dependencies]
 criterion.workspace = true
-exarch-testkit.workspace = true
 dhat.workspace = true
 proptest.workspace = true
 trybuild.workspace = true

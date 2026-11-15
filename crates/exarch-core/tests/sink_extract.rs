@@ -28,10 +28,10 @@ use exarch_core::SinkExtractRequest;
 use exarch_core::SinkFull;
 use exarch_core::SinkOptions;
 use exarch_core::Staging;
-use exarch_testkit::raw_zip::RawEntry;
 use sink_support::RecordingSink;
 use sink_support::tar_archive;
 use sink_support::tar_file;
+use sink_support::testkit::raw_zip::RawEntry;
 use sink_support::zip_archive;
 use sink_support::zip_file;
 

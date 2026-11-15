@@ -3,6 +3,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::disallowed_methods)]
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;
@@ -15,9 +18,9 @@ use exarch_core::ZipInconsistency;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
-use exarch_testkit::raw_zip::RawEntry;
-use exarch_testkit::raw_zip::RawZip;
 use tempfile::TempDir;
+use testkit::raw_zip::RawEntry;
+use testkit::raw_zip::RawZip;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 use zip::write::ZipWriter;

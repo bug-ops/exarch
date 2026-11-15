@@ -27,15 +27,18 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+#[path = "../src/testkit/mod.rs"]
+mod testkit;
+
 use exarch_core::ExtractRequest;
 use exarch_core::SecurityConfig;
-use exarch_testkit::pax::record as pax_record;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::TestRunner;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
+use testkit::pax::record as pax_record;
 
 const BLOCK: usize = 512;
 

@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- MSRV is 1.100 (#PR).
-- Extraction: an entry below an existing symlink parent that resolves outside the destination is `SYMLINK_ESCAPE` in every format and on every host, 7z and `SafePath::validate` included, instead of `PATH_TRAVERSAL` (#PR).
-- Extraction: on Windows and for 7z a file landing on an existing symlink or junction is refused as `EXISTING_SYMLINK`/`OUTPUT_EXISTS` like tar and zip (#PR).
-- Core API: `Violation::EncryptedEntry`/`EncryptedArchive` are replaced by `Violation::Encrypted` carrying an `EncryptionRefusal`, and `PolicySetting`/`ConfigSetting` gain the repeated-path setting (#PR).
-- Creation: the walk is sorted by file name and ZIP entries carry the source mtime, so archives are byte-identical across runs and `Parallelism` modes (#PR).
+- MSRV is 1.100 (#1247).
+- Extraction: an entry below an existing symlink parent that resolves outside the destination is `SYMLINK_ESCAPE` in every format and on every host, 7z and `SafePath::validate` included, instead of `PATH_TRAVERSAL` (#1247).
+- Extraction: on Windows and for 7z a file landing on an existing symlink or junction is refused as `EXISTING_SYMLINK`/`OUTPUT_EXISTS` like tar and zip (#1247).
+- Core API: `Violation::EncryptedEntry`/`EncryptedArchive` are replaced by `Violation::Encrypted` carrying an `EncryptionRefusal`, and `PolicySetting`/`ConfigSetting` gain the repeated-path setting (#1247).
+- Creation: the walk is sorted by file name and ZIP entries carry the source mtime, so archives are byte-identical across runs and `Parallelism` modes (#1247).
 - Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, and `Violation::SymlinkParent` and `SymlinkComponent` gain `by` (#1218).
 - Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` instead of `Box<[OccupiedPath]>` (#1218).
 - Core API, CLI, Python and Node: an archive path that is not a regular file (FIFO, pipe, `<(...)`, directory, device) is refused at once as `SourceNotAccessible` in `extract`, `list` and `verify`, instead of blocking or failing with `IO_ERROR` (#1235).
@@ -33,18 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Core API, CLI, Python and Node: opt-in `RepeatedPaths::Refuse` (`--repeated-paths refuse`) refuses an archive that writes the same path twice, as `Violation::RepeatedPath` (#PR).
-- Core API, CLI, Python and Node: extract, list and verify password-protected ZIP (AES) and 7z archives with `Password` (`--password-file`, `--password-fd`, `--password-prompt`), with typed refusals, a `reason` field on the error (CLI `--json`, Python, Node), a KDF work budget and `UnverifiedReason::Encrypted` in `verify` (#PR).
-- CLI: `--sandbox off|best-effort|require` adds a Linux Landlock backstop to extract, list and verify, and `--json` reports it under `sandbox`; a failed `--sandbox require` is the error kind `SandboxNotEnforced` (#PR).
-- Core API and CLI: `Parallelism` and `create --threads <N>` compress ZIP entries on worker threads with byte-identical output (#PR).
-- CLI: the `test-hooks` feature, debug builds only, stalls the read at a chosen entry so the forced exit is tested end to end (#PR).
+- Core API, CLI, Python and Node: opt-in `RepeatedPaths::Refuse` (`--repeated-paths refuse`) refuses an archive that writes the same path twice, as `Violation::RepeatedPath` (#1247).
+- Core API, CLI, Python and Node: extract, list and verify password-protected ZIP (AES) and 7z archives with `Password` (`--password-file`, `--password-fd`, `--password-prompt`), with typed refusals, a `reason` field on the error (CLI `--json`, Python, Node), a KDF work budget and `UnverifiedReason::Encrypted` in `verify` (#1247).
+- CLI: `--sandbox off|best-effort|require` adds a Linux Landlock backstop to extract, list and verify, and `--json` reports it under `sandbox`; a failed `--sandbox require` is the error kind `SandboxNotEnforced` (#1247).
+- Core API and CLI: `Parallelism` and `create --threads <N>` compress ZIP entries on worker threads with byte-identical output (#1247).
+- CLI: the `test-hooks` feature, debug builds only, stalls the read at a chosen entry so the forced exit is tested end to end (#1247).
 - Core API: `OccupancyDetail` and `ArchiveError::occupancy()` expose the typed occupant details of a refusal (#1218).
 
 ### Fixed
 
 - Tests: the release-only redaction test builds `DestinationOccupied.conflicts` as `OccupiedPaths`, so the release-profile test job compiles again (#1236).
-- Core: `exarch-core` tests read their fixtures from inside the package (#PR).
-- Node: the release gate compares the packed `package.json` with the committed one, and the node tests share one archive builder (#PR).
+- Core: `exarch-core` tests read their fixtures from inside the package (#1247).
+- Node: the release gate compares the packed `package.json` with the committed one, and the node tests share one archive builder (#1247).
 - Extraction: a destination below a file, a destination name that is too long under `--atomic` and a plain extraction into a destination without search permission are typed `DestinationNotAccessible` errors that name the destination, with `errno` and `filename` set in Python (#1218).
 - Node: a committed loader requires only bundled addons, and the release workflow checks the packed package layout (#1218).
 - Python: errors pickle and the stubtest gate passes (#1218).

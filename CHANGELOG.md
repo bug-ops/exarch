@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, and `Violation::SymlinkParent` and `SymlinkComponent` gain `by` (#1218).
 - Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` instead of `Box<[OccupiedPath]>` (#1218).
+- Core API, CLI, Python and Node: an archive path that is not a regular file (FIFO, pipe, `<(...)`, directory, device) is refused at once as `SourceNotAccessible` in `extract`, `list` and `verify`, instead of blocking or failing with `IO_ERROR` (#PR).
 - Extraction: a file or link landing on an existing symlink is refused with one typed kind in every format, 7z included: `EXISTING_SYMLINK` (`by` set) under `--force`, and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` under the default refuse mode, where it used to be a security violation (#1218).
 - `verify`: a directory entry over an earlier file entry is a Medium `InvalidArchive` finding, so the status is WARNING (exit 0, exit 3 with `--strict`) instead of FAIL (exit 1) (#1218).
 - Python: `Skip`, `Skipped` and `NameCollision` have public constructors, and the stub declares `step` (#1218).
@@ -38,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extraction: a landing on a symlink the archive made and an entry below a symlinked parent report the maker (`by`) correctly (#1218).
 - Creation: the walk's directory metadata is reused and the landing ancestor walk stops at the first known parent (#1218).
 - Build: the redundant `package.homepage` is dropped and `tests/data/tar-minefield/` is excluded from the package (#1218).
+- Extraction: a file over an existing symlink that points outside the destination is `OUTPUT_EXISTS` or `EXISTING_SYMLINK` in Python and Node as in the CLI, not `PATH_TRAVERSAL` (#PR).
+- CLI: a destination below a `0555` directory reports step `create` unless `--atomic` staging was asked for (#PR).
+- Node: the unsupported-platform error lists the supported platforms (#PR).
+- Release: the npm package is packed once, the gate checks that tarball against a loader generated from `napi.targets` and its addon file names, and the same tarball is published (#PR).
+- Tests: Node covers the existing-symlink matrix, macOS covers the failing-run incomplete-mark warning, and the destination-step and non-regular-archive cases are guarded (#PR).
+- Build: `tests/tar_minefield.rs` is excluded from the `exarch-core` package together with its corpus (#PR).
 - Tests: the tar-minefield corpus is replayed, regression cases for zip2 GHSA-66qv and cpython gh-161955 and gh-161945 are added, and macOS ACL tests cover the incomplete-mark warning (#1218).
 - Creation: each source file is opened relative to its pinned parent without following links, verified against the walk, and copied for exactly its header size, for TAR and ZIP (#1213).
 - Atomic `--force` extraction removes the replaced destination's backup through the pinned parent handle with an identity check, and reports the real cause of a failed removal (#1213).

@@ -2,6 +2,7 @@
 
 import errno
 import os
+import sys
 
 import pytest
 
@@ -65,15 +66,25 @@ def test_a_path_of_the_wrong_type_is_still_a_type_error(temp_dir):
         exarch.extract_archive(12, temp_dir / "out")
 
 
-def test_io_errors_carry_a_stable_io_kind_and_are_oserrors(temp_dir):
+def test_io_errors_carry_a_stable_io_kind_and_are_oserrors(sample_tar_gz, temp_dir):
+    blocker = temp_dir / "afile"
+    blocker.write_bytes(b"f")
+
+    with pytest.raises(OSError) as info:
+        exarch.extract_archive(sample_tar_gz, blocker / "sub")
+
+    assert info.value.code == "IO_ERROR"
+    assert info.value.io_kind == ("AlreadyExists" if sys.platform == "win32" else "NotADirectory")
+
+
+def test_a_directory_as_the_archive_is_source_not_accessible(temp_dir):
     archive = temp_dir / "dir-as-archive.tar"
     archive.mkdir()
 
     with pytest.raises(OSError) as info:
         exarch.extract_archive(archive, temp_dir / "out")
 
-    assert info.value.code == "IO_ERROR"
-    assert info.value.io_kind == "IsADirectory"
+    assert info.value.code == "SOURCE_NOT_ACCESSIBLE"
 
 
 def test_compression_level_refusals_come_from_one_core_parser():

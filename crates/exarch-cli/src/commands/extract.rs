@@ -29,6 +29,7 @@ use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::DestinationCheck;
 use exarch_core::DestinationState;
+use exarch_core::DestinationStep;
 use exarch_core::ExistingFiles;
 use exarch_core::Extension;
 use exarch_core::ExtensionFilter;
@@ -299,12 +300,42 @@ fn advice_after_recheck(recheck: std::result::Result<(), ArchiveError>) -> Confl
     }
 }
 
+/// Names a refused staging directory as the creation of the destination the
+/// user asked for, the step every other front end reports for an in-place run.
+fn as_unstaged(error: ArchiveError) -> ArchiveError {
+    match error {
+        ArchiveError::DestinationNotAccessible {
+            path,
+            step: DestinationStep::Stage,
+            error,
+        } => ArchiveError::DestinationNotAccessible {
+            path,
+            step: DestinationStep::Create,
+            error,
+        },
+        other => other,
+    }
+}
+
+/// Whether the user asked for a staged run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Requested {
+    /// `--atomic`: staging is the behaviour asked for.
+    Staged,
+    /// Neither staged flag: core stages only as the CLI's implementation of a
+    /// fresh in-place destination.
+    InPlace,
+}
+
 /// How an extraction runs, decided once from the write mode and the
 /// destination.
 enum ExtractPlan {
     /// One streaming pass over the archive; core stages it or refuses
     /// occupied paths as it writes.
-    Stream { options: ExtractionOptions },
+    Stream {
+        options: ExtractionOptions,
+        staging: Requested,
+    },
     /// Extraction from a listing whose destination was checked up front.
     Listed {
         listed: Box<ListedArchive>,
@@ -329,10 +360,14 @@ impl ExtractPlan {
         advice: &ConflictAdvice,
     ) -> Result<ExtractionReport> {
         let result = match self {
-            Self::Stream { options } => ExtractRequest::new(config)
+            Self::Stream { options, staging } => ExtractRequest::new(config)
                 .with_options(options)
                 .with_progress(progress)
-                .extract(archive, output_dir),
+                .extract(archive, output_dir)
+                .map_err(|err| match staging {
+                    Requested::InPlace => as_unstaged(err),
+                    Requested::Staged => err,
+                }),
             Self::Listed { listed, options } => (*listed).extract(output_dir, &options, progress),
         };
         result.map_err(|err| convert_error_with_advice(Operation::Extract, err, archive, advice))
@@ -361,12 +396,14 @@ fn plan_extraction(
     if is_tar_archive(&args.archive)
         && (mode.stages() || DestinationState::probe(output_dir) == DestinationState::Fresh)
     {
-        let staging = match mode.staging() {
-            CoreStaging::InPlace => CoreStaging::Atomic,
-            staged => staged,
+        let (requested, staging) = if mode.stages() {
+            (Requested::Staged, mode.staging())
+        } else {
+            (Requested::InPlace, CoreStaging::Atomic)
         };
         return Ok(ExtractPlan::Stream {
             options: options(staging),
+            staging: requested,
         });
     }
 

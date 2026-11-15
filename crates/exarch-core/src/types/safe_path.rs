@@ -5,6 +5,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::error::PortableHazard;
+use crate::security::context::LeafSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
@@ -53,7 +54,11 @@ pub(crate) use super::parent_check::Walked;
 /// `Resolved` (the default) means
 /// validation resolved it, so the path can be joined to the destination and
 /// used by name. An extraction onto a pinned directory handle vets each
-/// parent when it writes instead, and its paths cannot be joined by name.
+/// parent when it writes instead, and its paths cannot be joined by name. Such
+/// a path may name an existing symlink at the landing whose target escapes the
+/// destination: the writer never follows a symlink at the landing, it treats
+/// it as an occupant under the existing-files policy. [`SafePath::validate`]
+/// never yields such a path; it rejects an escaping landing as a traversal.
 ///
 /// # Examples
 ///
@@ -366,6 +371,9 @@ impl<P: ParentCheck> SafePath<P> {
         if ctx.needs_full_canonicalize() {
             match view.canonicalize(&canonical_target(dest, &final_path, &resolved), root) {
                 Ok(Containment::Within(_)) => {}
+                Ok(Containment::Escapes)
+                    if ctx.leaf_symlink() == LeafSymlink::Defer
+                        && leaf_symlink_in_vetted_parent(view, root, &resolved) => {}
                 Ok(Containment::Escapes) => {
                     return Err(ArchiveError::PathTraversal {
                         path: path.to_path_buf(),
@@ -441,6 +449,27 @@ impl<P: ParentCheck> SafePath<P> {
     #[must_use]
     pub fn into_path_buf(self) -> PathBuf {
         self.0
+    }
+}
+
+/// Whether `resolved` is itself a symlink whose parent stays inside the tree.
+///
+/// Only a validation that defers a leaf symlink ([`LeafSymlink::Defer`]) takes
+/// this route, and only when the parent of the landing canonicalizes inside the
+/// root. Its path is then written by a directory walker, which never follows a
+/// symlink at the landing and treats it as an occupant under the existing-files
+/// policy, so the escape of its target is not a traversal by the entry. The
+/// public `SafePath::validate` and `validate_in` never defer.
+fn leaf_symlink_in_vetted_parent<V: FsView>(view: &V, root: &V::Root, resolved: &Path) -> bool {
+    if !view.is_symlink(resolved).unwrap_or(false) {
+        return false;
+    }
+    match resolved.parent() {
+        Some(parent) if parent != root.as_path() => {
+            matches!(view.canonicalize(parent, root), Ok(Containment::Within(_)))
+        }
+        Some(_) => true,
+        None => false,
     }
 }
 
@@ -1903,6 +1932,27 @@ mod tests {
             Err(ArchiveError::PathTraversal { .. }),
             "{result:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn public_validate_refuses_an_escaping_leaf_symlink_and_a_deferring_context_leaves_it() {
+        let (temp, dest) = create_test_dest();
+        let outside = TempDir::new().expect("failed to create temp dir");
+        std::os::unix::fs::symlink(outside.path(), dest.as_path().join("l")).expect("symlink");
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+
+        let public = SafePath::validate(Path::new("l"), &dest, &config);
+        let deferring = ValidationContext::new(true).deferring_leaf_symlink();
+        let deferred = SafePath::validate_with_context(Path::new("l"), &dest, &config, &deferring);
+
+        assert_matches!(
+            public,
+            Err(ArchiveError::PathTraversal { .. }),
+            "{public:?}"
+        );
+        assert!(deferred.is_ok(), "{deferred:?}");
+        drop(temp);
     }
 
     #[test]

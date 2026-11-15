@@ -503,9 +503,20 @@ jobs:
         working-directory: crates/exarch-node
         run: pnpm install --frozen-lockfile
 
+      - name: Pack the npm package
+        id: npm-pack
+        working-directory: crates/exarch-node
+        run: |
+          PACK_DIR="$(mktemp -d)"
+          pnpm pack --pack-destination "$PACK_DIR"
+          TARBALL="$(ls "$PACK_DIR"/*.tgz)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
       - name: Check the npm package contents
         working-directory: crates/exarch-node
-        run: node scripts/check-package.mjs
+        run: node scripts/check-package.mjs "$TARBALL"
+        env:
+          TARBALL: ${{ steps.npm-pack.outputs.tarball }}
 
       - name: Check whether this version is already on npm
         id: npm-version
@@ -522,7 +533,9 @@ jobs:
       - name: Publish to npm (Trusted Publishing)
         if: steps.npm-version.outputs.published != 'true'
         working-directory: crates/exarch-node
-        run: pnpm publish --access public --no-git-checks --provenance --ignore-scripts
+        run: pnpm publish "$TARBALL" --access public --no-git-checks --provenance --ignore-scripts
+        env:
+          TARBALL: ${{ steps.npm-pack.outputs.tarball }}
 
   # Create GitHub Release with artifacts
   github-release:

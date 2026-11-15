@@ -10,6 +10,8 @@ use crate::Result;
 use crate::closed_enum::ClosedEnum;
 use crate::closed_enum::closed_enum;
 use crate::formats::bounded_read::read_up_to;
+use crate::formats::common::NotARegularFile;
+use crate::formats::common::open_archive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::sevenz::SEVENZ_MAGIC;
 
@@ -357,9 +359,11 @@ impl ArchiveType {
 ///
 /// **Phase 2 — magic bytes:** when extension detection fails (unrecognised or
 /// missing extension), the function reads up to the first 512 bytes of the file
-/// and matches against known magic-byte signatures. If the file is not readable
-/// (does not exist, is a directory, I/O error), phase 2 is silently skipped and
-/// [`ArchiveError::UnknownFormat`] is returned.
+/// and matches against known magic-byte signatures. If the file does not exist
+/// or cannot be read, phase 2 is silently skipped and
+/// [`ArchiveError::UnknownFormat`] is returned. A path that is not a regular
+/// file (a directory, a named pipe, a device) is refused instead, without
+/// being read, with [`ArchiveError::SourceNotAccessible`].
 ///
 /// Additionally, if extension detection succeeds but magic-byte inspection
 /// identifies a *different* known format, the magic-byte result takes
@@ -388,7 +392,8 @@ impl ArchiveType {
 /// # Errors
 ///
 /// Returns [`ArchiveError::UnknownFormat`] when neither phase can determine the
-/// format.
+/// format, and [`ArchiveError::SourceNotAccessible`] when a phase-2 read finds
+/// that `path` is not a regular file.
 pub fn detect_format(path: &Path) -> Result<ArchiveType> {
     let ext_result = detect_format_from_extension(path);
 
@@ -396,7 +401,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         Ok(ext_type) => {
             // Extension matched. Read magic bytes to verify; if they point to
             // a different known format, trust the bytes over the name.
-            if let Some(magic_type) = detect_format_from_magic(path)
+            if let Some(magic_type) = detect_format_from_magic(path)?
                 && magic_type != ext_type
             {
                 return Ok(magic_type);
@@ -405,7 +410,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         }
         Err(_) => {
             // Extension gave no conclusive result — fall back to magic bytes.
-            detect_format_from_magic(path).ok_or_else(|| ArchiveError::UnknownFormat {
+            detect_format_from_magic(path)?.ok_or_else(|| ArchiveError::UnknownFormat {
                 path: path.to_path_buf(),
             })
         }
@@ -465,10 +470,19 @@ pub(crate) fn detect_format_from_extension(path: &Path) -> Result<ArchiveType> {
 /// network filesystems) so the USTAR check at offset 257 is always reliable.
 ///
 /// Returns `None` if the file cannot be read or no signature matches.
-fn detect_format_from_magic(path: &Path) -> Option<ArchiveType> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let header = peek_header(&mut file).ok()?;
-    match_signature(header.as_slice())
+///
+/// # Errors
+///
+/// [`ArchiveError::SourceNotAccessible`] when `path` is not a regular file.
+fn detect_format_from_magic(path: &Path) -> Result<Option<ArchiveType>> {
+    let mut file = match open_archive(path) {
+        Ok(file) => file,
+        Err(refusal) if NotARegularFile::is_cause_of(&refusal) => return Err(refusal),
+        Err(_) => return Ok(None),
+    };
+    Ok(peek_header(&mut file)
+        .ok()
+        .and_then(|header| match_signature(header.as_slice())))
 }
 
 /// The leading bytes of a source, as many as [`MAGIC_READ_LEN`] allows.

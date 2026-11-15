@@ -2,6 +2,8 @@
 
 `exarch extract <ARCHIVE> [OUTPUT_DIR]`. Always pass `OUTPUT_DIR` (default is the CWD). Common flags are in `SKILL.md`; this file holds the rest and the edge cases.
 
+`<ARCHIVE>` must be a regular file or a link to one. A directory, FIFO, device, or process substitution (`<(...)`) fails at once with `SourceNotAccessible` (`not a regular file`, exit `1`), in `list` and `verify` too; it never blocks. Save the data to a file first.
+
 ## Quotas and limits
 
 | Flag | Default | Notes |

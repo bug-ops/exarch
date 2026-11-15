@@ -116,32 +116,156 @@ describe('npm loader (#1200)', () => {
     }
   });
 
-  it('the package gate accepts a full addon set and rejects a missing one', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-pack-'));
-    try {
-      fs.mkdirSync(path.join(dir, 'scripts'));
-      fs.copyFileSync(path.join(root, 'package.json'), path.join(dir, 'package.json'));
-      fs.copyFileSync(loaderPath, path.join(dir, 'index.js'));
-      fs.copyFileSync(
-        path.join(root, 'scripts', 'check-package.mjs'),
-        path.join(dir, 'scripts', 'check-package.mjs')
-      );
-      const addons = fs
-        .readFileSync(loaderPath, 'utf8')
-        .match(/\.\/exarch-rs\.[\w.-]+\.node/g)
-        .map((file) => path.join(dir, file));
-      const gate = () =>
-        spawnSync(process.execPath, ['scripts/check-package.mjs'], { cwd: dir, encoding: 'utf8' });
-      for (const addon of addons) {
-        fs.writeFileSync(addon, '');
-      }
-      assert.strictEqual(gate().status, 0);
-      fs.rmSync(addons[0]);
-      const failed = gate();
-      assert.notStrictEqual(failed.status, 0);
-      assert.match(failed.stderr, /\.node/);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+  it('names the supported platforms when rejecting an unsupported one (#1222)', () => {
+    const script = `
+      Object.defineProperty(process, 'platform', { value: 'freebsd' });
+      Object.defineProperty(process, 'arch', { value: 'arm64' });
+      try { require('./index.js'); } catch (e) { console.log(e.message); }
+    `;
+    const message = execFileSync(process.execPath, ['-e', script], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.match(message, /freebsd-arm64/);
+    for (const key of ['darwin-x64', 'darwin-arm64', 'win32-x64', 'linux-x64', 'linux-arm64']) {
+      assert.ok(message.includes(key), `${key} missing from: ${message}`);
     }
+  });
+
+  describe('package gate (#1225)', () => {
+    function withPackage(mutateLoader, body) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-pack-'));
+      try {
+        fs.mkdirSync(path.join(dir, 'scripts'));
+        fs.copyFileSync(path.join(root, 'package.json'), path.join(dir, 'package.json'));
+        const source = fs.readFileSync(loaderPath, 'utf8');
+        fs.writeFileSync(path.join(dir, 'index.js'), mutateLoader(source));
+        fs.copyFileSync(
+          path.join(root, 'scripts', 'check-package.mjs'),
+          path.join(dir, 'scripts', 'check-package.mjs')
+        );
+        const addons = source.match(/\.\/exarch-rs\.[\w.-]+\.node/g).map((f) => path.join(dir, f));
+        for (const addon of addons) {
+          fs.writeFileSync(addon, '');
+        }
+        const gate = () =>
+          spawnSync(process.execPath, ['scripts/check-package.mjs'], {
+            cwd: dir,
+            encoding: 'utf8',
+          });
+        body({ gate, addons, dir });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('accepts a full addon set and rejects a missing one', () => {
+      withPackage(
+        (source) => source,
+        ({ gate, addons }) => {
+          assert.strictEqual(gate().status, 0);
+          fs.rmSync(addons[0]);
+          const failed = gate();
+          assert.notStrictEqual(failed.status, 0);
+          assert.match(failed.stderr, /\.node/);
+        }
+      );
+    });
+
+    it('rejects an addon with an unexpected file name', () => {
+      withPackage(
+        (source) => source,
+        ({ gate, addons }) => {
+          fs.renameSync(addons[0], path.join(path.dirname(addons[0]), 'exarch-rs.other.node'));
+          assert.notStrictEqual(gate().status, 0);
+        }
+      );
+    });
+
+    const MUSL_THROW =
+      'throw new Error(`exarch-rs: unsupported platform $' +
+      '{key}-musl; only glibc Linux is bundled`);';
+
+    const appended = [
+      'const r = require; r("evil");',
+      'module["req" + "uire"]("evil");',
+      'import("evil");',
+      'process.dlopen({}, "/evil");',
+      'require("./exarch-rs.darwin-x64.node");',
+      "module.exports.helper = () => require('evil');",
+      "if (typeof Bun !== 'undefined') { require('evil'); }",
+      "if (globalThis.process && process.versions) { require('evil'); }",
+      "if (process.env && process.env.CI) { require('evil'); }",
+      "// note\rif (process.versions) { require('evil'); }",
+      "// note if (process.versions) { require('evil'); }",
+      "let addons = () => 0; addons = addons['con' + 'structor'];",
+      "req/**/uire('evil');",
+      "require/* split */('evil');",
+      'function f() { return arguments; } f();',
+    ];
+    for (const extra of appended) {
+      it(`rejects a loader with appended code ${JSON.stringify(extra)}`, () => {
+        withPackage(
+          (source) => `${source}\n${extra}\n`,
+          ({ gate }) => {
+            const failed = gate();
+            assert.notStrictEqual(failed.status, 0, failed.stdout);
+            assert.match(failed.stderr, /generated/);
+          }
+        );
+      });
+    }
+
+    it('rejects a loader that differs by a single trailing space', () => {
+      withPackage(
+        (source) => source.replace('const addon = loadAddon();', 'const addon = loadAddon(); '),
+        ({ gate }) => assert.notStrictEqual(gate().status, 0)
+      );
+    });
+
+    it('rejects a loader whose musl branch requires a package', () => {
+      withPackage(
+        (source) => {
+          assert.ok(source.includes(MUSL_THROW), 'musl branch moved; update this test');
+          return source.replace(MUSL_THROW, "return require('evil-musl');");
+        },
+        ({ gate }) => assert.notStrictEqual(gate().status, 0)
+      );
+    });
+
+    it('rejects a loader whose musl branch loads a bundled addon', () => {
+      withPackage(
+        (source) => source.replace(MUSL_THROW, 'return key;'),
+        ({ gate }) => {
+          const failed = gate();
+          assert.notStrictEqual(failed.status, 0);
+          assert.match(failed.stderr, /musl/);
+        }
+      );
+    });
+
+    it('--write-loader reproduces the committed loader byte for byte', () => {
+      withPackage(
+        (source) => source,
+        ({ dir }) => {
+          const before = fs.readFileSync(path.join(dir, 'index.js'), 'utf8');
+          execFileSync(process.execPath, ['scripts/check-package.mjs', '--write-loader'], {
+            cwd: dir,
+          });
+          assert.strictEqual(fs.readFileSync(path.join(dir, 'index.js'), 'utf8'), before);
+        }
+      );
+    });
+
+    it('rejects a loader that resolves a package name', () => {
+      withPackage(
+        (source) => source.replace("require('./exarch-rs.linux-x64-gnu.node')", "require('evil')"),
+        ({ gate }) => {
+          const failed = gate();
+          assert.notStrictEqual(failed.status, 0);
+          assert.match(failed.stderr, /linux-x64/);
+        }
+      );
+    });
   });
 });

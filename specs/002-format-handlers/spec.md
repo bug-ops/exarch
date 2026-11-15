@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-11-09
+updated: 2026-11-15
 status: implemented
 related:
   - "[[constitution]]"
@@ -25,6 +25,9 @@ related:
 ---
 
 # Feature: Format Handlers
+
+> [!note] Revision 2026-11-15: an archive path that is not a regular file (#1224)
+> `open_archive` refuses a path that is not a regular file before any read, so on Unix a pipe cannot block a run (FR-074).
 
 > [!note] Revision 2026-11-04 (50-issue batch, shipped in 0.9.0)
 > `ArchiveFormat` is sealed and its handles are opened under the config they enforce (#908, #901); `FormatCreator`, `TarCreator`, `ZipCreator`, `ArchiveCreator` and the public `creation::{tar,zip}::create_*` are removed (#908, #912); the `Validated`/`Unvalidated` typestate is gone (#898); `EntryValidator` is gone, handlers use `ValidatorCore` proofs (#900); creation writes through a staged file (#931, see [[021-create-staging-and-output-policy/spec]]). Older notes below that name removed items describe the release they mention.
@@ -224,6 +227,7 @@ THEN magic bytes take precedence over the extension
 | FR-071 | Fixed-width little-endian fields read from untrusted binary headers (the ZIP structure walker, the Windows reparse buffer, the 7z signature-header probe) SHALL go through one bounds-checked reader module (`formats/le.rs`: `u16_at`, `u32_at`, `u64_at`, returning `None` past the end), so no parser panics on an out-of-range offset or substitutes a made-up value; a typed error that a `Read` wrapper must smuggle through an `io::Error` SHALL implement the crate-private `IoMarker` trait (`into_io`, `find`), the one place that wraps and downcasts it (#1043, #1044) | must |
 | FR-072 | THE SYSTEM SHALL enable `clippy::indexing_slicing` and `clippy::arithmetic_side_effects` as warnings in non-test builds of the whole `exarch-core` crate (one `#![cfg_attr(not(test), warn(...))]` in `lib.rs`, so CI's `-D warnings` makes them errors; there is no per-module copy), so no parser or validator indexes, slices or does unchecked arithmetic on an offset, length or count read from an archive. A site SHALL be converted to `get`, `split_at_checked`, slice patterns, `checked_*` or `saturating_*`, and on `None` or overflow SHALL take the restrictive outcome (report the finding, close the block or window, refuse, or return `Err`), never a branch that continues, returns `Ok`, or reports clean; a guard that reports or refuses "if it fits" is written `checked_op(..).is_none_or(\|v\| v <= bound)`. `saturating_*` is allowed only for values bounded by a field width or by a length the code already holds, and for monotone counters compared fail-closed against a limit; a counter whose zero value releases a limit or that is a unique key SHALL use `checked_*`. A site whose bound is an invariant that no input can break MAY carry `#[expect(clippy::..., reason = "...")]` on the narrowest statement, with the reason naming the invariant; the 7z per-block tables go through `PerBlock<T>` (`formats/sevenz/header.rs`, indexed by `BlockIndex`), 7z file lookups through `FileIndex`, minted only by its `SevenZHeader` and resolved by the one `#[expect]` in `SevenZHeader::file`, the `fs_view` tree through the `NodeId` arena (`Nodes::node` and `Nodes::node_mut` carry the only two `#[expect]`s there), and the bounded reads of `Read` wrappers through `formats/bounded_read.rs`, where an overlong read is `InvalidData`; display, progress and report counters use `saturating_*` and a count never wraps to zero (#1032, #1070, #1071, #1072) | must |
 | FR-073 | The 7z coders admitted by `formats/sevenz/admit.rs` SHALL be one table (`ADMITTED`, each id with its `CoderCost`: `Fixed`, `LzmaDict`, `Lzma2Dict`, `PpmdMem`) that also drives the coder-memory check, and the admitted method set SHALL equal the decodable set: Deflate is refused at admission before any write like Deflate64, zstd and lz4, so a plain `verify` of a Deflate archive moves from PASS to FAIL; the test `every_admitted_method_decodes` encodes, admits, extracts and compares every admitted id (BCJ2 through a fixture), and fails when an id is admitted that cannot be decoded (#1091) | must |
+| FR-074 | WHEN the archive path given to `extract`, `list` or `verify` (or read for format detection) names something that is not a regular file (a named pipe, a `<(...)` process substitution, a directory, a device, or a symlink to one), THE SYSTEM SHALL refuse it at once with `ArchiveError::SourceNotAccessible` whose cause reads `not a regular file`, before any read; `open_archive` opens the path without blocking on Unix, checks the kind with `fstat` on the same handle (no check-then-open gap) and clears `O_NONBLOCK` from a regular file's handle before returning it, so a pipe with no writer cannot hold the run; `detect_format` phase 2 (magic bytes) goes through `open_archive`, so a non-regular path is refused there rather than reported as `UnknownFormat`, while a missing or unreadable path still skips phase 2; the refusal is the same in the CLI, the Rust API, Python (`SourceNotAccessibleError`) and Node (`SOURCE_NOT_ACCESSIBLE`); it replaces the `IoError` a directory gave on read and the block a FIFO gave (#1224) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -397,6 +401,7 @@ Creation has no trait: `CreateRequest::create(&OutputFile, sources)`, `write(Arc
 | TAR hardlink entry during extraction | Charged against `QuotaTracker` via the target's on-disk size before copying (fixed v0.6.0, #426 — previously bypassed quota entirely) |
 | Compressed TAR with trailing bytes after the last gzip member, bzip2 stream or xz stream, or empty input | Error; only an all-zero tail is accepted, and no more than `max_tar_metadata_bytes` (at least 1 MiB) of decoded bytes may follow the end-of-archive marker (0.7.0, FR-039, #838) |
 | TAR FIFO, device, socket or unknown typeflag entry, or an entry with an empty name | `SecurityViolation` in `extract`, `list` and `verify` (0.7.0, FR-040) |
+| Archive path that is a named pipe, directory, device or symlink to one | `SourceNotAccessible` (`not a regular file`) in `extract`, `list` and `verify` before any read, on Unix never a block, and never an `IoError` (FR-074, #1224) |
 | TAR file-typed entry with a directory name and a payload | `TarAmbiguity::DirectoryNamedPayload` everywhere; with no payload it is read as a directory (0.7.0, #752) |
 | ZIP entry with a method other than Stored, Deflate, Bzip2 or Zstd (for example Deflate64) | `SecurityViolation` at open (0.7.0, FR-041) |
 | ZIP local and central headers disagree, or the archive hides data | Rejected under `ZipConsistencyPolicy::Enforce`, unchecked under `Ignore` (0.7.0, FR-042; see [[017-zip-header-consistency/spec]]) |

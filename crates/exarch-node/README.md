@@ -332,7 +332,7 @@ try {
 | `restore`, `backupPath` | an `IO_ERROR` from a failed `'atomic_replace'` | `restore` is `'not_needed'`, `'restored'` or `'failed'`; `backupPath` names where the original remains after `'failed'`; paths are redacted like the message |
 | `leftoverPath` | a staging directory or an empty output reservation file stayed on disk (a failed `'atomic_replace'`, a rolled-back extraction, a creation that left its reservation) | The leftover, redacted like the message |
 | `path` | a `SOURCE_NOT_FOUND`, a `SOURCE_CHANGED`, an `OUTPUT_EXISTS`, or an `IO_ERROR` that left an empty output reservation | The source, the existing output or destination, or the reservation file, redacted like the message |
-| `conflicts` | an `OUTPUT_EXISTS` from a `'refuse'` extraction | The entry names that found an occupant |
+| `conflicts`, `by` | an `OUTPUT_EXISTS` from a `'refuse'` extraction, or an extraction that met a directory occupant | `conflicts` is a list of `{ path, occupant? }` with the kind of occupant; `by` says who made it (`'existing'` or `'archive'`) and is also set on an `EXISTING_SYMLINK` security violation |
 | `protectedPath`, `collision`, `unmatchedPatterns` | an `INVALID_CONFIGURATION` for a protected `'atomic_replace'` destination, for creation sources that map to one entry name, or for include patterns that matched no entry | `'filesystem_root'`, `'archive_ancestor'` or `'working_directory'`; `{ name, first, second }`; the unmatched patterns |
 | `ioKind` | an `IO_ERROR` | The `IoKind` core reported, for example `'NotFound'`, `'PermissionDenied'` or `'StorageFull'`; `'Other'` for a kind with no entry in `IoKind` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
@@ -550,6 +550,7 @@ const config = new SecurityConfig()
   .withFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .withAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .withZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
+  .withRepeatedPaths('refuse')                // Reject an archive that names one path twice; 'keep_first' (default) keeps the first copy
   .withParallelDecodeMemory(256 * 1024 * 1024) // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
   .withMaxSolidCompressionRatio(n)            // Ratio limit of a solid 7z block; only while solid archives are allowed
   .withMaxTarMetadataBytes(bytes)             // TAR metadata budget (default 4 MiB)

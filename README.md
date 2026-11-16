@@ -17,6 +17,8 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 ## Features
 
 - **Extract, create, list, and verify archives** — Full support for TAR and ZIP (all operations), plus 7z extraction, listing, and verification
+- **Encrypted archives** — Reads password-protected ZIP (AES) and 7z archives; the CLI takes the password from a file, a descriptor or a prompt, never argv or the environment
+- **Linux sandbox** — `exarch extract --sandbox` adds a Landlock backstop on top of the path checks
 - **Format auto-detection** — Falls back to magic-byte inspection when the file extension is absent, unrecognised, or contradicts the file content
 - **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
@@ -33,7 +35,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.10"
+exarch-core = "0.11"
 ```
 
 > [!IMPORTANT]

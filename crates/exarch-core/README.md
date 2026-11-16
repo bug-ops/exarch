@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.10"
+exarch-core = "0.11"
 ```
 
 > [!IMPORTANT]
@@ -56,7 +56,7 @@ let config = SecurityConfig::default()
     ])?); // optional allowlist; an empty list is refused, `ExtensionFilter::Any` is the default
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_staging` (`Staging::{InPlace, Atomic, AtomicReplace}`), `with_existing_files` (`ExistingFiles::{Skip, Overwrite, Refuse}`), `with_decode_reuse`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`, `with_repeated_paths`. On `ExtractionOptions`: `with_staging` (`Staging::{InPlace, Atomic, AtomicReplace}`), `with_existing_files` (`ExistingFiles::{Skip, Overwrite, Refuse}`), `with_decode_reuse`.
 
 ### Request Values
 
@@ -117,6 +117,12 @@ ExtractRequest::new(&config)
 
 Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `UnusablePassword` (a 7z password that is not UTF-8), `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: `sevenz-rust2` keeps the last derived 7z key in process memory until the next derivation or exit, and a 7z password is converted for `sevenz-rust2` without being wiped there.
 
+### Repeated Paths and Occupied Destinations
+
+By default an archive that names one path twice keeps the first copy and lets the existing-files policy decide every repeat. `with_repeated_paths(RepeatedPaths::Refuse)` rejects such an archive instead, as `Violation::RepeatedPath`.
+
+An entry that would replace something already in the destination is refused with a typed error in every format and on every host: `ArchiveError::DestinationOccupied` (a file over a directory, a directory over a file, an entry below a file, or any landing under `ExistingFiles::Refuse`) or an `EXISTING_SYMLINK` security violation (a file or link over an existing symlink under `ExistingFiles::Overwrite`). `ArchiveError::occupancy()` returns the typed details: the occupant kind of every conflicting path and, for a symlink, who made it. An archive path that is not a regular file (a FIFO, a pipe, a device) is refused up front as `ArchiveError::SourceNotAccessible`.
+
 ## Archive Creation
 
 Create archives with secure defaults:
@@ -160,6 +166,9 @@ The output is staged in a temporary file in its directory (which must be writabl
 | `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` | Glob patterns to exclude |
 | `strip_prefix` | `None` | Strip prefix from paths |
 | `preserve_permissions` | `true` | Preserve Unix permissions |
+| `parallelism` | `Parallelism::Sequential` | `Parallelism::Threads(n)` compresses ZIP entries on up to `n` worker threads; the archive bytes do not change, and other formats ignore it |
+
+The walk is sorted by file name and ZIP entries carry the source modification time, so archives are byte-identical across runs and `Parallelism` modes. A source that changes while it is archived fails with `ArchiveError::SourceChanged`; FIFOs, sockets and devices are skipped as `SkipKind::SpecialFile`.
 
 ## Supported Formats
 

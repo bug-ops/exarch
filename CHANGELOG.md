@@ -7,96 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-16
+
 ### Breaking
 
 - MSRV is 1.100 (#1247).
-- Extraction: an entry below an existing symlink parent that resolves outside the destination is `SYMLINK_ESCAPE` in every format and on every host, 7z and `SafePath::validate` included, instead of `PATH_TRAVERSAL` (#1247).
-- Extraction: on Windows and for 7z a file landing on an existing symlink or junction is refused as `EXISTING_SYMLINK`/`OUTPUT_EXISTS` like tar and zip (#1247).
-- Core API: `Violation::EncryptedEntry`/`EncryptedArchive` are replaced by `Violation::Encrypted` carrying an `EncryptionRefusal`, and `PolicySetting`/`ConfigSetting` gain the repeated-path setting (#1247).
+- Extraction: an entry below a symlink parent that resolves outside the destination is `SYMLINK_ESCAPE` in every format and on every host (7z and `SafePath::validate` included), not `PATH_TRAVERSAL` (#1247).
+- Extraction: occupied destinations get one typed refusal in every format and on every host (7z and Windows included): a file or link over an existing symlink or junction is `EXISTING_SYMLINK` (`by` set) under `--force` and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` by default; a file over a directory, a directory over a file and an entry below a file are `DestinationOccupied` (`OUTPUT_EXISTS`, Python `NotADirectoryError` for the last) instead of an untyped `IoError`; a directory entry over an archive symlink to a file is `EXISTING_SYMLINK`; the text reads "refusing to replace the existing <kind> at <entry>" (#1190, #1217, #1218, #1247).
+- Extraction, Core API, CLI, Python and Node: an archive path that is not a regular file (FIFO, pipe, `<(...)`, directory, device) is refused at once as `SourceNotAccessible` in `extract`, `list` and `verify`, instead of blocking or failing with `IO_ERROR` (#1235).
+- Extraction: under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards (#1218).
 - Creation: the walk is sorted by file name and ZIP entries carry the source mtime, so archives are byte-identical across runs and `Parallelism` modes (#1247).
-- Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public), `DestinationNotAccessible` and `FfiDetail::Destination` carry it, and `Violation::SymlinkParent` and `SymlinkComponent` gain `by` (#1218).
-- Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` instead of `Box<[OccupiedPath]>` (#1218).
-- Core API, CLI, Python and Node: an archive path that is not a regular file (FIFO, pipe, `<(...)`, directory, device) is refused at once as `SourceNotAccessible` in `extract`, `list` and `verify`, instead of blocking or failing with `IO_ERROR` (#1235).
-- Extraction: a file or link landing on an existing symlink is refused with one typed kind in every format, 7z included: `EXISTING_SYMLINK` (`by` set) under `--force`, and `OUTPUT_EXISTS` with `conflicts [{path, symlink}]` under the default refuse mode, where it used to be a security violation (#1218).
-- `verify`: a directory entry over an earlier file entry is a Medium `InvalidArchive` finding, so the status is WARNING (exit 0, exit 3 with `--strict`) instead of FAIL (exit 1) (#1218).
-- Python: `Skip`, `Skipped` and `NameCollision` have public constructors, and the stub declares `step` (#1218).
-- Under `ExistingFiles::Skip`, `by: archive` in a refusal is exact for the first 16 Ki landings of a run and reads `existing` afterwards, so an in-place run's memory stays flat (#1218).
 - Creation: a source that changed between the walk and the read fails with the new `ArchiveError::SourceChanged` (`SOURCE_CHANGED`, Python `SourceChangedError`, Node `SOURCE_CHANGED`), and FIFOs, sockets and devices are skipped as the new `SkipKind::SpecialFile` (`special_file`) (#1213).
-- Core API: `DestinationOccupied.conflicts` is `Box<[OccupiedPath]>` (path plus `Option<PathOccupant>`), `Violation::ReplacesSymlink` gains `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190).
-- Extraction: a file over a directory landing or a directory over a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError`, and a directory entry over an archive symlink to a file is `EXISTING_SYMLINK` on every host (#1190).
-- Extraction: the `DestinationOccupied` text (core `Display`, FFI description, Node `message`) now reads "refusing to replace the existing <kind> at <entry>" instead of "already holds N of the paths to extract" for a single conflict (#1190).
-- Core API: `PathOccupant` is `#[non_exhaustive]` and `verify` reports a directory entry over a non-directory as a Medium `InvalidArchive` finding with the typed refusal text (#1190).
-- Extraction: an entry below a file is `DestinationOccupied` (`OUTPUT_EXISTS`) instead of an untyped `IoError` (Python `NotADirectoryError`), and `verify` reports it as a High `InvalidArchive` finding when the archive made the file (#1217).
-- CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects and `EXISTING_SYMLINK` errors carry `error.by` (#1190).
-- Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
+- `verify`: a directory entry over an earlier file or non-directory entry is a Medium `InvalidArchive` finding (WARNING: exit 0, exit 3 with `--strict`, not FAIL), and an entry below a file the archive made is a High one (#1190, #1217, #1218).
+- Core API: `Violation::EncryptedEntry`/`EncryptedArchive` become `Violation::Encrypted` carrying an `EncryptionRefusal`, `PolicySetting`/`ConfigSetting` gain the repeated-path setting, and `with_password` takes `Option<Arc<Password>>` (`Password::shared` builds one) (#1247, #1272).
+- Core API: `DestinationOccupied.conflicts` is `OccupiedPaths` (path plus `Option<PathOccupant>`, which is `#[non_exhaustive]`), `Violation::ReplacesSymlink`, `SymlinkParent` and `SymlinkComponent` gain `by`, `FfiDetail::Occupied` carries `FfiOccupiedPath` conflicts and `FfiDetail::ExistingSymlink` is new (#1190, #1218).
+- Core API: `DestinationStep` is a closed enum (`Display` is the token, `phrase` stays public) carried by `DestinationNotAccessible` and `FfiDetail::Destination` (#1218).
+- CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects, `EXISTING_SYMLINK` errors carry `error.by`, and in `sandbox` `errno` is nullable and a failed rule path is `rule_path`, not `kernel` (#1190, #1272).
+- Python: `OutputExistsError.conflicts` is `list[OccupiedPath]`, `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `Skip`, `Skipped` and `NameCollision` have public constructors and a `step` stub (#1190, #1218).
 - Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
-- Core API: `with_password` on the request types takes `Option<Arc<Password>>`, and `Password::shared` builds one (#1272)
-- CLI: in the `--json` `sandbox` output `errno` is nullable (no invented `EINVAL`) and a failed rule path is reported as the new `rule_path` instead of `kernel` (#1272).
 
 ### Added
 
-- Core API, CLI, Python and Node: `list` marks encrypted entries of a ZIP and of a 7z (`EntryEncryption`, `encrypted` in the JSON, Python and Node types) (#1251).
-- Core API, Python and Node: `MemoryExtractRequest::with_password` and a `password` option on the `*_to_memory` and callback extraction functions (#1251).
-- Core API, CLI, Python and Node: a password that is not valid UTF-8 for a 7z is the distinct refusal `unusable_password` (#1251).
-- Core API: `StagingReservation` and `ExtractRequest::extract_reserved` stage an extraction before the sandbox is confined (#1251).
-- CLI: a sandboxed extraction into a missing destination keeps the all-or-nothing stage-and-discard outcome; the confined process may create, remove and rename directories under the destination's parent (#1251).
+- Core API, CLI, Python and Node: extract, list and verify password-protected ZIP (AES) and 7z archives with `Password` (`--password-file`, `--password-fd`, `--password-prompt`, Cargo feature `encryption`), with typed refusals, a `reason` field on the error, a KDF work budget, `UnverifiedReason::Encrypted` in `verify` and the distinct refusal `unusable_password` for a password that is not valid UTF-8 for a 7z (#1247, #1251).
+- Core API, CLI, Python and Node: `list` marks encrypted entries of a ZIP and a 7z (`EntryEncryption`, `encrypted` in the JSON and types) (#1251).
+- Core API, Python and Node: `MemoryExtractRequest::with_password` and a `password` option on the `*_to_memory`, callback, `list` and `verify` functions on bytes (#1251, #1272).
 - Core API, CLI, Python and Node: opt-in `RepeatedPaths::Refuse` (`--repeated-paths refuse`) refuses an archive that writes the same path twice, as `Violation::RepeatedPath` (#1247).
-- Core API, CLI, Python and Node: extract, list and verify password-protected ZIP (AES) and 7z archives with `Password` (`--password-file`, `--password-fd`, `--password-prompt`), with typed refusals, a `reason` field on the error (CLI `--json`, Python, Node), a KDF work budget and `UnverifiedReason::Encrypted` in `verify` (#1247).
-- CLI: `--sandbox off|best-effort|require` adds a Linux Landlock backstop to extract, list and verify, and `--json` reports it under `sandbox`; a failed `--sandbox require` is the error kind `SandboxNotEnforced` (#1247).
+- CLI: `--sandbox off|best-effort|require` adds a Linux Landlock backstop to extract, list and verify and `--json` reports it under `sandbox`; a failed `--sandbox require` is the error kind `SandboxNotEnforced`; a sandboxed extraction into a missing destination keeps the all-or-nothing stage-and-discard outcome through `StagingReservation` and `ExtractRequest::extract_reserved` (#1247, #1251).
 - Core API and CLI: `Parallelism` and `create --threads <N>` compress ZIP entries on worker threads with byte-identical output (#1247).
-- CLI: the `test-hooks` feature, debug builds only, stalls the read at a chosen entry so the forced exit is tested end to end (#1247).
 - Core API: `OccupancyDetail` and `ArchiveError::occupancy()` expose the typed occupant details of a refusal (#1218).
-- Python and Node: `list` and `verify` on bytes accept a `password` as the last parameter (#1272)
+- CLI: the debug-only `test-hooks` feature stalls the read at a chosen entry so the forced exit is tested end to end (#1247, #1272).
+
+### Changed
+
+- Dependencies: `zip` ~9.5, and new `landlock`, `rpassword` and `zeroize`; the redundant `package.homepage` is dropped (#1218, #1247, #1272, #1275).
+- Core: the clippy ban on `OsStr::is_empty`, the shared ZIP error mapping, `Completeness`, RAII temp-file guards and an executor-typed parallel ZIP staging tighten internals without a behavior change (#1272).
 
 ### Fixed
 
-- `verify`: a 7z with encrypted content and a plain header is unverified with reason `encrypted` (WARNING) without a password, like a ZIP (#1251).
-- Extraction: a decode failure in a plain block of a mixed 7z keeps its corrupt-data classification, and a raw-key encrypted 7z header is refused as `weak_encryption_refused` (#1251).
-- CLI: the forced-exit test waits for a ready line from the stall hook instead of a fixed sleep (#1251).
-- Core: the `exarch-core` tests use an in-package testkit, so the packaged tests compile (#1251).
-- Tests: the release-only redaction test builds `DestinationOccupied.conflicts` as `OccupiedPaths`, so the release-profile test job compiles again (#1236).
-- Core: `exarch-core` tests read their fixtures from inside the package (#1247).
-- Node: the release gate compares the packed `package.json` with the committed one, and the node tests share one archive builder (#1247).
-- Extraction: a destination below a file, a destination name that is too long under `--atomic` and a plain extraction into a destination without search permission are typed `DestinationNotAccessible` errors that name the destination, with `errno` and `filename` set in Python (#1218).
-- Node: a committed loader requires only bundled addons, and the release workflow checks the packed package layout (#1218).
-- Python: errors pickle and the stubtest gate passes (#1218).
-- CLI: occupied-destination refusals name the occupant kind and its maker, and `--json` carries the destination step (#1218).
-- Extraction: a landing on a symlink the archive made and an entry below a symlinked parent report the maker (`by`) correctly (#1218).
-- Creation: the walk's directory metadata is reused and the landing ancestor walk stops at the first known parent (#1218).
-- Build: the redundant `package.homepage` is dropped and `tests/data/tar-minefield/` is excluded from the package (#1218).
-- Extraction: a file over an existing symlink that points outside the destination is `OUTPUT_EXISTS` or `EXISTING_SYMLINK` in Python and Node as in the CLI, not `PATH_TRAVERSAL` (#1235).
-- CLI: a destination below a `0555` directory reports step `create` unless `--atomic` staging was asked for (#1235).
-- Node: the unsupported-platform error lists the supported platforms (#1235).
-- Release: the npm package is packed once, the gate checks that tarball against a loader generated from `napi.targets` and its addon file names, and the same tarball is published (#1235).
-- Tests: Node covers the existing-symlink matrix, macOS covers the failing-run incomplete-mark warning, and the destination-step and non-regular-archive cases are guarded (#1235).
-- Build: `tests/tar_minefield.rs` is excluded from the `exarch-core` package together with its corpus (#1235).
-- Tests: the tar-minefield corpus is replayed, regression cases for zip2 GHSA-66qv and cpython gh-161955 and gh-161945 are added, and macOS ACL tests cover the incomplete-mark warning (#1218).
-- Creation: each source file is opened relative to its pinned parent without following links, verified against the walk, and copied for exactly its header size, for TAR and ZIP (#1213).
-- Atomic `--force` extraction removes the replaced destination's backup through the pinned parent handle with an identity check, and reports the real cause of a failed removal (#1213).
-- A directory entry written as `l/.` over a symlink to a file is refused with `EXISTING_SYMLINK` like `l/`, and a directory over a file whose host path exceeds `PATH_MAX` is `DestinationOccupied` (#1217).
-- CI: the release job creates the GitHub release only when the tag lookup returns 404 and fails on any other status (#1217).
-- Staged (`--atomic`, `--force`) extractions name the caller's destination in `DestinationOccupied` instead of the staging directory (#1190).
-- A directory entry over an archive symlink to a file is refused with `EXISTING_SYMLINK` instead of failing with "Not a directory" on Linux, and one over a symlink to a directory inside the destination is accepted on every host (#1190).
-- CLI: the existing-symlink hint no longer tells the user to remove a symlink the archive created, and the skill documents the real `--json` fields (#1190).
-- CLI: `--json` lists an incomplete mark outcome in `warnings`, matching the human output (#1190).
-- Tests: the extract SIGINT test waits on the child's write syscall on Linux instead of a fixed 100 ms sleep (#1190).
-- CI: the release job creates the GitHub release with `gh release` instead of a third-party action (#1190).
-- CI: the clippy 1.100 lints (`empty_enums`, `redundant_clone`, `used_underscore_items`) no longer fail the build (#1190).
-- Specs: `MOC-specs.md` hints name the last change each spec is synced through (#1190).
-- Creation: a followed top-level link is content and a kept one a symlink, resolved once at walk time, so the writers no longer reread the link policy (#1272)
-- Creation: ZIP creation stores a source mtime after 2107 as 2107-12-31 instead of 1980-01-01 (#1272)
-- Creation: parallel ZIP staging is typed by executor, so a task submitted without workers is unrepresentable (#1272)
+- Extraction: a ZIP no longer demands the password when the selection extracts no encrypted entry (library and CLI), and the payload of skipped encrypted entries is never read (#1272).
+- Extraction: a decode failure in a plain block of a mixed 7z keeps its corrupt-data classification, a raw-key encrypted 7z header is `weak_encryption_refused`, and an AES-wrapped header meets the entry-size and decoder-memory limits as a plain one does, a header over them being a quota refusal (#1251, #1272).
+- Extraction: a destination below a file, a name too long under `--atomic` and a destination without search permission are typed `DestinationNotAccessible` errors naming the destination (`errno` and `filename` in Python), and a destination below a `0555` directory reports step `create` unless `--atomic` was asked for (#1218, #1235).
+- Extraction: a landing on a symlink the archive made and an entry below a symlinked parent report the maker (`by`) correctly, a directory over a symlink to a directory inside the destination is accepted on every host, `l/.` over a symlink to a file is refused like `l/`, and a directory over a file whose path exceeds `PATH_MAX` is `DestinationOccupied` (#1190, #1217, #1218).
+- Extraction: staged (`--atomic`, `--force`) extractions name the caller's destination in `DestinationOccupied`, and an atomic `--force` removes the replaced destination's backup through the pinned parent handle with an identity check, reporting the real cause of a failed removal (#1190, #1213).
+- Extraction: in Python and Node a file over an existing symlink that points outside the destination is `OUTPUT_EXISTS` or `EXISTING_SYMLINK` as in the CLI, not `PATH_TRAVERSAL` (#1235).
+- Creation: each source file is opened relative to its pinned parent without following links, verified against the walk and copied for exactly its header size (TAR and ZIP); the walk's directory metadata is reused; a followed top-level link is resolved once at walk time; a ZIP mtime after 2107 is stored as 2107-12-31 (#1213, #1218, #1272).
+- `verify`: a 7z with encrypted content and a plain header is unverified with reason `encrypted` (WARNING) without a password, and a wrong password for an AES 7z block reports the refusal per entry and marks the rest of the block not verified (#1251, #1272).
 - `list`: a directory entry over an earlier symlink to a directory is marked refused under `--repeated-paths refuse`, agreeing with extract and verify (#1272).
-- Extraction: extracting a ZIP no longer demands the password when the selection extracts no encrypted entry, in the library and in the CLI `extract`, and the payload of skipped encrypted entries is never read (#1272).
-- `verify`: a wrong password for an AES 7z block reports the encryption refusal per entry and marks the rest of the block not verified (#1272)
-- Extraction: a 7z with an AES-wrapped header applies the entry-size and decoder-memory limits as a plain header does, and a header over them is a quota refusal, never a wrong-password result (#1272)
-- CLI: `--password-fd` on a descriptor that is open but not readable says so (#1272)
-- CLI: the interrupt window between preparation and the first read is tested end to end through a `test-hooks` stall (#1272)
-- Build: `tests/cli_tests.rs` is excluded from the `exarch-cli` package so the packaged tests compile (#1272)
-- CI: a check fails when a tracked file states an MSRV different from `rust-version` (#1272)
-- CI: dependabot proposes `lzma-rust2` updates again, grouped with `sevenz-rust2` (#1272)
-- Tests: upstream regressions from libarchive and sevenz-rust2 and an AES-CTR tamper case are replayed (#1272)
-- Core: the clippy ban on `OsStr::is_empty`, the shared ZIP error mapping, `Completeness` and RAII temp-file guards tighten internals without a behavior change (#1272)
+- CLI: a SIGINT or SIGTERM buffered before the interrupt window starts is acted on at once, so it cancels a run that would finish before the reader thread starts (#1280).
+- CLI: occupied-destination refusals name the occupant kind and its maker and `--json` carries the destination step; the existing-symlink hint no longer tells the user to remove a symlink the archive made; `--json` lists an incomplete mark outcome in `warnings`; `--password-fd` on a descriptor that is open but unreadable says so (#1190, #1218, #1272).
+- Node: a committed loader requires only bundled addons, the unsupported-platform error lists the supported platforms, and the release gate compares the packed `package.json` and layout with the committed ones (#1218, #1235, #1247).
+- Python: errors pickle and the stubtest gate passes (#1218).
+- Release: the npm package is packed once, the gate checks that tarball against a loader generated from `napi.targets` and its addon file names, and the same tarball is published; the GitHub release is created with `gh release` only when the tag lookup returns 404 (#1190, #1217, #1235).
+- Build: `tests/tar_minefield.rs` with its corpus and `tests/cli_tests.rs` are excluded from the packages, and the `exarch-core` tests read fixtures from an in-package testkit, so the packaged tests compile (#1218, #1235, #1247, #1251, #1272).
+- CI: a check fails when a tracked file states an MSRV different from `rust-version`, dependabot proposes `lzma-rust2` updates again with `sevenz-rust2`, the clippy 1.100 lints no longer fail the build, and the forced-exit and SIGINT tests wait on a ready line or the child's write instead of a fixed sleep (#1190, #1251, #1272).
+- Tests: the tar-minefield corpus, upstream regressions (zip2 GHSA-66qv, cpython gh-161955 and gh-161945, libarchive, sevenz-rust2) and an AES-CTR tamper case are replayed, Node and macOS cover the existing-symlink and incomplete-mark cases, and the release-only redaction test builds `OccupiedPaths` (#1218, #1235, #1236, #1272).
+- Specs: `MOC-specs.md` hints name the last change each spec is synced through (#1190).
 
 ## [0.10.0] - 2026-11-10
 
@@ -2422,7 +2387,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/bug-ops/exarch/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/bug-ops/exarch/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bug-ops/exarch/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bug-ops/exarch/compare/v0.7.0...v0.8.0

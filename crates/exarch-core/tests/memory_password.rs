@@ -82,7 +82,7 @@ fn reason(error: &ArchiveError) -> EncryptionRefusal {
 
 #[test]
 fn extract_reader_to_memory_with_the_password_equals_the_plaintext_twin() {
-    let request = MemoryExtractRequest::default().with_password(secret(RIGHT));
+    let request = MemoryExtractRequest::default().with_password(Some(secret(RIGHT)));
     for (encrypted, twin) in [
         ("aes256.zip", "plain.zip"),
         ("content.7z", "plain.7z"),
@@ -121,7 +121,7 @@ fn extract_reader_to_memory_without_a_password_is_password_required() {
 
 #[test]
 fn extract_reader_to_memory_with_a_wrong_password_is_wrong_password() {
-    let request = MemoryExtractRequest::default().with_password(secret(b"wrong-horse"));
+    let request = MemoryExtractRequest::default().with_password(Some(secret(b"wrong-horse")));
 
     let error = files_in_memory("aes256.zip", &request).unwrap_err();
 
@@ -134,7 +134,7 @@ fn extract_reader_to_memory_with_a_wrong_password_is_wrong_password() {
 
 #[test]
 fn extract_reader_to_callback_with_the_password_delivers_the_decrypted_files() {
-    let request = MemoryExtractRequest::default().with_password(secret(RIGHT));
+    let request = MemoryExtractRequest::default().with_password(Some(secret(RIGHT)));
     for (encrypted, twin) in [("aes256.zip", "plain.zip"), ("content.7z", "plain.7z")] {
         let decrypted = files_by_callback(encrypted, &request).unwrap();
         let plain = files_by_callback(twin, &MemoryExtractRequest::default()).unwrap();
@@ -153,7 +153,7 @@ fn extract_reader_to_callback_without_a_password_is_password_required() {
 
 #[test]
 fn a_non_utf8_password_cannot_open_a_7z_in_memory() {
-    let request = MemoryExtractRequest::default().with_password(secret(NOT_UTF8));
+    let request = MemoryExtractRequest::default().with_password(Some(secret(NOT_UTF8)));
 
     let error = files_in_memory("content.7z", &request).unwrap_err();
 
@@ -167,7 +167,7 @@ fn a_non_utf8_password_cannot_open_a_7z_in_memory() {
 #[test]
 fn debug_of_a_request_with_a_password_never_shows_the_secret() {
     let marker = "s3cr3t-horse-value";
-    let request = MemoryExtractRequest::default().with_password(secret(marker.as_bytes()));
+    let request = MemoryExtractRequest::default().with_password(Some(secret(marker.as_bytes())));
 
     let text = format!("{request:?}");
 

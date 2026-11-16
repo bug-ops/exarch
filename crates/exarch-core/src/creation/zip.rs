@@ -15,7 +15,9 @@ use crate::ZipBombDetails;
 use crate::ZipBombScope;
 use crate::copy::CancelClock;
 use crate::creation::config::CreationConfig;
-use crate::creation::open::open_entry;
+use crate::creation::open::LinkPolicy;
+use crate::creation::open::WalkedSource;
+use crate::creation::open::open_source;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::progress::check_cancelled;
 use crate::creation::report::CreationReport;
@@ -26,6 +28,8 @@ use crate::creation::walker::Collected;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::FilteredEntry;
 use crate::creation::walker::collect_entries;
+use crate::creation::zip_prepared::Executor;
+use crate::creation::zip_prepared::Inline;
 use crate::creation::zip_prepared::PREPARED_ENTRY_LIMIT;
 use crate::creation::zip_prepared::PreparedJob;
 use crate::creation::zip_prepared::Workers;
@@ -78,63 +82,25 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     let mut tracker = ProgressTracker::new(progress, total_entries);
 
     std::thread::scope(|scope| -> Result<()> {
-        let pool = worker_count(config.parallelism)
-            .map(|count| Workers::spawn(scope, count))
-            .transpose()?;
-        let mut staging = Staging::new(&entries, config, &options, pool);
-        let mut buffer = vec![0u8; 64 * 1024];
-
-        for (index, entry) in entries.iter().enumerate() {
-            let mut guard = tracker.begin(&entry.archive_path)?;
-            match &entry.entry_type {
-                EntryType::File => staging.add_file(
-                    &mut zip,
-                    index,
-                    &mut report,
-                    guard.progress_mut(),
-                    &mut buffer,
-                )?,
-                EntryType::Directory { metadata } => {
-                    let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                    let dir_options = options_with_mode(&options, config, metadata);
-                    zip.add_directory(&dir_path, dir_options).map_err(|e| {
-                        std::io::Error::other(IoContext::new(
-                            "failed to add directory to zip archive",
-                            e.to_string(),
-                        ))
-                    })?;
-                    report.directories_added = report.directories_added.saturating_add(1);
-                }
-                EntryType::Symlink { .. } => {
-                    if config.follow_symlinks {
-                        staging.add_file(
-                            &mut zip,
-                            index,
-                            &mut report,
-                            guard.progress_mut(),
-                            &mut buffer,
-                        )?;
-                    } else {
-                        report.skipped.record(Skip::new(
-                            SkipKind::SymlinkUnsupported,
-                            entry.archive_path.to_path_buf(),
-                        ))?;
-                    }
-                }
-            }
-            guard.complete();
+        let mut write = EntryWriter {
+            zip: &mut zip,
+            entries: &entries,
+            config,
+            options: &options,
+            tracker: &mut tracker,
+            report: &mut report,
+        };
+        match worker_count(config.parallelism) {
+            Some(count) => write.run(Workers::spawn(scope, count)?),
+            None => write.run(Inline),
         }
-        Ok(())
     })?;
     tracker.check_cancelled()?;
 
     // Finish writing ZIP
-    let mut writer = zip.finish().map_err(|e| {
-        std::io::Error::other(IoContext::new(
-            "failed to finish zip archive",
-            e.to_string(),
-        ))
-    })?;
+    let mut writer = zip
+        .finish()
+        .map_err(|e| zip_error("failed to finish zip archive", &e))?;
 
     writer.flush()?;
     report.bytes_compressed = writer.stream_position()?;
@@ -143,6 +109,54 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     tracker.on_complete();
 
     Ok((report, writer))
+}
+
+/// Everything the entry loop writes to, bundled so it can run once per
+/// executor type.
+struct EntryWriter<'a, 'p, W: Write + Seek> {
+    zip: &'a mut ZipWriter<W>,
+    entries: &'a [FilteredEntry],
+    config: &'a CreationConfig,
+    options: &'a SimpleFileOptions,
+    tracker: &'a mut ProgressTracker<'p>,
+    report: &'a mut CreationReport,
+}
+
+impl<W: Write + Seek> EntryWriter<'_, '_, W> {
+    /// Writes every entry in archive order, staging file sources on `executor`.
+    fn run<E: Executor>(&mut self, executor: E) -> Result<()> {
+        let mut staging = Staging::new(self.entries, self.config, self.options, executor);
+        let mut buffer = vec![0u8; 64 * 1024];
+
+        for (index, entry) in self.entries.iter().enumerate() {
+            let mut guard = self.tracker.begin(&entry.archive_path)?;
+            match &entry.entry_type {
+                EntryType::Content { .. } => staging.add_file(
+                    self.zip,
+                    index,
+                    self.report,
+                    guard.progress_mut(),
+                    &mut buffer,
+                )?,
+                EntryType::Directory { metadata } => {
+                    let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
+                    let dir_options = options_with_mode(self.options, self.config, metadata);
+                    self.zip
+                        .add_directory(&dir_path, dir_options)
+                        .map_err(|e| zip_error("failed to add directory to zip archive", &e))?;
+                    self.report.directories_added = self.report.directories_added.saturating_add(1);
+                }
+                EntryType::Symlink { .. } => {
+                    self.report.skipped.record(Skip::new(
+                        SkipKind::SymlinkUnsupported,
+                        entry.archive_path.to_path_buf(),
+                    ))?;
+                }
+            }
+            guard.complete();
+        }
+        Ok(())
+    }
 }
 
 /// Adds a warning to `report` when default extraction would refuse an entry of
@@ -201,65 +215,55 @@ fn extraction_ratio_warning<R: Read + Seek>(
 
 /// A source opened and checked on the calling thread, waiting for its turn in
 /// archive order.
-enum Staged {
+enum Staged<P> {
     /// Over the file size limit: only a skip is recorded.
     Skipped(Skip),
     /// The open failed; reported when the entry's turn comes.
     Failed(ArchiveError),
-    /// Compressed on the calling thread at its turn.
-    Inline(PreparedJob, u64),
-    /// Being compressed by a worker.
-    Submitted(u64),
+    /// Held by the executor until the entry's turn, with its size.
+    Prepared(P, u64),
     /// Larger than [`PREPARED_ENTRY_LIMIT`]: streamed through the writer.
     Streamed(PreparedJob),
 }
 
-/// Opens sources ahead of the write position and hands them to the workers,
-/// keeping at most the pool's capacity of entries outstanding.
-struct Staging<'a> {
+/// Opens sources ahead of the write position and hands them to the executor,
+/// keeping at most its capacity of entries outstanding.
+struct Staging<'a, E: Executor> {
     entries: &'a [FilteredEntry],
     config: &'a CreationConfig,
     options: &'a SimpleFileOptions,
-    pool: Option<Workers>,
-    staged: BTreeMap<usize, Staged>,
+    executor: E,
+    staged: BTreeMap<usize, Staged<E::Pending>>,
     next: usize,
 }
 
-impl<'a> Staging<'a> {
+impl<'a, E: Executor> Staging<'a, E> {
     fn new(
         entries: &'a [FilteredEntry],
         config: &'a CreationConfig,
         options: &'a SimpleFileOptions,
-        pool: Option<Workers>,
+        executor: E,
     ) -> Self {
         Self {
             entries,
             config,
             options,
-            pool,
+            executor,
             staged: BTreeMap::new(),
             next: 0,
         }
     }
 
-    fn has_content(&self, entry: &FilteredEntry) -> bool {
-        match entry.entry_type {
-            EntryType::File => true,
-            EntryType::Symlink { .. } => self.config.follow_symlinks,
-            EntryType::Directory { .. } => false,
-        }
-    }
-
-    /// Stages every entry up to `index`, and further ahead while workers have
-    /// room.
+    /// Stages every entry up to `index`, and further ahead while the executor
+    /// has room.
     fn fill(&mut self, index: usize) -> Result<()> {
-        let room = self.pool.as_ref().map_or(0, Workers::capacity);
+        let room = self.executor.capacity();
         while let Some(entry) = self.entries.get(self.next) {
             if self.next > index && self.staged.len() >= room {
                 break;
             }
-            if self.has_content(entry) {
-                let staged = self.stage(self.next, entry)?;
+            if let EntryType::Content { walked, links } = &entry.entry_type {
+                let staged = self.stage(self.next, entry, *walked, *links)?;
                 self.staged.insert(self.next, staged);
             }
             self.next = self.next.saturating_add(1);
@@ -267,8 +271,14 @@ impl<'a> Staging<'a> {
         Ok(())
     }
 
-    fn stage(&self, index: usize, entry: &FilteredEntry) -> Result<Staged> {
-        let source = match open_entry(entry, self.config) {
+    fn stage(
+        &self,
+        index: usize,
+        entry: &FilteredEntry,
+        walked: WalkedSource,
+        links: LinkPolicy,
+    ) -> Result<Staged<E::Pending>> {
+        let source = match open_source(&entry.path, walked, links) {
             Ok(source) => source,
             Err(error) => return Ok(Staged::Failed(error)),
         };
@@ -293,13 +303,7 @@ impl<'a> Staging<'a> {
         if size > PREPARED_ENTRY_LIMIT {
             return Ok(Staged::Streamed(job));
         }
-        match &self.pool {
-            Some(pool) => {
-                pool.submit(index, job)?;
-                Ok(Staged::Submitted(size))
-            }
-            None => Ok(Staged::Inline(job, size)),
-        }
+        Ok(Staged::Prepared(self.executor.dispatch(index, job)?, size))
     }
 
     /// Writes the file at `index` into `zip`.
@@ -325,18 +329,8 @@ impl<'a> Staging<'a> {
             }
             Staged::Failed(error) => return Err(error),
             Staged::Streamed(job) => return stream_file(zip, job, report, progress, buffer),
-            Staged::Inline(job, size) => {
-                append_prepared(zip, job.compress()?)?;
-                size
-            }
-            Staged::Submitted(size) => {
-                let Some(pool) = self.pool.as_mut() else {
-                    return Err(ArchiveError::Io(std::io::Error::other(IoContext::new(
-                        "zip entry submitted without workers",
-                        index.to_string(),
-                    ))));
-                };
-                append_prepared(zip, pool.take(index)?)?;
+            Staged::Prepared(pending, size) => {
+                append_prepared(zip, self.executor.collect(index, pending)?)?;
                 size
             }
         };
@@ -371,12 +365,8 @@ fn stream_file<W: Write + Seek>(
         mut reader,
     } = job;
 
-    zip.start_file(&name, options).map_err(|e| {
-        std::io::Error::other(IoContext::new(
-            "failed to start file in zip archive",
-            e.to_string(),
-        ))
-    })?;
+    zip.start_file(&name, options)
+        .map_err(|e| zip_error("failed to start file in zip archive", &e))?;
 
     let mut bytes_written = 0u64;
     let mut clock = CancelClock::standard();
@@ -425,19 +415,22 @@ fn options_with_mode(
     options
 }
 
-/// The source modification time in the DOS range, or the ZIP epoch when it is
-/// unavailable or out of range, so the archive bytes do not depend on when it
-/// was created.
+/// The source modification time in the DOS range: the ZIP epoch when it is
+/// unavailable or before 1980, and the last representable second when it is
+/// after 2107, so the archive bytes do not depend on when it was created.
 fn modified_time(metadata: &std::fs::Metadata) -> zip::DateTime {
-    metadata
-        .modified()
-        .ok()
-        .map(time::OffsetDateTime::from)
-        .and_then(|at| {
-            zip::DateTime::try_from(time::PrimitiveDateTime::new(at.date(), at.time())).ok()
-        })
-        .unwrap_or_default()
+    let Some(at) = metadata.modified().ok().map(time::OffsetDateTime::from) else {
+        return zip::DateTime::default();
+    };
+    if at.year() > i32::from(LAST_DOS_YEAR) {
+        return zip::DateTime::from_date_and_time(LAST_DOS_YEAR, 12, 31, 23, 59, 58)
+            .unwrap_or_default();
+    }
+    zip::DateTime::try_from(time::PrimitiveDateTime::new(at.date(), at.time())).unwrap_or_default()
 }
+
+/// The last year a DOS timestamp can hold.
+const LAST_DOS_YEAR: u16 = 2107;
 
 /// Normalizes a path for ZIP archive format.
 ///

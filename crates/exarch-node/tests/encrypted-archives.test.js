@@ -14,6 +14,14 @@ const {
   extractArchive,
   listArchiveSync,
   verifyArchiveSync,
+  listArchiveBytes,
+  listArchiveBytesSync,
+  listArchiveBytesWithProgress,
+  listArchiveBytesWithProgressSync,
+  verifyArchiveBytes,
+  verifyArchiveBytesSync,
+  verifyArchiveBytesWithProgress,
+  verifyArchiveBytesWithProgressSync,
 } = require('../index.js');
 
 const ARCHIVES = ['encrypted-aes256.zip', 'encrypted-header.7z'].map((name) =>
@@ -92,6 +100,55 @@ describe('encrypted archives', () => {
       assert.deepStrictEqual(report.issues, []);
     });
   }
+
+  for (const archive of ARCHIVES) {
+    const name = path.basename(archive);
+
+    it(`${name}: the bytes forms of list and verify take the password`, async () => {
+      const data = fs.readFileSync(archive);
+      const manifests = [
+        listArchiveBytesSync(data, null, null, null, password()),
+        listArchiveBytesWithProgressSync(data, null, null, null, null, password()),
+        await listArchiveBytes(data, null, null, null, null, password()),
+        await listArchiveBytesWithProgress(data, null, null, null, null, null, password()),
+      ];
+      const reports = [
+        verifyArchiveBytesSync(data, null, null, null, password()),
+        verifyArchiveBytesWithProgressSync(data, null, null, null, null, password()),
+        await verifyArchiveBytes(data, null, null, null, null, password()),
+        await verifyArchiveBytesWithProgress(data, null, null, null, null, null, password()),
+      ];
+
+      for (const manifest of manifests) {
+        assert.ok(manifest.entries.some((entry) => entry.path.endsWith('inner.txt')));
+      }
+      for (const report of reports) {
+        assert.deepStrictEqual(report.issues, []);
+      }
+    });
+  }
+
+  it('an encrypted header: the bytes forms without a password are a typed security violation', () => {
+    const data = fs.readFileSync(ARCHIVES[1]);
+
+    for (const call of [listArchiveBytesSync, verifyArchiveBytesSync]) {
+      assert.throws(
+        () => call(data),
+        (err) =>
+          err.code === 'SECURITY_VIOLATION' &&
+          err.subCode === 'ENCRYPTED' &&
+          err.reason === 'password_required'
+      );
+    }
+  });
+
+  it('the bytes forms refuse a string and an empty password before reading', () => {
+    const data = fs.readFileSync(ARCHIVES[0]);
+
+    assert.throws(() => listArchiveBytesSync(data, null, null, null, 'correct-horse'));
+    assert.throws(() => verifyArchiveBytesSync(data, null, null, null, Buffer.alloc(0)));
+    assert.throws(() => listArchiveBytes(data, null, null, null, null, Buffer.alloc(0)));
+  });
 
   it('refuses a string password', () => {
     assert.throws(() =>

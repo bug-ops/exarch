@@ -117,13 +117,13 @@ A second signal ends the process at once by the first signal and, in text mode, 
 
 ## Passwords
 
-`--password-file <PATH>` (first line, at most 1 KiB, a regular file not readable by group or others, else `chmod 600`; a looser mode fails with `error.kind` `Error` before the archive is opened), `--password-fd <N>` (Unix) or `--password-prompt` (no echo). Giving two is a usage error (exit `2`). Same flags on `list` and `verify`. Refusal tokens in `error.reason`: [formats.md](formats.md#encrypted-archives-zip-and-7z).
+`--password-file <PATH>` (first line, at most 1 KiB, a regular file not readable by group or others, else `chmod 600`; a looser mode fails with `error.kind` `Error` before the archive is opened), `--password-fd <N>` (Unix; a descriptor that is open but not readable, such as a write-only one, fails with `file descriptor N is open but not readable`, while a closed or not inherited one gets an inheritance hint) or `--password-prompt` (no echo). Giving two is a usage error (exit `2`). Same flags on `list` and `verify`. Refusal tokens in `error.reason`: [formats.md](formats.md#encrypted-archives-zip-and-7z).
 
 ## `--sandbox <off|best-effort|require>`
 
 Landlock confinement so a bug cannot write outside the destination. Also on `list` and `verify`; `create` refuses it (exit `2`).
 
-- `--json` adds a top-level `sandbox` object next to `data` or `error` whenever the flag is given: `{"status":"enforced","abi":N,"all_threads":bool}`, `{"status":"partial",...,"unhandled":[right names]}` or `{"status":"unavailable","reason":...}` (`not_linux`, `disabled`, `abi_too_old`, `atomic_staging`, `kernel` with `errno`). Without the flag the key is absent.
+- `--json` adds a top-level `sandbox` object next to `data` or `error` whenever the flag is given: `{"status":"enforced","abi":N,"all_threads":bool}`, `{"status":"partial",...,"unhandled":[right names]}` or `{"status":"unavailable","reason":...}` (`not_linux`, `disabled`, `abi_too_old`, `atomic_staging`, `kernel` and `rule_path` (a path the ruleset names could not be opened), each as an object with `errno`, `null` when the failure carried none). Without the flag the key is absent.
 - `enforced` needs Landlock ABI v3 (Linux 6.2); older kernels with ABI v2 (5.19) report `partial`; lower or Landlock off is `unavailable`.
 - `best-effort` never fails the run and reports the status. With `--atomic` it is `unavailable` (`atomic_staging`).
 - `require` fails with `error.kind` `SandboxNotEnforced` (exit `1`, `sandbox` object present) when the status is not `enforced`: always off Linux, and with `--atomic`.

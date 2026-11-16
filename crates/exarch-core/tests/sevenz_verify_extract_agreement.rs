@@ -49,13 +49,13 @@ fn assert_agree(archive: &Path, password: &Arc<Password>, expected: EncryptionRe
     let config = SecurityConfig::default();
     let dest = TempDir::new().unwrap();
     let extracted = ExtractRequest::new(&config)
-        .with_password(password.clone())
+        .with_password(Some(password.clone()))
         .extract(archive, dest.path())
         .unwrap_err();
     assert_eq!(refusal(&extracted), Some(expected));
 
     let report = VerifyRequest::new(&config)
-        .with_password(password.clone())
+        .with_password(Some(password.clone()))
         .verify(archive)
         .unwrap();
     assert_eq!(

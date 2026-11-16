@@ -254,7 +254,7 @@ impl MemoryExtractRequest {
     }
 
     /// Decrypts encrypted entries with `password`; its `Debug` form never shows
-    /// the secret.
+    /// the secret. `None` means no credentials.
     ///
     /// # Examples
     ///
@@ -266,7 +266,7 @@ impl MemoryExtractRequest {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
-    /// let request = MemoryExtractRequest::default().with_password(password);
+    /// let request = MemoryExtractRequest::default().with_password(Some(password));
     /// # let _ = request;
     /// # Ok(())
     /// # }
@@ -274,8 +274,8 @@ impl MemoryExtractRequest {
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
-    pub fn with_password(mut self, password: Arc<crate::Password>) -> Self {
-        self.password = Some(password);
+    pub fn with_password(mut self, password: Option<Arc<crate::Password>>) -> Self {
+        self.password = password;
         self
     }
 }

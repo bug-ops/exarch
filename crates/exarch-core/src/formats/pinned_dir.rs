@@ -73,6 +73,7 @@
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::mem::DropGuard;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -1584,42 +1585,31 @@ impl PendingMode {
 /// temp-file-then-rename write path so a fallible step between file creation
 /// and the operation's success point does not leave a partial artifact behind.
 /// The removal is relative to the directory the file was created in.
-pub(crate) struct TempFileGuard<'d> {
-    dir: &'d VettedDir,
-    name: OsString,
-    should_cleanup: bool,
-}
+pub(crate) struct TempFileGuard<'d>(DropGuard<Doomed<'d>, fn(Doomed<'d>)>);
+
+/// The directory and the name of the file the guard removes.
+type Doomed<'d> = (&'d VettedDir, OsString);
 
 impl<'d> TempFileGuard<'d> {
     /// Removes `name` from `dir` on drop.
     pub(crate) fn new(dir: &'d VettedDir, name: Leaf<'_>) -> Self {
-        Self {
-            dir,
-            name: name.as_os_str().to_os_string(),
-            should_cleanup: true,
-        }
+        Self::removing(dir, name.as_os_str().to_os_string())
     }
 
     /// Removes the generated temp file `name` from `dir` on drop.
     pub(crate) fn for_temp(dir: &'d VettedDir, name: TempLeaf) -> Self {
-        Self {
-            dir,
-            name: name.0,
-            should_cleanup: true,
-        }
+        Self::removing(dir, name.0)
+    }
+
+    fn removing(dir: &'d VettedDir, name: OsString) -> Self {
+        Self(DropGuard::new((dir, name), |(dir, name)| {
+            let _ = dir.unlink_own(Leaf(&name));
+        }))
     }
 
     /// Marks the file as successfully processed, preventing cleanup on drop.
-    pub(crate) fn persist(mut self) {
-        self.should_cleanup = false;
-    }
-}
-
-impl Drop for TempFileGuard<'_> {
-    fn drop(&mut self) {
-        if self.should_cleanup {
-            let _ = self.dir.unlink_own(Leaf(&self.name));
-        }
+    pub(crate) fn persist(self) {
+        DropGuard::dismiss(self.0);
     }
 }
 

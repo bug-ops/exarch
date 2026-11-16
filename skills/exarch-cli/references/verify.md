@@ -21,6 +21,7 @@
 ## Result
 
 - `--check-integrity` without a password: encrypted ZIP entries are unverified (`WARNING`, `INCOMPLETE`, reason `encrypted`); so are the files of a 7z with encrypted content and a plain header (same `WARNING`, `INCOMPLETE`, reason `encrypted`, exit `0`). With the right password both are `PASS`/`OK`.
+- `--check-integrity` of an AES 7z block under a wrong password (or with corrupt encrypted data) reports a `HIGH` `ENCRYPTED` issue "the password is wrong or the encrypted data is corrupt" per affected entry (`FAIL`, `INCOMPLETE`, reason `not_decodable`, exit `1`), as `extract` does; it is never a corrupt-data issue. Check the password before treating the archive as damaged.
 
 - `data.status`: `PASS` / `WARNING` / `FAIL`. Envelope `status` stays `"success"`; exit `1` on `FAIL`. Text: `Archive verification: PASS|WARNING|FAIL`, issue tags `[HIGH]`/`[MEDIUM]`/`[LOW]` (same words with and without color).
 - `security_status` (`Security: OK|WARNING|FAILED`) and `integrity_status` (`OK|FAILED|INCOMPLETE|SKIPPED`).

@@ -15,6 +15,7 @@ use super::decode::decode_archive_entries;
 use super::extract::process_entry;
 use super::header::BlockIndex;
 use super::host::SevenZHostTarget;
+use super::links::BlockCipher;
 use super::links::BlockScan;
 use super::links::BlockStop;
 use super::lzma2::DecodeKnobs;
@@ -2640,6 +2641,7 @@ fn scan_failing_file(error: io::Error) -> (bool, Option<BlockStop>, Vec<IssueCat
         next_file: 0,
         visited: BTreeSet::new(),
         stop: None,
+        cipher: BlockCipher::Plain,
     };
     let file = sevenz_file("a", true, 4, false);
     let mut archive = Archive::default();
@@ -2830,4 +2832,39 @@ fn deflate_block_is_reported_not_decodable_by_verify() {
         assert_eq!(issue.category(), expected.category());
         assert_eq!(issue.message(), expected.message());
     }
+}
+
+#[test]
+fn an_encrypted_block_reports_a_decode_verdict_as_the_encryption_refusal() {
+    use crate::ArchiveError;
+    use crate::EncryptionRefusal;
+    use crate::Violation;
+    use crate::inspection::integrity::DecodeFailure;
+
+    for failure in [
+        DecodeFailure::Checksum,
+        DecodeFailure::Malformed(io::Error::other("bad")),
+        DecodeFailure::Truncated {
+            declared: 1,
+            actual: None,
+        },
+    ] {
+        assert_matches!(
+            BlockCipher::Aes.classify(failure),
+            DecodeFailure::NotDecodable(ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted {
+                    reason: EncryptionRefusal::WrongPasswordOrCorrupt,
+                    ..
+                }
+            })
+        );
+    }
+    assert_matches!(
+        BlockCipher::Aes.classify(DecodeFailure::Io(io::Error::other("disk"))),
+        DecodeFailure::Io(_)
+    );
+    assert_matches!(
+        BlockCipher::Plain.classify(DecodeFailure::Checksum),
+        DecodeFailure::Checksum
+    );
 }

@@ -50,6 +50,8 @@ use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileRequest;
+use crate::formats::target::Sealed;
+use crate::formats::target::SealedRoute;
 use crate::formats::target::Tally;
 use crate::formats::zip_reuse::Retained;
 use crate::security::admitted::EntrySize;
@@ -793,6 +795,21 @@ impl<S: EntrySink> SinkTarget<'_, S> {
     }
 }
 
+impl<S: EntrySink> SealedRoute for SinkTarget<'_, S> {
+    fn route_sealed(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+        tally: &mut Tally<'_>,
+    ) -> Result<Sealed> {
+        let ctx = self.core.context();
+        let gated = self
+            .core
+            .route_entry_in(path, shape, &self.root, &self.tree, &ctx)?;
+        Sealed::of(gated, path, tally)
+    }
+}
+
 impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     type AdmittedFile = ValidatedFile;
     type Parent = Resolved;
@@ -886,7 +903,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let occupant = self.tree.occupant(rel);
         let occupied = occupant.is_some();
         if let Some(found) = occupant {
-            OccupantPolicy::of(tally.options).refuse_repeat(
+            tally.options.repeats.refuse_repeat(
                 EntryShape::Directory,
                 rel,
                 found,

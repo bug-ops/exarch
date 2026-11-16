@@ -13,8 +13,6 @@ updates:
     ignore:
       - dependency-name: "half"
         versions: [">=2.5"]
-      - dependency-name: "lzma-rust2"
-        versions: [">=0.24"]
       # #854: a lone direct bump leaves two windows-sys versions and fails
       # cargo-deny `multiple-versions`; move it together with the transitive users.
       - dependency-name: "windows-sys"
@@ -25,7 +23,8 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Group minor and patch updates
+    # Group minor and patch updates; the wildcard also moves lzma-rust2 and
+    # sevenz-rust2 together, avoiding the duplicate graph of #830.
     groups:
       minor-and-patch:
         patterns:
@@ -45,9 +44,6 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 10
-    ignore:
-      - dependency-name: "lzma-rust2"
-        versions: [">=0.24"]
     labels:
       - "dependencies"
       - "rust"

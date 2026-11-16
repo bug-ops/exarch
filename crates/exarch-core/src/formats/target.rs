@@ -269,6 +269,45 @@ pub(crate) trait ExtractTarget {
     ) -> Result<()>;
 }
 
+/// What a target made of an entry it was asked to route by name alone.
+#[derive(Debug)]
+pub(crate) enum Sealed {
+    /// The selection leaves the entry out; it is counted as skipped.
+    Skipped(SkipRecorded),
+    /// The selection keeps the entry, which the caller must now read.
+    Selected,
+}
+
+/// A target that decides an entry from its name and kind alone, for an entry
+/// whose payload the run must not read (an encrypted ZIP entry the selection
+/// skips).
+pub(crate) trait SealedRoute: ExtractTarget {
+    /// Validates the path of an entry of `shape` and applies the selection,
+    /// with the same checks, counts and include-hit records as the validators
+    /// of [`ExtractTarget`], without looking at the payload.
+    ///
+    /// # Errors
+    ///
+    /// The validation error of the path, or the file-count refusal.
+    fn route_sealed(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+        tally: &mut Tally<'_>,
+    ) -> Result<Sealed>;
+}
+
+impl Sealed {
+    /// Counts a skip, or reports the entry as selected, for the gate's
+    /// decision about an entry's path.
+    pub(crate) fn of<A>(gated: Gated<A>, path: &Path, tally: &mut Tally<'_>) -> Result<Self> {
+        Ok(match tally.admission(gated, path)? {
+            Admission::Skipped(skipped) => Self::Skipped(skipped),
+            Admission::Admit(_) => Self::Selected,
+        })
+    }
+}
+
 /// A validation context whose parent probe the directory walker takes over
 /// where the root is pinned: every path validated with it is written through
 /// `DirWalker` on `root`, which vets each parent at write time.
@@ -359,6 +398,25 @@ impl<'a> HostTarget<'a> {
         pending: PendingFile<HostParent>,
     ) -> Result<ValidatedFile<HostParent>> {
         self.core.admit_file(pending)
+    }
+}
+
+impl SealedRoute for HostTarget<'_> {
+    fn route_sealed(
+        &mut self,
+        path: &Path,
+        shape: EntryShape,
+        tally: &mut Tally<'_>,
+    ) -> Result<Sealed> {
+        let ctx = host_context(&self.core, &self.root);
+        let gated = self.core.route_entry_in(
+            path,
+            shape,
+            self.root.dest(),
+            &PinnedHostFs::new(&self.root),
+            &ctx,
+        )?;
+        Sealed::of(gated, path, tally)
     }
 }
 

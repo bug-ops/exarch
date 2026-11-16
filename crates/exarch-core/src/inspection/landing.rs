@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::DestinationStep;
 use crate::EntrySelection;
-use crate::ExistingFiles;
 use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
@@ -27,7 +26,6 @@ use crate::formats::common::require_symlink_creation;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::identity_of;
-use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::is_run_duplicate;
 use crate::formats::occupant::refuse_unless_duplicate;
@@ -443,13 +441,7 @@ fn refuse_tree_repeat(
     keys: &RunKeys,
     repeats: RepeatedPaths,
 ) -> Result<()> {
-    OccupantPolicy::new(ExistingFiles::Skip, repeats).refuse_repeat(
-        shape,
-        rel,
-        held,
-        || keys.maker(rel),
-        OccupiedSite::Detached,
-    )
+    repeats.refuse_repeat(shape, rel, held, || keys.maker(rel), OccupiedSite::Detached)
 }
 
 impl ArchiveManifest {
@@ -844,8 +836,18 @@ fn land(
             skip_duplicate(shape, occupant, safe.as_path(), &state.keys)
         }
         Ok(placement) => {
-            if matches!(placement, Placement::New(_)) {
-                state.keys.note(safe.as_path());
+            match &placement {
+                Placement::New(_) => state.keys.note(safe.as_path()),
+                Placement::Held { occupant, .. } if *occupant != Occupant::Directory => {
+                    refuse_tree_repeat(
+                        shape,
+                        *occupant,
+                        safe.as_path(),
+                        &state.keys,
+                        config.repeated_paths,
+                    )?;
+                }
+                Placement::Held { .. } => {}
             }
             Ok(Disposition::Extract(LandingPath(
                 placement.into_landing().into_path_buf(),

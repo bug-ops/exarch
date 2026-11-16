@@ -276,8 +276,7 @@ pub fn extract_archive<'env>(
 fn password_of(password: Option<Uint8Array>) -> Result<Option<Arc<exarch_core::Password>>> {
     password
         .map(|buffer| {
-            exarch_core::Password::new(buffer.to_vec())
-                .map(Arc::new)
+            exarch_core::Password::shared(buffer.to_vec())
                 .map_err(|error| napi::Error::new(napi::Status::InvalidArg, error.to_string()))
         })
         .transpose()
@@ -297,10 +296,9 @@ fn extract_core(
 ) -> CoreResult<exarch_core::ExtractionReport> {
     let archive_path = boundary_path(archive_path)?;
     let output_dir = boundary_path(output_dir)?;
-    let mut request = exarch_core::ExtractRequest::new(config).with_options(options.clone());
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+    let request = exarch_core::ExtractRequest::new(config)
+        .with_options(options.clone())
+        .with_password(password);
     Ok(request.extract(&archive_path, &output_dir)?)
 }
 
@@ -840,10 +838,9 @@ fn list_core(
     let archive_path = boundary_path(archive_path)?;
     let destination = destination.map(boundary_path).transpose()?;
     let volume = exarch_core::VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
-    let mut request = exarch_core::ListRequest::new(config).with_options(options);
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+    let request = exarch_core::ListRequest::new(config)
+        .with_options(options)
+        .with_password(password);
     ArchiveManifest::from_core(request.list(&archive_path)?, config, volume)
 }
 
@@ -975,10 +972,9 @@ fn verify_core(
     password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<VerificationReport> {
     let archive_path = boundary_path(archive_path)?;
-    let mut request = exarch_core::VerifyRequest::new(config).with_options(options);
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+    let request = exarch_core::VerifyRequest::new(config)
+        .with_options(options)
+        .with_password(password);
     Ok(VerificationReport::from(request.verify(&archive_path)?))
 }
 
@@ -1166,12 +1162,10 @@ pub fn extract_archive_with_progress<'env>(
                 ProgressDispatch::Awaited,
                 AbortHandle::NONE,
                 |progress| {
-                    let mut request = exarch_core::ExtractRequest::new(&config_owned)
+                    let request = exarch_core::ExtractRequest::new(&config_owned)
                         .with_options(options_owned.clone())
-                        .with_progress(progress);
-                    if let Some(password) = password.clone() {
-                        request = request.with_password(password);
-                    }
+                        .with_progress(progress)
+                        .with_password(password.clone());
                     Ok(request.extract(&archive_path, &output_dir)?)
                 },
                 |source, report| ProgressCallbackError::ExtractionCallback { source, report },

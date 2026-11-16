@@ -9,7 +9,7 @@ tags:
   - security/parser-differential
   - extraction/duplicates
 created: 2026-11-14
-updated: 2026-11-15
+updated: 2026-11-16
 status: implemented
 related:
   - "[[constitution]]"
@@ -178,7 +178,7 @@ Under `Refuse`, `verify` reports the same finding once, as `RepeatedPath`, under
 
 ### FR-008
 
-WHEN `repeats` is `Refuse` THE SYSTEM SHALL make `list` report the later landing as `refuse` with the same error and `verify` report an issue derived from it, through the shared `RECORD_CAP` and the `RunKeys` model. For a landing the list model cannot prove unique (cap passed, or a non-matching spelling under `VolumeIdentity::LandingPaths`) the disposition is `refuse` with `DestinationOccupied`, as in FR-004.
+WHEN `repeats` is `Refuse` THE SYSTEM SHALL make `list` report the later landing as `refuse` with the same error and `verify` report an issue derived from it, through the shared `RECORD_CAP` and the `RunKeys` model. For a landing the list model cannot prove unique (cap passed, or a non-matching spelling under `VolumeIdentity::LandingPaths`) the disposition is `refuse` with `DestinationOccupied`, as in FR-004. A directory entry whose earlier occupant is a symlink to a directory SHALL be reported by `list` as `refuse` under `Refuse`, as `extract` and `verify` refuse it (#1258).
 
 **Priority**: must
 

@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `--json` `error.conflicts` is an array of `{path, occupant}` objects and `EXISTING_SYMLINK` errors carry `error.by` (#1190).
 - Python: `OutputExistsError.conflicts` is `list[OccupiedPath]` and `SecurityViolationError.by` is set for `EXISTING_SYMLINK`, and `str(OutputExistsError)` names the entry (#1190).
 - Node: `conflicts` entries are `{path, occupant?}` objects and the security violation carries `by` (#1190).
+- Core API: `with_password` on the request types takes `Option<Arc<Password>>`, and `Password::shared` builds one (#1272)
+- CLI: in the `--json` `sandbox` output `errno` is nullable (no invented `EINVAL`) and a failed rule path is reported as the new `rule_path` instead of `kernel` (#1272).
 
 ### Added
 
@@ -44,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core API and CLI: `Parallelism` and `create --threads <N>` compress ZIP entries on worker threads with byte-identical output (#1247).
 - CLI: the `test-hooks` feature, debug builds only, stalls the read at a chosen entry so the forced exit is tested end to end (#1247).
 - Core API: `OccupancyDetail` and `ArchiveError::occupancy()` expose the typed occupant details of a refusal (#1218).
+- Python and Node: `list` and `verify` on bytes accept a `password` as the last parameter (#1272)
 
 ### Fixed
 
@@ -80,6 +83,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: the release job creates the GitHub release with `gh release` instead of a third-party action (#1190).
 - CI: the clippy 1.100 lints (`empty_enums`, `redundant_clone`, `used_underscore_items`) no longer fail the build (#1190).
 - Specs: `MOC-specs.md` hints name the last change each spec is synced through (#1190).
+- Creation: a followed top-level link is content and a kept one a symlink, resolved once at walk time, so the writers no longer reread the link policy (#1272)
+- Creation: ZIP creation stores a source mtime after 2107 as 2107-12-31 instead of 1980-01-01 (#1272)
+- Creation: parallel ZIP staging is typed by executor, so a task submitted without workers is unrepresentable (#1272)
+- `list`: a directory entry over an earlier symlink to a directory is marked refused under `--repeated-paths refuse`, agreeing with extract and verify (#1272).
+- Extraction: extracting a ZIP no longer demands the password when the selection extracts no encrypted entry, in the library and in the CLI `extract`, and the payload of skipped encrypted entries is never read (#1272).
+- `verify`: a wrong password for an AES 7z block reports the encryption refusal per entry and marks the rest of the block not verified (#1272)
+- Extraction: a 7z with an AES-wrapped header applies the entry-size and decoder-memory limits as a plain header does, and a header over them is a quota refusal, never a wrong-password result (#1272)
+- CLI: `--password-fd` on a descriptor that is open but not readable says so (#1272)
+- CLI: the interrupt window between preparation and the first read is tested end to end through a `test-hooks` stall (#1272)
+- Build: `tests/cli_tests.rs` is excluded from the `exarch-cli` package so the packaged tests compile (#1272)
+- CI: a check fails when a tracked file states an MSRV different from `rust-version` (#1272)
+- CI: dependabot proposes `lzma-rust2` updates again, grouped with `sevenz-rust2` (#1272)
+- Tests: upstream regressions from libarchive and sevenz-rust2 and an AES-CTR tamper case are replayed (#1272)
+- Core: the clippy ban on `OsStr::is_empty`, the shared ZIP error mapping, `Completeness` and RAII temp-file guards tighten internals without a behavior change (#1272)
 
 ## [0.10.0] - 2026-11-10
 

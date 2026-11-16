@@ -66,10 +66,7 @@ fn extract(
 ) -> (TempDir, Result<(), ArchiveError>) {
     let dest = TempDir::new().unwrap();
     let request = ExtractRequest::new(config);
-    let request = match password {
-        Some(password) => request.with_password(password),
-        None => request,
-    };
+    let request = request.with_password(password);
     let result = request.extract(fixture(archive), dest.path()).map(drop);
     (dest, result)
 }
@@ -209,11 +206,11 @@ fn list_and_verify_with_the_right_password_work_like_the_twin() {
     let config = SecurityConfig::default();
     for archive in ["aes256.zip", "content.7z", "header.7z"] {
         let listed = ListRequest::new(&config)
-            .with_password(password(RIGHT))
+            .with_password(Some(password(RIGHT)))
             .list(fixture(archive))
             .unwrap();
         let report = VerifyRequest::new(&config)
-            .with_password(password(RIGHT))
+            .with_password(Some(password(RIGHT)))
             .verify(fixture(archive))
             .unwrap();
 

@@ -310,9 +310,7 @@ impl<S: IntoSource> MemoryJob<S> {
         if let Some(limit) = limit {
             request = request.with_limit(limit);
         }
-        if let Some(password) = self.password {
-            request = request.with_password(password);
-        }
+        request = request.with_password(self.password);
         self.data.run(self.format, |reader| {
             Ok(extract_reader_to_memory(reader, &request, progress)?)
         })

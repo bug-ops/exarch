@@ -111,7 +111,7 @@ use exarch_core::SecurityConfig;
 let config = SecurityConfig::default();
 let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
 ExtractRequest::new(&config)
-    .with_password(password)
+    .with_password(Some(password))
     .extract("secret.zip", "out")?;
 ```
 

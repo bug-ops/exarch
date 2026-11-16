@@ -24,4 +24,5 @@ disallowed-methods = [
     { path = "std::os::unix::fs::chown", reason = "changes an owner by path; extraction uses the open descriptor", allow-invalid = true },
     { path = "std::os::windows::fs::symlink_file", reason = "creates a link by path; extraction links through a directory handle", allow-invalid = true },
     { path = "std::os::windows::fs::symlink_dir", reason = "creates a link by path; extraction links through a directory handle", allow-invalid = true },
+    { path = "std::ffi::OsStr::is_empty", reason = "use Path::is_empty on paths" },
 ]

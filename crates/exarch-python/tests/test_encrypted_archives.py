@@ -79,6 +79,47 @@ def test_a_needless_password_is_ignored(temp_dir, sample_tar_gz):
     assert report.files_extracted == 2
 
 
+@pytest.mark.parametrize("name", ARCHIVES)
+@pytest.mark.parametrize("with_progress", [False, True])
+def test_the_bytes_forms_of_list_and_verify_take_the_password(name, with_progress):
+    data = (FIXTURES / name).read_bytes()
+    list_fn = (
+        exarch.list_archive_bytes_with_progress if with_progress else exarch.list_archive_bytes
+    )
+    verify_fn = (
+        exarch.verify_archive_bytes_with_progress if with_progress else exarch.verify_archive_bytes
+    )
+
+    listed = list_fn(data, password=_password())
+    report = verify_fn(data, password=_password())
+
+    assert any(entry.path.endswith("inner.txt") for entry in listed.entries)
+    assert report.issues == []
+
+
+def test_the_bytes_forms_without_a_password_refuse_an_encrypted_header():
+    data = (FIXTURES / "encrypted-header.7z").read_bytes()
+
+    for call in (exarch.list_archive_bytes, exarch.verify_archive_bytes):
+        with pytest.raises(exarch.SecurityViolationError) as caught:
+            call(data)
+
+        assert caught.value.sub_code == "ENCRYPTED"
+        assert caught.value.reason == "password_required"
+
+
+@pytest.mark.parametrize("call_name", ["list_archive_bytes", "verify_archive_bytes"])
+def test_the_bytes_forms_refuse_bytes_str_and_empty_passwords(call_name):
+    data = (FIXTURES / "encrypted-aes256.zip").read_bytes()
+    call = getattr(exarch, call_name)
+
+    for secret in (b"correct-horse", "correct-horse"):
+        with pytest.raises(TypeError):
+            call(data, password=secret)
+    with pytest.raises(ValueError):
+        call(data, password=bytearray())
+
+
 def test_the_security_config_never_holds_the_password():
     config = exarch.SecurityConfig()
 

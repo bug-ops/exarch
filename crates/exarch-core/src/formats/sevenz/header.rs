@@ -483,12 +483,14 @@ fn kib(limit: NonZeroU64) -> usize {
 ///
 /// An encrypted header needs `credentials`: without a password the error is
 /// [`common::encrypted_archive_error`]; the key derivation it costs is
-/// reserved against `max_kdf_work` before the parse, and a parse that fails is
-/// a wrong password or corrupt data. The entry count of such a header cannot be
-/// probed, so it is held to `max_file_count` after the parse, the parse itself
-/// being bounded by the header cap. The valid
-/// 32-byte empty archive, which `sevenz-rust2` reports as `UnexpectedEof`,
-/// opens as an empty header.
+/// reserved against `max_kdf_work` before the parse. The raw record and every
+/// unpack size the encoded header declares are held to the entry cap before
+/// the parse, which then runs under `max_decoder_memory`. The entry count of
+/// such a header cannot be probed, so it is held to `max_file_count` after the
+/// parse. A parse that fails on the memory limit is the quota refusal; any
+/// other failure is a wrong password or corrupt data. The valid 32-byte empty
+/// archive, which `sevenz-rust2` reports as `UnexpectedEof`, opens as an empty
+/// header.
 ///
 /// # Errors
 ///
@@ -598,8 +600,10 @@ fn admit_encrypted_header(
 }
 
 /// The result of a header parse that failed with `error`: a fault the source
-/// raised is I/O, never a verdict on the header. A failed parse of an
-/// encrypted header is a wrong password or corrupt data: 7z has no verifier.
+/// raised is I/O, never a verdict on the header. A memory-limit failure is the
+/// quota refusal, whether or not the header is encrypted. Any other failed
+/// parse of an encrypted header is a wrong password or corrupt data: 7z has no
+/// verifier.
 fn header_failure<R: Read + Seek>(
     error: &sevenz_rust2::Error,
     tap: &SourceTap,
@@ -610,13 +614,13 @@ fn header_failure<R: Read + Seek>(
     if let Some(fault) = tap.fault() {
         return Err(ArchiveError::Io(fault));
     }
+    if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
+        return Err(limit.refusal());
+    }
     if header_encrypted {
         return Err(encryption_refusal(
             EncryptionRefusal::WrongPasswordOrCorrupt,
         ));
-    }
-    if matches!(error, sevenz_rust2::Error::MaxMemLimited { .. }) {
-        return Err(limit.refusal());
     }
     if super::is_password_error(error) {
         return Err(common::encrypted_archive_error());

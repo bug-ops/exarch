@@ -58,8 +58,7 @@ fn read_source(source: &PasswordSource) -> Result<Arc<Password>> {
         PasswordSource::Prompt => prompt()?,
     };
     first_line(&mut bytes);
-    let password = Password::new(bytes).context("the password is not usable")?;
-    Ok(Arc::new(password))
+    Password::shared(bytes).context("the password is not usable")
 }
 
 /// Keeps the first line: the bytes before the first newline, without a
@@ -124,9 +123,22 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
 #[cfg(unix)]
 fn read_fd(fd: std::os::fd::RawFd) -> Result<Vec<u8>> {
     let origin = format!("file descriptor {fd}");
-    let file = File::open(format!("/dev/fd/{fd}"))
-        .with_context(|| format!("failed to open {origin}; is it inherited and open?"))?;
+    let file = File::open(format!("/dev/fd/{fd}")).map_err(|error| {
+        let message = fd_open_failure(fd, error.kind());
+        anyhow::Error::new(error).context(message)
+    })?;
     read_capped(file, &origin)
+}
+
+/// Describes a failed open of `/dev/fd/{fd}`: `PermissionDenied` means the
+/// descriptor exists but cannot be read, so the inheritance hint would mislead.
+#[cfg(unix)]
+fn fd_open_failure(fd: std::os::fd::RawFd, kind: std::io::ErrorKind) -> String {
+    if kind == std::io::ErrorKind::PermissionDenied {
+        format!("file descriptor {fd} is open but not readable (write-only?)")
+    } else {
+        format!("failed to open file descriptor {fd}; is it inherited and open?")
+    }
 }
 
 fn prompt() -> Result<Vec<u8>> {
@@ -166,6 +178,18 @@ mod tests {
 
     fn read_from(source: &PasswordSource) -> Result<Arc<Password>> {
         Ok(read(Some(source))?.unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_fd_open_is_reported_as_not_readable_without_the_inheritance_hint() {
+        let denied = fd_open_failure(7, std::io::ErrorKind::PermissionDenied);
+        assert!(denied.contains("file descriptor 7"));
+        assert!(denied.contains("not readable"));
+        assert!(!denied.contains("inherited"));
+
+        let missing = fd_open_failure(7, std::io::ErrorKind::NotFound);
+        assert!(missing.contains("inherited and open"));
     }
 
     #[test]

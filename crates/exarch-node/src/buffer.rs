@@ -1,5 +1,7 @@
 //! Archives held in memory instead of on disk.
 
+use std::sync::Arc;
+
 use napi::Env;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
@@ -18,6 +20,7 @@ use crate::error::Operation;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise_with;
+use crate::password_of;
 use crate::report::ArchiveManifest;
 use crate::report::ArchiveType;
 use crate::report::VerificationReport;
@@ -32,11 +35,13 @@ fn list_core(
     config: &exarch_core::SecurityConfig,
     format: Option<ArchiveType>,
     options: exarch_core::ListOptions,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<ArchiveManifest> {
     data.run(format, |reader| {
         ArchiveManifest::from_core(
             exarch_core::ListRequest::new(config)
                 .with_options(options)
+                .with_password(password)
                 .list_reader(reader)?,
             config,
             exarch_core::VolumeIdentity::default(),
@@ -49,11 +54,13 @@ fn verify_core(
     config: &exarch_core::SecurityConfig,
     options: exarch_core::VerificationOptions,
     format: Option<ArchiveType>,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<VerificationReport> {
     data.run(format, |reader| {
         Ok(VerificationReport::from(
             exarch_core::VerifyRequest::new(config)
                 .with_options(options)
+                .with_password(password)
                 .verify_reader(reader)?,
         ))
     })
@@ -66,6 +73,7 @@ fn list_with_progress_core(
     options: exarch_core::ListOptions,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<ArchiveManifest> {
     run_with_optional_progress(
         Operation::Listing,
@@ -78,6 +86,7 @@ fn list_with_progress_core(
                     exarch_core::ListRequest::new(config)
                         .with_options(options)
                         .with_progress(progress)
+                        .with_password(password)
                         .list_reader(reader)?,
                     config,
                     exarch_core::VolumeIdentity::default(),
@@ -95,6 +104,7 @@ fn verify_with_progress_core(
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
     dispatch: ProgressDispatch,
+    password: Option<Arc<exarch_core::Password>>,
 ) -> CoreResult<VerificationReport> {
     run_with_optional_progress(
         Operation::Verification,
@@ -107,6 +117,7 @@ fn verify_with_progress_core(
                     exarch_core::VerifyRequest::new(config)
                         .with_options(options)
                         .with_progress(progress)
+                        .with_password(password)
                         .verify_reader(reader)?,
                 ))
             })
@@ -130,6 +141,12 @@ fn verify_with_progress_core(
 ///   is noticed when the job starts, while it waits for JavaScript (an
 ///   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
 ///   archive and, for the `WithProgress` variants, at every progress callback
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
+///   7z (AES-256) archive. A string is refused because it cannot be wiped; an
+///   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
+///   the archive is read. exarch wipes its own copy; wipe yours with
+///   `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -155,15 +172,17 @@ pub fn list_archive_bytes<'env>(
     options: Option<&ListOptions>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
+    let password = password_of(password)?;
     let (data, detach) = AbortableSource::bind(data, signal);
 
     spawn_blocking_promise_with(
         env,
         "archive listing",
-        move || list_core(data, &config_owned, format, options),
+        move || list_core(data, &config_owned, format, options, password),
         Ok,
         move |env| detach.run(env),
     )
@@ -179,6 +198,12 @@ pub fn list_archive_bytes<'env>(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ListOptions`, as in `listArchive`
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
+///   7z (AES-256) archive. A string is refused because it cannot be wiped; an
+///   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
+///   the archive is read. exarch wipes its own copy; wipe yours with
+///   `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -200,13 +225,15 @@ pub fn list_archive_bytes_sync(
     config: Option<&SecurityConfig>,
     options: Option<&ListOptions>,
     format: Option<ArchiveType>,
+    password: Option<Uint8Array>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.map_or_default(ListOptions::to_core);
+    let password = password_of(password)?;
 
     run_sync(env, "archive listing", || {
-        list_core(&*data, config_ref, format, options)
+        list_core(&*data, config_ref, format, options, password)
     })
 }
 
@@ -219,6 +246,12 @@ pub fn list_archive_bytes_sync(
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if omitted
 /// * `signal` - Optional `AbortSignal`, observed as in `listArchiveBytes`
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -241,15 +274,17 @@ pub fn verify_archive_bytes<'env>(
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
+    let password = password_of(password)?;
     let (data, detach) = AbortableSource::bind(data, signal);
 
     spawn_blocking_promise_with(
         env,
         "archive verification",
-        move || verify_core(data, &config_owned, options_owned, format),
+        move || verify_core(data, &config_owned, options_owned, format, password),
         Ok,
         move |env| detach.run(env),
     )
@@ -266,6 +301,12 @@ pub fn verify_archive_bytes<'env>(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -287,14 +328,16 @@ pub fn verify_archive_bytes_sync(
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
+    password: Option<Uint8Array>,
 ) -> Result<VerificationReport> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let password = password_of(password)?;
 
     run_sync(env, "archive verification", || {
-        verify_core(&*data, config_ref, *options_ref, format)
+        verify_core(&*data, config_ref, *options_ref, format, password)
     })
 }
 
@@ -311,6 +354,12 @@ pub fn verify_archive_bytes_sync(
 ///
 /// * `progress` - Optional progress callback
 /// * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -336,6 +385,7 @@ pub fn verify_archive_bytes_sync(
 /// );
 /// ```
 #[napi]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn list_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -345,9 +395,11 @@ pub fn list_archive_bytes_with_progress<'env>(
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options = options.map_or_default(ListOptions::to_core);
+    let password = password_of(password)?;
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
     let (data, detach) = AbortableSource::bind(data, signal);
 
@@ -362,6 +414,7 @@ pub fn list_archive_bytes_with_progress<'env>(
                 options,
                 progress,
                 ProgressDispatch::Awaited,
+                password,
             )
         },
         Ok,
@@ -382,6 +435,12 @@ pub fn list_archive_bytes_with_progress<'env>(
 ///
 /// * `progress` - Optional progress callback
 /// * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -407,6 +466,7 @@ pub fn list_archive_bytes_with_progress<'env>(
 /// );
 /// ```
 #[napi]
+#[allow(clippy::too_many_arguments, reason = "the JS signature is positional")]
 pub fn verify_archive_bytes_with_progress<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -416,9 +476,11 @@ pub fn verify_archive_bytes_with_progress<'env>(
     #[napi(ts_arg_type = "(((err: Error | null, arg: ProgressArgs) => any)) | undefined | null")]
     progress: Option<ProgressCallback>,
     #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
+    password: Option<Uint8Array>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
+    let password = password_of(password)?;
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
     let (data, detach) = AbortableSource::bind(data, signal);
 
@@ -433,6 +495,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
                 format,
                 progress,
                 ProgressDispatch::Awaited,
+                password,
             )
         },
         Ok,
@@ -453,6 +516,12 @@ pub fn verify_archive_bytes_with_progress<'env>(
 /// The arguments of `listArchiveBytesSync`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -481,10 +550,12 @@ pub fn list_archive_bytes_with_progress_sync(
     options: Option<&ListOptions>,
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    password: Option<Uint8Array>,
 ) -> Result<ArchiveManifest> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = options.map_or_default(ListOptions::to_core);
+    let password = password_of(password)?;
 
     run_sync(env, "archive listing with progress", move || {
         list_with_progress_core(
@@ -494,6 +565,7 @@ pub fn list_archive_bytes_with_progress_sync(
             options,
             progress,
             ProgressDispatch::Deferred,
+            password,
         )
     })
 }
@@ -511,6 +583,12 @@ pub fn list_archive_bytes_with_progress_sync(
 /// The arguments of `verifyArchiveBytesSync`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+///   wiped; an empty or over-long (more than 1024 bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -539,11 +617,13 @@ pub fn verify_archive_bytes_with_progress_sync(
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
     progress: Option<ThreadsafeFunction<ProgressArgs>>,
+    password: Option<Uint8Array>,
 ) -> Result<VerificationReport> {
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
+    let password = password_of(password)?;
 
     run_sync(env, "archive verification with progress", move || {
         verify_with_progress_core(
@@ -553,6 +633,7 @@ pub fn verify_archive_bytes_with_progress_sync(
             format,
             progress,
             ProgressDispatch::Deferred,
+            password,
         )
     })
 }

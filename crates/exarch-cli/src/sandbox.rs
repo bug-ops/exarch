@@ -2,13 +2,15 @@
 //!
 //! The sandbox is defence in depth around the validation pipeline: it never
 //! relaxes a check, and it never claims more than the kernel enforced
-//! ([`SandboxStatus`] is typed, not a flag). A run asks [`preflight`] first,
-//! which predicts the status without restricting anything, so `--sandbox
-//! require` fails before the archive is touched. [`Preflight::confine`] then
-//! applies the restriction after the password was read and the destination (or
-//! its staging reservation) exists, and before the interrupt handler spawns its
-//! thread, so every later thread inherits it. A [`Preflight`] is consumed by
-//! `confine`: confining without predicting cannot be written.
+//! ([`SandboxStatus`] is typed, not a flag). A run asks [`preflight_read_only`]
+//! or [`preflight_extract`] first, which predicts the status without
+//! restricting anything, so `--sandbox require` fails before the archive is
+//! touched. `Preflight::confine` then applies the restriction after the
+//! password was read and the destination (or its staging reservation) exists,
+//! and before the interrupt handler spawns its thread, so every later thread
+//! inherits it. A [`Preflight`] is consumed by `confine`, and its type fixes
+//! what it may grant: confining without predicting, or granting a destination
+//! to a read-only command, cannot be written.
 //!
 //! A sandboxed `extract` of a TAR into a missing destination (its parent
 //! existing) reserves a staging directory beside it through core's
@@ -31,7 +33,7 @@
 //! reusing, so the result is the same and only the optimisation is lost.
 //!
 //! Only Linux has a backend (Landlock, ABI v2 or newer). Elsewhere
-//! [`preflight`] reports [`Unavailable::NotLinux`], which `--sandbox require`
+//! the preflight reports [`Unavailable::NotLinux`], which `--sandbox require`
 //! turns into a failure. The status is [`SandboxStatus::Enforced`] only when
 //! the kernel handles every filesystem right of ABI v3, Linux 6.2 (create,
 //! write, remove, rename, link, read-file, execute, truncate); network rights
@@ -47,6 +49,7 @@
 )]
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::num::NonZeroU8;
 use std::path::Path;
 
@@ -182,8 +185,14 @@ pub enum Unavailable {
     AtomicStaging,
     /// The kernel refused the ruleset.
     Kernel {
-        /// The `errno` of the failed call.
-        errno: i32,
+        /// The `errno` of the failed call, when the failure carried one.
+        errno: Option<i32>,
+    },
+    /// A path the ruleset names (the archive or the destination) could not be
+    /// opened, so no rule could be built from it.
+    RulePath {
+        /// The `errno` of the failed open, when the failure carried one.
+        errno: Option<i32>,
     },
 }
 
@@ -194,9 +203,20 @@ impl fmt::Display for Unavailable {
             Self::Disabled => f.write_str("the kernel has Landlock disabled or not built in"),
             Self::AbiTooOld => f.write_str("the kernel Landlock ABI is older than v2"),
             Self::AtomicStaging => f.write_str("--atomic needs rights outside the destination"),
-            Self::Kernel { errno } => write!(f, "the kernel refused the ruleset (errno {errno})"),
+            Self::Kernel { errno } => {
+                f.write_str("the kernel refused the ruleset")?;
+                write_errno(f, *errno)
+            }
+            Self::RulePath { errno } => {
+                f.write_str("a path the ruleset names could not be opened")?;
+                write_errno(f, *errno)
+            }
         }
     }
+}
+
+fn write_errno(f: &mut fmt::Formatter<'_>, errno: Option<i32>) -> fmt::Result {
+    errno.map_or(Ok(()), |errno| write!(f, " (errno {errno})"))
 }
 
 /// The typed outcome of [`Preflight::confine`].
@@ -242,43 +262,6 @@ impl fmt::Display for SandboxStatus {
     }
 }
 
-/// What the confined process may touch.
-#[derive(Clone, Copy, Debug)]
-pub struct Grant<'a> {
-    /// The archive, readable as a file.
-    pub archive: &'a Path,
-    /// The command the grant is for.
-    pub scope: Scope<'a>,
-}
-
-/// What a run writes, which fixes whether a grant can cover it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Writes {
-    /// Nothing (`list`, `verify`).
-    Nothing,
-    /// The destination subtree, directly or through a reserved stage.
-    Destination,
-    /// A staging directory that core resolves itself (`--atomic`), which
-    /// needs rights outside the destination and so cannot be confined.
-    CoreStaged,
-}
-
-/// The command a [`Grant`] is for.
-#[derive(Clone, Copy, Debug)]
-pub enum Scope<'a> {
-    /// `extract` straight into an existing destination: its subtree is
-    /// writable.
-    ExtractInPlace {
-        /// The destination directory.
-        destination: &'a Path,
-    },
-    /// `extract` through a reserved stage: the stage is writable, and its
-    /// parent may create and remove directories (the publish rename).
-    ExtractReserved(&'a StagingReservation),
-    /// `list` and `verify`: only the archive is read.
-    ReadOnly,
-}
-
 /// `--sandbox require` could not be met.
 #[derive(Debug)]
 pub struct NotEnforced(pub SandboxStatus);
@@ -296,7 +279,7 @@ impl fmt::Display for NotEnforced {
 
 impl std::error::Error for NotEnforced {}
 
-/// What [`preflight`] predicted the confinement will do.
+/// What the preflight predicted the confinement will do.
 #[derive(Clone, Copy, Debug)]
 enum Plan {
     /// Restrict the process with this kernel ABI.
@@ -306,36 +289,150 @@ enum Plan {
     Skip(Unavailable),
 }
 
-/// A confinement that was predicted and not yet applied; consumed by
-/// [`Preflight::confine`].
-#[derive(Debug)]
-#[must_use = "a preflight does nothing until it confines the process"]
-pub struct Preflight {
-    mode: SandboxMode,
-    plan: Plan,
+/// The paths a confinement grants besides the archive.
+#[derive(Clone, Copy, Debug)]
+enum Rules<'a> {
+    ReadOnly,
+    InPlace(&'a Path),
+    Reserved(&'a StagingReservation),
 }
 
-/// Predicts the confinement `mode` asks for, without restricting anything, or
-/// returns `None` for [`SandboxMode::Off`].
+/// Marks a [`Preflight`] of a command that only reads the archive.
+#[derive(Debug)]
+pub struct ReadOnly;
+
+/// Marks a [`Preflight`] of a command that writes a destination.
+#[derive(Debug)]
+pub struct Destination;
+
+/// A confinement that was predicted and not yet applied; consumed by
+/// `confine`. `S` fixes which grants it can make.
+#[derive(Debug)]
+#[must_use = "a preflight does nothing until it confines the process"]
+pub struct Preflight<S> {
+    mode: SandboxMode,
+    plan: Plan,
+    kind: PhantomData<fn() -> S>,
+}
+
+/// Where a confined `extract` may write.
+#[derive(Clone, Copy, Debug)]
+pub enum DestinationScope<'a> {
+    /// `extract` straight into an existing destination: its subtree is
+    /// writable.
+    InPlace(&'a Path),
+    /// `extract` through a reserved stage: the stage is writable, and its
+    /// parent may create and remove directories (the publish rename).
+    Reserved(&'a StagingReservation),
+}
+
+/// Who stages an `extract`, which fixes whether a grant can cover it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractStaging {
+    /// The destination subtree, directly or through a reserved stage.
+    Destination,
+    /// A staging directory that core resolves itself (`--atomic`), which
+    /// needs rights outside the destination and so cannot be confined.
+    Core,
+}
+
+/// The predicted confinement of an `extract`.
+#[derive(Debug)]
+#[must_use = "a preflight does nothing until it confines the process"]
+pub enum ExtractPreflight {
+    /// The process can be confined to the destination.
+    Destination(Preflight<Destination>),
+    /// Core stages the output itself, so nothing is confined.
+    CoreStaged(Unconfined),
+}
+
+/// A run that cannot be confined, with the reason.
+#[derive(Debug)]
+#[must_use = "the status must be reported"]
+pub struct Unconfined {
+    mode: SandboxMode,
+    reason: Unavailable,
+}
+
+impl Unconfined {
+    /// The status of the unconfined run.
+    ///
+    /// # Errors
+    ///
+    /// [`NotEnforced`] under [`SandboxMode::Require`].
+    pub fn status(self) -> Result<SandboxStatus, NotEnforced> {
+        judge(
+            self.mode,
+            SandboxStatus::Unavailable {
+                reason: self.reason,
+            },
+        )
+    }
+}
+
+/// Predicts the confinement `mode` asks for of a command that only reads the
+/// archive, without restricting anything, or returns `None` for
+/// [`SandboxMode::Off`].
 ///
 /// # Errors
 ///
 /// [`NotEnforced`] under [`SandboxMode::Require`] when the predicted status is
 /// anything but [`SandboxStatus::Enforced`]: it fails before the archive is
 /// opened.
-pub fn preflight(mode: SandboxMode, writes: Writes) -> Result<Option<Preflight>, NotEnforced> {
+pub fn preflight_read_only(mode: SandboxMode) -> Result<Option<Preflight<ReadOnly>>, NotEnforced> {
+    Preflight::predict(mode)
+}
+
+/// Predicts the confinement `mode` asks for of an `extract` with the given
+/// staging, without restricting anything, or returns `None` for
+/// [`SandboxMode::Off`].
+///
+/// # Errors
+///
+/// [`NotEnforced`] under [`SandboxMode::Require`] when the predicted status is
+/// anything but [`SandboxStatus::Enforced`]: it fails before the archive is
+/// opened.
+pub fn preflight_extract(
+    mode: SandboxMode,
+    staging: ExtractStaging,
+) -> Result<Option<ExtractPreflight>, NotEnforced> {
     if mode == SandboxMode::Off {
         return Ok(None);
     }
-    let preflight = Preflight {
-        mode,
-        plan: platform::plan(writes),
-    };
-    judge(mode, preflight.predicted())?;
-    Ok(Some(preflight))
+    match staging {
+        ExtractStaging::Destination => {
+            Preflight::predict(mode).map(|p| p.map(ExtractPreflight::Destination))
+        }
+        ExtractStaging::Core => {
+            let unconfined = Unconfined {
+                mode,
+                reason: platform::core_staged_reason(),
+            };
+            judge(
+                mode,
+                SandboxStatus::Unavailable {
+                    reason: unconfined.reason,
+                },
+            )?;
+            Ok(Some(ExtractPreflight::CoreStaged(unconfined)))
+        }
+    }
 }
 
-impl Preflight {
+impl<S> Preflight<S> {
+    fn predict(mode: SandboxMode) -> Result<Option<Self>, NotEnforced> {
+        if mode == SandboxMode::Off {
+            return Ok(None);
+        }
+        let preflight = Self {
+            mode,
+            plan: platform::plan(),
+            kind: PhantomData,
+        };
+        judge(mode, preflight.predicted())?;
+        Ok(Some(preflight))
+    }
+
     fn predicted(&self) -> SandboxStatus {
         match self.plan {
             Plan::Skip(reason) => SandboxStatus::Unavailable { reason },
@@ -344,29 +441,57 @@ impl Preflight {
         }
     }
 
-    /// Applies the confinement `grant` describes and returns what the kernel
-    /// enforced.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_variables, reason = "only the Landlock backend reads the rules")
+    )]
+    fn apply(self, archive: &Path, rules: Rules<'_>) -> Result<SandboxStatus, NotEnforced> {
+        let status = match self.plan {
+            Plan::Skip(reason) => SandboxStatus::Unavailable { reason },
+            #[cfg(target_os = "linux")]
+            Plan::Restrict(abi) => platform::apply(archive, rules, abi),
+        };
+        judge(self.mode, status)
+    }
+}
+
+impl Preflight<ReadOnly> {
+    /// Applies the confinement that lets the process read `archive` only and
+    /// returns what the kernel enforced.
     ///
-    /// Call it after every file the run needs besides the grant was opened (the
-    /// password source) and before any thread is spawned, so later threads
-    /// inherit the restriction.
+    /// Call it after every file the run needs besides the archive was opened
+    /// (the password source) and before any thread is spawned, so later
+    /// threads inherit the restriction.
     ///
     /// # Errors
     ///
     /// [`NotEnforced`] under [`SandboxMode::Require`] when the kernel enforced
     /// anything but the predicted status (a refused ruleset, or a prediction
     /// miss).
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(unused_variables, reason = "only the Landlock backend reads the grant")
-    )]
-    pub fn confine(self, grant: &Grant<'_>) -> Result<SandboxStatus, NotEnforced> {
-        let status = match self.plan {
-            Plan::Skip(reason) => SandboxStatus::Unavailable { reason },
-            #[cfg(target_os = "linux")]
-            Plan::Restrict(abi) => platform::apply(grant, abi),
+    pub fn confine(self, archive: &Path) -> Result<SandboxStatus, NotEnforced> {
+        self.apply(archive, Rules::ReadOnly)
+    }
+}
+
+impl Preflight<Destination> {
+    /// Applies the confinement that lets the process read `archive` and write
+    /// `scope`, and returns what the kernel enforced.
+    ///
+    /// Call it under the same conditions as the read-only form.
+    ///
+    /// # Errors
+    ///
+    /// As the read-only form.
+    pub fn confine(
+        self,
+        archive: &Path,
+        scope: DestinationScope<'_>,
+    ) -> Result<SandboxStatus, NotEnforced> {
+        let rules = match scope {
+            DestinationScope::InPlace(destination) => Rules::InPlace(destination),
+            DestinationScope::Reserved(reservation) => Rules::Reserved(reservation),
         };
-        judge(self.mode, status)
+        self.apply(archive, rules)
     }
 }
 
@@ -375,38 +500,28 @@ impl Preflight {
 ///
 /// # Errors
 ///
-/// [`NotEnforced`] under [`SandboxMode::Require`], as for [`preflight`] and
-/// [`Preflight::confine`].
+/// [`NotEnforced`] under [`SandboxMode::Require`], as for
+/// [`preflight_read_only`] and `Preflight::confine`.
 pub fn confine_read_only(
     mode: SandboxMode,
     archive: &Path,
     formatter: &mut dyn OutputFormatter,
 ) -> Result<(), NotEnforced> {
-    let preflight = preflight(mode, Writes::Nothing)?;
-    report(
-        preflight,
-        &Grant {
-            archive,
-            scope: Scope::ReadOnly,
-        },
-        formatter,
-    )
+    let status = preflight_read_only(mode)?.map(|preflight| preflight.confine(archive));
+    report(status, formatter)
 }
 
-/// Confines the process with `preflight`, when there is one, and hands the
-/// outcome to `formatter`.
+/// Hands the outcome of a confinement, when there was one, to `formatter`.
 ///
 /// # Errors
 ///
-/// [`NotEnforced`] under [`SandboxMode::Require`], as for
-/// [`Preflight::confine`].
+/// The [`NotEnforced`] the confinement produced.
 pub fn report(
-    preflight: Option<Preflight>,
-    grant: &Grant<'_>,
+    status: Option<Result<SandboxStatus, NotEnforced>>,
     formatter: &mut dyn OutputFormatter,
 ) -> Result<(), NotEnforced> {
-    if let Some(preflight) = preflight {
-        formatter.format_sandbox(&preflight.confine(grant)?);
+    if let Some(status) = status {
+        formatter.format_sandbox(&status?);
         #[cfg(all(target_os = "linux", feature = "test-hooks", debug_assertions))]
         probe::create_outside();
     }
@@ -447,16 +562,20 @@ fn judge(mode: SandboxMode, status: SandboxStatus) -> Result<SandboxStatus, NotE
 mod platform {
     use super::Plan;
     use super::Unavailable;
-    use super::Writes;
 
-    pub(super) const fn plan(_writes: Writes) -> Plan {
+    pub(super) const fn plan() -> Plan {
         Plan::Skip(Unavailable::NotLinux)
+    }
+
+    pub(super) const fn core_staged_reason() -> Unavailable {
+        Unavailable::NotLinux
     }
 }
 
 #[cfg(target_os = "linux")]
 mod platform {
     use std::num::NonZeroU8;
+    use std::path::Path;
 
     use landlock::ABI;
     use landlock::Access;
@@ -478,13 +597,11 @@ mod platform {
 
     use super::Abi;
     use super::AccessRight;
-    use super::Grant;
     use super::Plan;
+    use super::Rules;
     use super::SandboxStatus;
-    use super::Scope;
     use super::Unavailable;
     use super::UnhandledSet;
-    use super::Writes;
 
     /// The Landlock ABI a restriction is built for.
     pub(super) type KernelAbi = ABI;
@@ -526,14 +643,21 @@ mod platform {
     }
 
     impl Failure {
-        fn errno(&self) -> i32 {
+        fn errno(&self) -> Option<i32> {
             let first: &(dyn std::error::Error + 'static) = match self {
                 Self::Ruleset(error) => error,
                 Self::Path(error) => error,
             };
             std::iter::successors(Some(first), |error| error.source())
                 .find_map(|error| error.downcast_ref::<std::io::Error>()?.raw_os_error())
-                .unwrap_or(libc::EINVAL)
+        }
+
+        fn unavailable(&self) -> Unavailable {
+            let errno = self.errno();
+            match self {
+                Self::Ruleset(_) => Unavailable::Kernel { errno },
+                Self::Path(_) => Unavailable::RulePath { errno },
+            }
         }
     }
 
@@ -553,17 +677,17 @@ mod platform {
         })
     }
 
-    /// What the kernel and the write mode allow, found without restricting
-    /// anything.
-    pub(super) fn plan(writes: Writes) -> Plan {
-        if writes == Writes::CoreStaged {
-            return Plan::Skip(Unavailable::AtomicStaging);
-        }
+    /// What the kernel allows, found without restricting anything.
+    pub(super) fn plan() -> Plan {
         match kernel_abi() {
             None => Plan::Skip(Unavailable::Disabled),
             Some(abi) if abi < FLOOR => Plan::Skip(Unavailable::AbiTooOld),
             Some(abi) => Plan::Restrict(abi),
         }
+    }
+
+    pub(super) const fn core_staged_reason() -> Unavailable {
+        Unavailable::AtomicStaging
     }
 
     /// The status a restriction with `abi` reports when the kernel enforces
@@ -576,12 +700,8 @@ mod platform {
         enforced_or_partial(abi, super::Abi(version), true)
     }
 
-    pub(super) fn apply(grant: &Grant<'_>, abi: ABI) -> SandboxStatus {
-        restrict(grant, abi).unwrap_or_else(|failure| {
-            unavailable(Unavailable::Kernel {
-                errno: failure.errno(),
-            })
-        })
+    pub(super) fn apply(archive: &Path, rules: Rules<'_>, abi: ABI) -> SandboxStatus {
+        restrict(archive, rules, abi).unwrap_or_else(|failure| unavailable(failure.unavailable()))
     }
 
     /// Every right of `abi` except those a destination subtree must never
@@ -595,7 +715,7 @@ mod platform {
         AccessFs::from_all(abi) & !WITHHELD
     }
 
-    fn restrict(grant: &Grant<'_>, abi: ABI) -> Result<SandboxStatus, Failure> {
+    fn restrict(archive: &Path, rules: Rules<'_>, abi: ABI) -> Result<SandboxStatus, Failure> {
         let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(abi))?;
         let network = AccessNet::from_all(abi);
         if !network.is_empty() {
@@ -605,18 +725,17 @@ mod platform {
         if !scopes.is_empty() {
             ruleset = ruleset.scope(scopes)?;
         }
-        let mut created = ruleset.create()?.add_rule(PathBeneath::new(
-            PathFd::new(grant.archive)?,
-            AccessFs::ReadFile,
-        ))?;
-        match grant.scope {
-            Scope::ExtractInPlace { destination } => {
+        let mut created = ruleset
+            .create()?
+            .add_rule(PathBeneath::new(PathFd::new(archive)?, AccessFs::ReadFile))?;
+        match rules {
+            Rules::InPlace(destination) => {
                 created = created.add_rule(PathBeneath::new(
                     PathFd::new(destination)?,
                     destination_rights(abi),
                 ))?;
             }
-            Scope::ExtractReserved(reservation) => {
+            Rules::Reserved(reservation) => {
                 created = created
                     .add_rule(PathBeneath::new(
                         reservation.staging_fd(),
@@ -627,7 +746,7 @@ mod platform {
                         make_dir_remove_dir(),
                     ))?;
             }
-            Scope::ReadOnly => {}
+            Rules::ReadOnly => {}
         }
         let restriction = created.all_threads(true)?.restrict_self()?;
         Ok(status_of(abi, &restriction))
@@ -719,7 +838,11 @@ mod tests {
 
     #[test]
     fn off_confines_nothing_and_reports_nothing() {
-        assert_matches!(preflight(SandboxMode::Off, Writes::Nothing), Ok(None));
+        assert_matches!(preflight_read_only(SandboxMode::Off), Ok(None));
+        assert_matches!(
+            preflight_extract(SandboxMode::Off, ExtractStaging::Core),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -731,10 +854,51 @@ mod tests {
 
     #[test]
     fn require_fails_in_the_preflight_for_a_run_core_stages() {
-        assert!(preflight(SandboxMode::Require, Writes::CoreStaged).is_err());
+        assert!(preflight_extract(SandboxMode::Require, ExtractStaging::Core).is_err());
         assert_matches!(
-            preflight(SandboxMode::BestEffort, Writes::CoreStaged),
-            Ok(Some(_))
+            preflight_extract(SandboxMode::BestEffort, ExtractStaging::Core),
+            Ok(Some(ExtractPreflight::CoreStaged(_)))
+        );
+    }
+
+    #[test]
+    fn the_core_staged_reason_is_the_platforms_own() {
+        let Ok(Some(ExtractPreflight::CoreStaged(unconfined))) =
+            preflight_extract(SandboxMode::BestEffort, ExtractStaging::Core)
+        else {
+            panic!("best-effort core staging is always reported");
+        };
+        let expected = if cfg!(target_os = "linux") {
+            Unavailable::AtomicStaging
+        } else {
+            Unavailable::NotLinux
+        };
+
+        assert_eq!(
+            unconfined.status().unwrap(),
+            SandboxStatus::Unavailable { reason: expected }
+        );
+    }
+
+    #[test]
+    fn a_failed_rule_path_and_a_refused_ruleset_serialize_apart_with_an_optional_errno() {
+        let json = |reason| serde_json::to_value(reason).unwrap();
+
+        assert_eq!(
+            json(Unavailable::RulePath { errno: Some(2) }),
+            serde_json::json!({"rule_path": {"errno": 2}})
+        );
+        assert_eq!(
+            json(Unavailable::Kernel { errno: None }),
+            serde_json::json!({"kernel": {"errno": null}})
+        );
+        assert_eq!(
+            Unavailable::RulePath { errno: Some(2) }.to_string(),
+            "a path the ruleset names could not be opened (errno 2)"
+        );
+        assert_eq!(
+            Unavailable::Kernel { errno: None }.to_string(),
+            "the kernel refused the ruleset"
         );
     }
 
@@ -772,19 +936,15 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn off_linux_every_mode_reports_not_linux() {
-        let grant = Grant {
-            archive: Path::new("a.tar"),
-            scope: Scope::ReadOnly,
-        };
-        let best_effort = preflight(SandboxMode::BestEffort, Writes::Nothing)
+        let best_effort = preflight_read_only(SandboxMode::BestEffort)
             .unwrap()
             .unwrap();
         assert_matches!(
-            best_effort.confine(&grant),
+            best_effort.confine(Path::new("a.tar")),
             Ok(SandboxStatus::Unavailable {
                 reason: Unavailable::NotLinux
             })
         );
-        assert!(preflight(SandboxMode::Require, Writes::Nothing).is_err());
+        assert!(preflight_read_only(SandboxMode::Require).is_err());
     }
 }

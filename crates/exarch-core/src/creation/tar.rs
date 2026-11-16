@@ -10,7 +10,8 @@ use crate::Skip;
 #[cfg(not(unix))]
 use crate::SkipKind;
 use crate::creation::config::CreationConfig;
-use crate::creation::open::open_entry;
+use crate::creation::open::VerifiedSource;
+use crate::creation::open::open_source;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
@@ -79,9 +80,10 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     for entry in &entries {
         let mut guard = tracker.begin(&entry.archive_path)?;
         match &entry.entry_type {
-            EntryType::File => add_file_to_tar_with_progress_impl(
+            EntryType::Content { walked, links } => add_file_to_tar_with_progress_impl(
                 &mut builder,
                 entry,
+                open_source(&entry.path, *walked, *links)?,
                 config,
                 &mut report,
                 guard.progress_mut(),
@@ -94,17 +96,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                 &mut report,
             )?,
             EntryType::Symlink { target } => {
-                if config.follow_symlinks {
-                    add_file_to_tar_with_progress_impl(
-                        &mut builder,
-                        entry,
-                        config,
-                        &mut report,
-                        guard.progress_mut(),
-                    )?;
-                } else {
-                    add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
-                }
+                add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
             }
         }
         guard.complete();
@@ -162,12 +154,12 @@ fn add_directory_to_tar<W: Write>(
 fn add_file_to_tar_with_progress_impl<W: Write>(
     builder: &mut Builder<W>,
     entry: &FilteredEntry,
+    source: VerifiedSource,
     config: &CreationConfig,
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
     let file_path = entry.path.as_path();
-    let source = open_entry(entry, config)?;
     let size = source.size();
     let (metadata, file) = source.into_exact();
 

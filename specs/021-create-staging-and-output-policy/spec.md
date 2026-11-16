@@ -10,7 +10,7 @@ tags:
   - security
   - rust
 created: 2026-11-04
-updated: 2026-11-15
+updated: 2026-11-16
 status: implemented
 related:
   - "[[constitution]]"
@@ -215,6 +215,7 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-047 | `CreationConfig.permissions` is a `PermissionPolicy`; ZIP directory entries carry the source directory mode as TAR does ([[008-tar-empty-directory-preservation/spec]]); an invalid level is `InvalidCompressionLevel { level: RequestedLevel }` ([[003-config-api/spec]] FR-064) | must |
 | FR-053 | THE walker SHALL give every directory entry the metadata it used for the decision (walkdir's `DirEntry::metadata()`: `stat` of the object a followed link leads to under `follow_symlinks`, `lstat` otherwise), carried in the entry type as `EntryType::Directory { metadata: Box<Metadata> }` (boxed to keep the entry small; `EntryType` is no longer `PartialEq`), and TAR and ZIP creation SHALL take a directory entry's mode, owner and modification time from it and SHALL NOT call `std::fs::metadata` on the directory path at write time (`add_directory_to_tar`, the ZIP directory arm), so the recorded values describe the object the walk saw and a path that changes in between cannot change them, and one `stat` per directory is saved when permissions are preserved (live test neutral, cost of one boxed `Metadata` clone per directory); pinned by a walker test that changes the mode after the walk and by a TAR round-trip of a followed `0700` directory reached through a symlink (#1214) | must |
 | FR-054 | WHEN `CreationConfig` sets `Parallelism::Threads(n)`, THE SYSTEM SHALL prepare ZIP entries concurrently under [[027-zip-parallel-compression/spec]]: sources opened and verified on the main thread in walk order (FR-048, FR-049), workers never re-open by path, exact-length copy and `SourceChanged` unchanged (FR-051, FR-052), output through the staged path of FR-005 unchanged, output bytes equal to `Sequential`, and a worker panic surfaces on the calling thread; every regular file of at most 8 MiB takes the prepared-entry path in both modes, the walk is sorted by file name inside each directory for every format, and a ZIP entry stores the source modification time, so the output depends on the tree and the configuration only (breaking change of the sequential bytes relative to 0.10) (#1027) | must |
+| FR-055 | THE walker SHALL resolve the link policy once, at walk time: `EntryType` is `Content { walked, links }`, `Directory` or `Symlink`, a followed top-level link is `Content` and a kept link is `Symlink`, and the TAR and ZIP writers SHALL NOT read `follow_symlinks` again (#1255) | must |
 
 ## 4. Non-Functional Requirements
 

@@ -672,6 +672,8 @@ pub fn prepare(output: &Path, run: Run, mode: OutputMode) -> PendingInterrupt {
         Ok(registered) => handlers = registered,
         Err(error) => warn_handler(&error),
     });
+    #[cfg(all(unix, feature = "test-hooks", debug_assertions))]
+    stall_hook::stall_after_prepare();
     PendingInterrupt {
         guard,
         unread: Unread(handlers),
@@ -740,6 +742,7 @@ mod stall_hook {
     use std::sync::OnceLock;
 
     const VARIABLE: &str = "EXARCH_TEST_STALL_AT_ENTRY";
+    const AFTER_PREPARE: &str = "EXARCH_TEST_STALL_AFTER_PREPARE";
 
     fn stall_entry() -> Option<usize> {
         static ENTRY: OnceLock<Option<usize>> = OnceLock::new();
@@ -752,13 +755,24 @@ mod stall_hook {
         if stall_entry() != Some(position.current.get()) {
             return;
         }
-        let mut byte = [0_u8; 1];
-        let mut stdin = std::io::stdin().lock();
-        let _ = writeln!(
-            std::io::stderr(),
+        block_on_stdin(&format!(
             "exarch-test: stalled at entry {}",
             position.current.get()
-        );
+        ));
+    }
+
+    /// Blocks at the end of `prepare` when `EXARCH_TEST_STALL_AFTER_PREPARE`
+    /// is `1`: handlers registered, reader not started.
+    pub(super) fn stall_after_prepare() {
+        if std::env::var(AFTER_PREPARE).as_deref() == Ok("1") {
+            block_on_stdin("exarch-test: stalled after prepare");
+        }
+    }
+
+    fn block_on_stdin(ready_line: &str) {
+        let mut byte = [0_u8; 1];
+        let mut stdin = std::io::stdin().lock();
+        let _ = writeln!(std::io::stderr(), "{ready_line}");
         loop {
             match stdin.read(&mut byte) {
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}

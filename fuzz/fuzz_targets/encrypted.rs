@@ -59,10 +59,12 @@ fn read_all(data: &[u8], archive_type: ArchiveType) {
         let mut sink = MemorySink::new(MemoryLimit::from_config(config));
         let extract = SinkExtractRequest::new(config);
         if with_password {
-            let _ = list.with_password(password()).list_reader(reader());
-            let _ = verify.with_password(password()).verify_reader(reader());
+            let _ = list.with_password(Some(password())).list_reader(reader());
+            let _ = verify
+                .with_password(Some(password()))
+                .verify_reader(reader());
             let _ = extract
-                .with_password(password())
+                .with_password(Some(password()))
                 .extract(reader(), &mut sink);
         } else {
             let _ = list.list_reader(reader());
@@ -77,7 +79,7 @@ fn assert_only_authentic_content(bytes: Vec<u8>) {
     let reader = ArchiveReader::of_type(Cursor::new(bytes), ArchiveType::Zip);
     let mut sink = MemorySink::new(MemoryLimit::from_config(config));
     let _ = SinkExtractRequest::new(config)
-        .with_password(password())
+        .with_password(Some(password()))
         .extract(reader, &mut sink);
     for (path, entry) in sink.iter() {
         if let MemoryEntry::File { data, .. } = entry {

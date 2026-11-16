@@ -9,7 +9,7 @@ tags:
   - performance
   - creation
 created: 2026-11-08
-updated: 2026-11-15
+updated: 2026-11-16
 status: implemented
 related:
   - "[[constitution]]"
@@ -252,7 +252,7 @@ None open. Results of the benchmark gates are recorded in `.local/testing/benchm
 
 | Requirement | Specified | Implemented |
 |-------------|-----------|-------------|
-| FR-005, NFR-DET-001 | same order and headers as today | the walk is now sorted by file name inside each directory for every format, and ZIP entries store the source mtime (UTC, DOS range, epoch fallback) instead of "now at start"; both are needed for byte identity and are part of the CHANGELOG breaking note |
+| FR-005, NFR-DET-001 | same order and headers as today | the walk is now sorted by file name inside each directory for every format, and ZIP entries store the source mtime (UTC, DOS range, epoch fallback; a source mtime after the DOS range is clamped to its last representable second, 2107-12-31 23:59:58, not to the epoch fallback, #1263) instead of "now at start"; both are needed for byte identity and are part of the CHANGELOG breaking note |
 | FR-007 | progress per entry | a prepared entry reports one `on_bytes_written` call with the entry size (per-entry granularity) |
 | FR-006 | `SourceChanged` in both modes | for a prepared entry it is raised by the exact-length reader inside the worker job; the source tests for the grow and shrink cases use files above 8 MiB (stream route), and the prepared route is covered by unit tests |
 | NFR-PERF-001 | gates on an idle host | measured on a loaded host (see the status note); a rerun on an idle host is recommended before release |

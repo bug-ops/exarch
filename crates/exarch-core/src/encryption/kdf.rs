@@ -120,15 +120,6 @@ impl From<KeyRefusal> for ArchiveError {
     }
 }
 
-/// Why a block's AES coder cannot be admitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KdfRefusal {
-    /// The properties cannot be parsed.
-    Malformed,
-    /// A refusal the caller reports as the typed encryption error.
-    Refused(EncryptionRefusal),
-}
-
 /// The derivation runs of one operation against its `max_kdf_work` budget.
 #[derive(Debug)]
 pub(crate) struct KdfRuns {
@@ -166,12 +157,7 @@ impl KdfRuns {
             .map_err(KeyRefusal::Unusable)?
             .ok_or(KeyRefusal::PasswordRequired)?;
         let admitted = match source {
-            KeySource::Block(properties) => {
-                self.admit(properties).map_err(|refusal| match refusal {
-                    KdfRefusal::Malformed => KeyRefusal::Malformed,
-                    KdfRefusal::Refused(reason) => KeyRefusal::Refused(reason),
-                })
-            }
+            KeySource::Block(properties) => self.admit(properties),
             KeySource::Header(KeyMode::RawKey) => Err(KeyRefusal::Refused(
                 EncryptionRefusal::WeakEncryptionRefused,
             )),
@@ -194,25 +180,24 @@ impl KdfRuns {
     ///
     /// # Errors
     ///
-    /// [`KdfRefusal::Malformed`] for properties that do not parse,
+    /// [`KeyRefusal::Malformed`] for properties that do not parse,
     /// `WeakEncryptionRefused` for raw-key mode and `KdfCostExceeded` for a
     /// power above the cap or a total above the budget.
-    pub(crate) fn admit(&mut self, properties: &[u8]) -> Result<(), KdfRefusal> {
-        let params = AesParams::parse(properties).ok_or(KdfRefusal::Malformed)?;
+    pub(crate) fn admit(&mut self, properties: &[u8]) -> Result<(), KeyRefusal> {
+        let params = AesParams::parse(properties).ok_or(KeyRefusal::Malformed)?;
         if KeyMode::of_power(params.power) == KeyMode::RawKey {
-            return Err(KdfRefusal::Refused(
+            return Err(KeyRefusal::Refused(
                 EncryptionRefusal::WeakEncryptionRefused,
             ));
         }
         if params.power > MAX_POWER {
-            return Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded));
+            return Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded));
         }
         if self.last.as_ref() != Some(&params) {
             self.spent = self.spent.saturating_add(1u64 << params.power);
             self.last = Some(params);
         }
         self.within_budget()
-            .map_err(|_| KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
     }
 }
 
@@ -254,7 +239,7 @@ mod tests {
         }
         assert_eq!(
             runs.admit(&props(19, &[round_after(3)])),
-            Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
+            Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
         );
     }
 
@@ -263,7 +248,7 @@ mod tests {
         let mut runs = KdfRuns::new(budget(HEADER_RESERVE), true);
         assert_eq!(
             runs.admit(&[19, 0]),
-            Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
+            Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
         );
     }
 
@@ -272,14 +257,14 @@ mod tests {
         let mut runs = KdfRuns::new(budget(u64::MAX), false);
         assert_eq!(
             runs.admit(&[0x3F, 0]),
-            Err(KdfRefusal::Refused(
+            Err(KeyRefusal::Refused(
                 EncryptionRefusal::WeakEncryptionRefused
             ))
         );
         for power in 25..=0x3E {
             assert_eq!(
                 runs.admit(&[power, 0]),
-                Err(KdfRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
+                Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
             );
         }
     }
@@ -294,7 +279,7 @@ mod tests {
     #[test]
     fn unparseable_properties_are_malformed() {
         let mut runs = KdfRuns::new(budget(u64::MAX), false);
-        assert_eq!(runs.admit(&[]), Err(KdfRefusal::Malformed));
-        assert_eq!(runs.admit(&[0x80, 0x30]), Err(KdfRefusal::Malformed));
+        assert_eq!(runs.admit(&[]), Err(KeyRefusal::Malformed));
+        assert_eq!(runs.admit(&[0x80, 0x30]), Err(KeyRefusal::Malformed));
     }
 }

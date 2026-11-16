@@ -2512,6 +2512,12 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  *   is noticed when the job starts, while it waits for JavaScript (an
  *   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
  *   archive and, for the `WithProgress` variants, at every progress callback
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
+ *   7z (AES-256) archive. A string is refused because it cannot be wiped; an
+ *   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
+ *   the archive is read. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`
  *
  * # Returns
  *
@@ -2530,7 +2536,7 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
  * ```
  */
-export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (sync).
@@ -2543,6 +2549,12 @@ export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8A
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ListOptions`, as in `listArchive`
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
+ *   7z (AES-256) archive. A string is refused because it cannot be wiped; an
+ *   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
+ *   the archive is read. exarch wipes its own copy; wipe yours with
+ *   `buf.fill(0)`
  *
  * # Returns
  *
@@ -2558,7 +2570,7 @@ export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8A
  * const manifest = listArchiveBytesSync(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null): ArchiveManifest
+export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, password?: Uint8Array | undefined | null): ArchiveManifest
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -2574,6 +2586,12 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  *
  * * `progress` - Optional progress callback
  * * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2599,7 +2617,7 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -2615,6 +2633,12 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * The arguments of `listArchiveBytesSync`, then:
  *
  * * `progress` - Optional progress callback
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2636,7 +2660,7 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): ArchiveManifest
+export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ListOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Uint8Array | undefined | null): ArchiveManifest
 
 /**
  * List archive contents without extracting (sync).
@@ -3302,6 +3326,12 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * * `options` - Optional `VerificationOptions`
  * * `format` - The archive format; detected from the leading bytes if omitted
  * * `signal` - Optional `AbortSignal`, observed as in `listArchiveBytes`
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3317,7 +3347,7 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (sync).
@@ -3331,6 +3361,12 @@ export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `VerificationOptions`
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3346,7 +3382,7 @@ export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint
  * const report = verifyArchiveBytesSync(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function verifyArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): VerificationReport
+export declare function verifyArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, password?: Uint8Array | undefined | null): VerificationReport
 
 /**
  * Verify the security of an archive held in memory with a progress callback
@@ -3362,6 +3398,12 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  *
  * * `progress` - Optional progress callback
  * * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3387,7 +3429,7 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null, password?: Uint8Array | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory with a progress callback
@@ -3403,6 +3445,12 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * The arguments of `verifyArchiveBytesSync`, then:
  *
  * * `progress` - Optional progress callback
+ * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
+ *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
+ *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
+ *   wiped; an empty or over-long (more than 1024 bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3424,7 +3472,7 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null): VerificationReport
+export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: ProgressArgs) => any)) | undefined | null, password?: Uint8Array | undefined | null): VerificationReport
 
 /**
  * Verify archive security (sync).

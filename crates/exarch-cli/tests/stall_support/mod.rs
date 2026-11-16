@@ -43,12 +43,28 @@ impl Drop for Stalled {
     }
 }
 
+pub const READY_AFTER_PREPARE: &str = "exarch-test: stalled after prepare";
+
 pub fn spawn(args: &[&str], archive: &Path, out: &Path, entry: usize) -> Stalled {
+    launch(
+        args,
+        archive,
+        out,
+        ("EXARCH_TEST_STALL_AT_ENTRY", &entry.to_string()),
+    )
+}
+
+/// Stalls at the end of the interrupt `prepare`, before `start`.
+pub fn spawn_after_prepare(args: &[&str], archive: &Path, out: &Path) -> Stalled {
+    launch(args, archive, out, ("EXARCH_TEST_STALL_AFTER_PREPARE", "1"))
+}
+
+fn launch(args: &[&str], archive: &Path, out: &Path, hook: (&str, &str)) -> Stalled {
     let mut child = Command::new(cargo_bin_cmd!("exarch").get_program())
         .args(args)
         .arg(archive)
         .arg(out)
-        .env("EXARCH_TEST_STALL_AT_ENTRY", entry.to_string())
+        .env(hook.0, hook.1)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -75,7 +91,15 @@ impl Stalled {
     /// Waits until the hook reports the stall at `entry`; returns every stderr
     /// line seen up to and including it.
     pub fn wait_ready(&self, entry: usize) -> Vec<String> {
-        let expected = ready_line(entry);
+        self.wait_for_line(&ready_line(entry))
+    }
+
+    /// Waits until the run reports the stall after `prepare`.
+    pub fn wait_ready_after_prepare(&self) -> Vec<String> {
+        self.wait_for_line(READY_AFTER_PREPARE)
+    }
+
+    fn wait_for_line(&self, expected: &str) -> Vec<String> {
         let ends = Instant::now() + DEADLINE;
         let mut seen = Vec::new();
         loop {
@@ -99,18 +123,23 @@ impl Stalled {
         self.child.id()
     }
 
+    /// Delivers one SIGINT.
+    pub fn interrupt_once(&self) {
+        let sent = Command::new("kill")
+            .args(["-INT", &self.child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run kill");
+        assert!(sent.success(), "{sent:?}");
+    }
+
     /// Sends SIGINT until the process ends; returns its status and stdout.
     pub fn interrupt_until_exit(&mut self) -> (ExitStatus, String) {
         let ends = Instant::now() + DEADLINE;
         let status = loop {
-            let sent = Command::new("kill")
-                .args(["-INT", &self.child.id().to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("run kill");
-            assert!(sent.success(), "{sent:?}");
+            self.interrupt_once();
             std::thread::sleep(Duration::from_millis(50));
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;

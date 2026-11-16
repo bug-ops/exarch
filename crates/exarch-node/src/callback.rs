@@ -154,13 +154,11 @@ impl CallbackJob {
         source: impl IntoSource,
         mut deliver: impl FnMut(MemoryEntry) -> std::result::Result<(), Failure>,
     ) -> CoreResult<exarch_core::ExtractionReport> {
-        let mut request = MemoryExtractRequest::default()
+        let request = MemoryExtractRequest::default()
             .with_config(self.config)
             .with_options(self.options)
-            .with_path_model(self.path_model);
-        if let Some(password) = self.password {
-            request = request.with_password(password);
-        }
+            .with_path_model(self.path_model)
+            .with_password(self.password);
         source.run(self.format, |reader| {
             extract_reader_to_callback(
                 reader,

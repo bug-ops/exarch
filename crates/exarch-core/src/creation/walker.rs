@@ -12,6 +12,7 @@ use crate::SkipKind;
 use crate::Skips;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::open::LinkPolicy;
 use crate::creation::open::WalkedSource;
 use crate::creation::source::source_error;
 use crate::creation::source::walk_error;
@@ -156,21 +157,9 @@ impl<'a> FilteredWalker<'a> {
             ))));
         }
 
-        // Determine entry type
-        let entry_type = if metadata.is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
-            EntryType::Symlink { target }
-        } else if metadata.is_dir() {
-            EntryType::Directory {
-                metadata: Box::new(metadata.clone()),
-            }
-        } else {
-            EntryType::File
-        };
-
-        // Check file size limit (only for regular files)
         let size = get_file_size(&metadata);
-        if matches!(entry_type, EntryType::File) && !self.config.max_file_size.admits(size) {
+        let is_content = !metadata.is_symlink() && !metadata.is_dir();
+        if is_content && !self.config.max_file_size.admits(size) {
             let shown = if relative.is_empty() { path } else { relative };
             return Ok(Some(WalkItem::Skipped(Skip::new(
                 SkipKind::OverMaxFileSize,
@@ -178,21 +167,25 @@ impl<'a> FilteredWalker<'a> {
             ))));
         }
 
-        let Some(archive_path) = entry_name(
-            &path,
-            &relative,
-            matches!(entry_type, EntryType::Directory { .. }),
-        )?
-        else {
+        let Some(archive_path) = entry_name(&path, &relative, metadata.is_dir())? else {
             return Ok(None);
         };
 
-        let identity = walked_if_opened(&entry_type, &path, &metadata, self.config)?;
+        let entry_type = if metadata.is_symlink() {
+            let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
+            EntryType::Symlink { target }
+        } else if metadata.is_dir() {
+            EntryType::Directory {
+                metadata: Box::new(metadata),
+            }
+        } else {
+            content_of(&path, &metadata, self.config)?
+        };
+
         Ok(Some(WalkItem::Entry(FilteredEntry {
             path,
             archive_path,
             entry_type,
-            identity,
         })))
     }
 }
@@ -309,17 +302,19 @@ pub(crate) struct FilteredEntry {
 
     /// Type of entry (file, directory, or symlink).
     pub entry_type: EntryType,
-
-    /// The filesystem object the walk saw, which a later open must match;
-    /// `None` for an entry whose content is never opened.
-    pub identity: Option<WalkedSource>,
 }
 
 /// Type of directory entry.
 #[derive(Debug, Clone)]
 pub(crate) enum EntryType {
-    /// Regular file.
-    File,
+    /// A regular file, or a link followed to one.
+    Content {
+        /// The filesystem object the walk saw, which the open must match.
+        walked: WalkedSource,
+
+        /// Whether the open may go through a link, fixed at walk time.
+        links: LinkPolicy,
+    },
 
     /// Directory with the metadata the walk used to classify it: `stat` of
     /// the object a followed link leads to, `lstat` otherwise (boxed to keep
@@ -330,7 +325,7 @@ pub(crate) enum EntryType {
         metadata: Box<Metadata>,
     },
 
-    /// Symbolic link with its target path.
+    /// A link archived as a link (`follow_symlinks` off).
     Symlink {
         /// Target of the symlink.
         target: PathBuf,
@@ -399,7 +394,7 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
             // top-level source is classified as EntryType::Symlink
             // rather than silently dereferenced into its target.
             // `metadata.is_dir()` can no longer be true here (that case is
-            // routed to the walk branch above), so only `File` and
+            // routed to the walk branch above), so only `Content` and
             // `Symlink` remain.
             // A followed link is judged by its target, which the later open
             // must match.
@@ -433,22 +428,19 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
                 continue;
             }
 
-            let entry_type = if metadata.is_symlink() {
-                let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
-                EntryType::Symlink { target }
-            } else {
-                EntryType::File
-            };
-
             if !excluded.excludes(path)
                 && let Some(archive_path) = entry_name(path, &relative, false)?
             {
-                let identity = walked_if_opened(&entry_type, path, seen, config)?;
+                let entry_type = if metadata.is_symlink() && !config.follow_symlinks {
+                    let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
+                    EntryType::Symlink { target }
+                } else {
+                    content_of(path, seen, config)?
+                };
                 let entry = FilteredEntry {
                     path: path.to_path_buf(),
                     archive_path,
                     entry_type,
-                    identity,
                 };
                 names.claim(&entry)?;
                 collected.entries.push(entry);
@@ -459,20 +451,13 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
     Ok(collected)
 }
 
-/// Records what the walk saw of an entry, only when its content will be
-/// opened: a file, or a link whose target is archived.
-fn walked_if_opened(
-    entry_type: &EntryType,
-    path: &Path,
-    metadata: &Metadata,
-    config: &CreationConfig,
-) -> Result<Option<WalkedSource>> {
-    let opened = match entry_type {
-        EntryType::File => true,
-        EntryType::Symlink { .. } => config.follow_symlinks,
-        EntryType::Directory { .. } => false,
-    };
-    opened.then(|| WalkedSource::of(path, metadata)).transpose()
+/// A content entry for the object at `path` that the walk described with
+/// `metadata`, with the link policy of `config` resolved once.
+fn content_of(path: &Path, metadata: &Metadata, config: &CreationConfig) -> Result<EntryType> {
+    Ok(EntryType::Content {
+        walked: WalkedSource::of(path, metadata)?,
+        links: LinkPolicy::of(config.follow_symlinks),
+    })
 }
 
 /// Whether `metadata` describes a FIFO, socket or device, which creation
@@ -845,34 +830,6 @@ mod tests {
     }
 
     #[test]
-    fn test_filtered_entry_file() {
-        let entry = FilteredEntry {
-            path: PathBuf::from("/tmp/file.txt"),
-            archive_path: ArchiveEntryName::from_relative(Path::new("file.txt")).unwrap(),
-            entry_type: EntryType::File,
-            identity: None,
-        };
-
-        assert_eq!(entry.path, Path::new("/tmp/file.txt"));
-        assert_eq!(&*entry.archive_path, Path::new("file.txt"));
-        assert_matches!(entry.entry_type, EntryType::File);
-    }
-
-    #[test]
-    fn test_filtered_entry_directory() {
-        let entry = FilteredEntry {
-            path: PathBuf::from("/tmp/dir"),
-            archive_path: ArchiveEntryName::from_relative(Path::new("dir")).unwrap(),
-            entry_type: EntryType::Directory {
-                metadata: Box::new(std::fs::metadata(".").unwrap()),
-            },
-            identity: None,
-        };
-
-        assert_matches!(entry.entry_type, EntryType::Directory { .. });
-    }
-
-    #[test]
     fn test_filtered_entry_symlink() {
         let entry = FilteredEntry {
             path: PathBuf::from("/tmp/link"),
@@ -880,7 +837,6 @@ mod tests {
             entry_type: EntryType::Symlink {
                 target: PathBuf::from("target.txt"),
             },
-            identity: None,
         };
 
         match &entry.entry_type {
@@ -1072,7 +1028,7 @@ mod tests {
             .entries;
 
         assert_eq!(entries.len(), 1);
-        assert_matches!(entries[0].entry_type, EntryType::File);
+        assert_matches!(entries[0].entry_type, EntryType::Content { .. });
         assert!(
             entries[0]
                 .archive_path

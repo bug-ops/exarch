@@ -8,9 +8,7 @@
 
 use crate::ArchiveError;
 use crate::Result;
-use crate::creation::config::CreationConfig;
 use crate::creation::source::source_error;
-use crate::creation::walker::FilteredEntry;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 #[cfg(not(unix))]
@@ -117,7 +115,7 @@ fn differs(now: FileIdentity, then: FileIdentity) -> bool {
 #[cfg(unix)]
 fn parent_of(path: &Path) -> &Path {
     path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .filter(|parent| !parent.is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 
@@ -168,18 +166,6 @@ pub(crate) fn open_source(
         return Err(changed(path));
     }
     Ok(VerifiedSource { file, metadata })
-}
-
-/// Opens the content of a walked entry, as [`open_source`] does for the
-/// identity the walk recorded for it.
-///
-/// # Errors
-///
-/// As [`open_source`]; an entry the walk recorded no identity for is
-/// [`ArchiveError::SourceChanged`], since nothing can vouch for it.
-pub(crate) fn open_entry(entry: &FilteredEntry, config: &CreationConfig) -> Result<VerifiedSource> {
-    let walked = entry.identity.ok_or_else(|| changed(&entry.path))?;
-    open_source(&entry.path, walked, LinkPolicy::of(config.follow_symlinks))
 }
 
 fn changed(path: &Path) -> ArchiveError {

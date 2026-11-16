@@ -106,6 +106,76 @@ pub(crate) fn worker_count(parallelism: Parallelism) -> Option<NonZeroUsize> {
     }
 }
 
+/// Where a staged [`PreparedJob`] is compressed, and what is held for it until
+/// its turn in archive order.
+///
+/// The pending value is the job itself when the calling thread compresses it,
+/// and a marker when a worker already has it, so a handle to a worker never
+/// exists without workers.
+pub(crate) trait Executor {
+    /// What the staging area keeps for a dispatched job.
+    type Pending;
+
+    /// Takes `job` as the entry at archive position `index`.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error when no worker can take it.
+    fn dispatch(&self, index: usize, job: PreparedJob) -> Result<Self::Pending>;
+
+    /// Produces the prepared entry for `pending` at `index`, waiting for it if
+    /// needed.
+    ///
+    /// # Errors
+    ///
+    /// The error of the job, or an I/O error when every worker has stopped.
+    fn collect(&mut self, index: usize, pending: Self::Pending) -> Result<PreparedZipFile>;
+
+    /// Entries that may be dispatched ahead of the write position.
+    fn capacity(&self) -> usize;
+}
+
+/// Compresses on the calling thread, at the entry's turn.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Inline;
+
+impl Executor for Inline {
+    type Pending = PreparedJob;
+
+    fn dispatch(&self, _index: usize, job: PreparedJob) -> Result<PreparedJob> {
+        Ok(job)
+    }
+
+    fn collect(&mut self, _index: usize, pending: PreparedJob) -> Result<PreparedZipFile> {
+        pending.compress()
+    }
+
+    fn capacity(&self) -> usize {
+        0
+    }
+}
+
+/// A job a worker holds; only [`Workers`] hands one out.
+#[derive(Debug)]
+pub(crate) struct Submitted(());
+
+impl Executor for Workers {
+    type Pending = Submitted;
+
+    fn dispatch(&self, index: usize, job: PreparedJob) -> Result<Submitted> {
+        self.submit(index, job)?;
+        Ok(Submitted(()))
+    }
+
+    fn collect(&mut self, index: usize, _pending: Submitted) -> Result<PreparedZipFile> {
+        self.take(index)
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
 /// What a worker reports for one job; a panic is carried to the thread that
 /// waits for the entry instead of being lost with the worker.
 enum Finished {
@@ -165,20 +235,15 @@ impl Workers {
         })
     }
 
-    /// Entries that may be submitted and not yet taken.
-    pub(crate) const fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// Queues `job` as the entry at archive position `index`.
     ///
-    /// The caller keeps at most [`Workers::capacity`] jobs outstanding, so this
-    /// never blocks.
+    /// The caller keeps at most [`Executor::capacity`] jobs outstanding, so
+    /// this never blocks.
     ///
     /// # Errors
     ///
     /// An I/O error when every worker has stopped.
-    pub(crate) fn submit(&self, index: usize, job: PreparedJob) -> Result<()> {
+    fn submit(&self, index: usize, job: PreparedJob) -> Result<()> {
         self.jobs.send((index, job)).map_err(|_| worker_lost())
     }
 
@@ -192,7 +257,7 @@ impl Workers {
     /// # Panics
     ///
     /// Resumes the panic of that entry's job on the calling thread.
-    pub(crate) fn take(&mut self, index: usize) -> Result<PreparedZipFile> {
+    fn take(&mut self, index: usize) -> Result<PreparedZipFile> {
         loop {
             match self.ready.remove(&index) {
                 Some(Finished::Compressed(outcome)) => return outcome,

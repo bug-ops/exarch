@@ -139,13 +139,10 @@ pub(crate) mod key_basis {
 
     /// Runs `body` with this thread keying landings by `basis`.
     pub(crate) fn with<T>(basis: KeyBasis, body: impl FnOnce() -> T) -> T {
-        struct Restore(KeyBasis);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                BASIS.with(|cell| cell.set(self.0));
-            }
-        }
-        let _restore = Restore(BASIS.with(|cell| cell.replace(basis)));
+        let _restore =
+            std::mem::DropGuard::new(BASIS.with(|cell| cell.replace(basis)), |previous| {
+                BASIS.with(|cell| cell.set(previous));
+            });
         body()
     }
 }
@@ -157,13 +154,31 @@ fn key_of(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Option<LandingKey> {
     Some(key_for(identity, rel))
 }
 
+/// How much of what the run created the record still holds.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Completeness {
+    #[default]
+    Complete,
+    /// A landing the run created could not be keyed, so the record may be
+    /// missing an entry it made.
+    Lossy,
+    /// The budget was reached; absorbing, nothing more is recorded.
+    Saturated,
+}
+
+impl Completeness {
+    const fn lossy(self) -> Self {
+        match self {
+            Self::Complete => Self::Lossy,
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Created {
     keys: HashSet<LandingKey>,
-    saturated: bool,
-    /// A landing the run created could not be keyed, so the record may be
-    /// missing an entry it made.
-    lossy: bool,
+    completeness: Completeness,
 }
 
 /// Who made the occupant of a landing, as far as the record can prove.
@@ -203,17 +218,10 @@ impl RunRecord {
     ///
     /// A key that cannot be read is not recorded, so a later duplicate is
     /// refused.
-    pub(crate) fn note(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
-        if !self.is_saturated() {
-            self.insert(key_of(dir, leaf, rel));
-        }
-    }
-
-    /// Records that the run just created the directory `leaf` in `dir`.
     ///
-    /// A duplicate check never skips a directory, but a refusal asks whether
-    /// the run made the occupant.
-    pub(crate) fn note_directory(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+    /// A directory is recorded the same way: a duplicate check never skips
+    /// one, but a refusal asks whether the run made the occupant.
+    pub(crate) fn note(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
         if !self.is_saturated() {
             self.insert(key_of(dir, leaf, rel));
         }
@@ -233,7 +241,7 @@ impl RunRecord {
     }
 
     fn is_saturated(&self) -> bool {
-        self.created.borrow().saturated
+        self.created.borrow().completeness == Completeness::Saturated
     }
 
     /// Keeps `key`; reaching the budget saturates the record, so every occupant
@@ -242,11 +250,11 @@ impl RunRecord {
     fn insert(&self, key: Option<LandingKey>) {
         let mut created = self.created.borrow_mut();
         let Some(key) = key else {
-            created.lossy = true;
+            created.completeness = created.completeness.lossy();
             return;
         };
         if created.keys.len() >= self.budget.cap() {
-            created.saturated = true;
+            created.completeness = Completeness::Saturated;
         } else {
             created.keys.insert(key);
         }
@@ -256,8 +264,7 @@ impl RunRecord {
     ///
     /// `false` when the key cannot be read or the record is saturated.
     pub(crate) fn created_here(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> bool {
-        let created = self.created.borrow();
-        !created.saturated && key_of(dir, leaf, rel).is_some_and(|key| created.keys.contains(&key))
+        self.maker(dir, leaf, rel) == Maker::Run
     }
 
     /// Who made the occupant of `leaf` in `dir`.
@@ -268,7 +275,7 @@ impl RunRecord {
     /// true exactly when `created_here` is.
     pub(crate) fn maker(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Maker {
         let created = self.created.borrow();
-        if created.saturated {
+        if created.completeness == Completeness::Saturated {
             return Maker::Unknown;
         }
         // A held key proves the run made the occupant even in a lossy record,
@@ -279,7 +286,7 @@ impl RunRecord {
             Ok(None) => Maker::Foreign,
             Ok(Some(identity)) => match key_for(identity, rel) {
                 key if created.keys.contains(&key) => Maker::Run,
-                _ if created.lossy => Maker::Unknown,
+                _ if created.completeness == Completeness::Lossy => Maker::Unknown,
                 LandingKey::Identity(_) => Maker::Foreign,
                 LandingKey::Path(_) => Maker::Unknown,
             },
@@ -293,7 +300,8 @@ impl RunRecord {
     #[cfg(any(target_os = "macos", all(unix, test)))]
     pub(crate) fn created_with(&self, key: IdentityKey) -> bool {
         let created = self.created.borrow();
-        !created.saturated && created.keys.contains(&LandingKey::Identity(key))
+        created.completeness != Completeness::Saturated
+            && created.keys.contains(&LandingKey::Identity(key))
     }
 
     #[cfg(all(test, unix))]
@@ -308,7 +316,7 @@ impl RunRecord {
 
     #[cfg(all(test, unix))]
     pub(crate) fn saturate(&self) {
-        self.created.borrow_mut().saturated = true;
+        self.created.borrow_mut().completeness = Completeness::Saturated;
     }
 }
 
@@ -340,6 +348,36 @@ mod key_tests {
         assert_matches!(
             key_for(FileIdentity::Unknown, "x".as_ref()),
             LandingKey::Path(_)
+        );
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::Completeness;
+    use super::RecordBudget;
+    use super::RunRecord;
+
+    #[test]
+    fn lossy_only_degrades_a_complete_record_and_saturation_absorbs() {
+        assert_eq!(Completeness::Complete.lossy(), Completeness::Lossy);
+        assert_eq!(Completeness::Lossy.lossy(), Completeness::Lossy);
+        assert_eq!(Completeness::Saturated.lossy(), Completeness::Saturated);
+    }
+
+    #[test]
+    fn an_unkeyed_landing_makes_the_record_lossy_and_never_undoes_saturation() {
+        let record = RunRecord::new(RecordBudget::Full);
+        assert_eq!(record.created.borrow().completeness, Completeness::Complete);
+
+        record.insert(None);
+        assert_eq!(record.created.borrow().completeness, Completeness::Lossy);
+
+        record.created.borrow_mut().completeness = Completeness::Saturated;
+        record.insert(None);
+        assert_eq!(
+            record.created.borrow().completeness,
+            Completeness::Saturated
         );
     }
 }
@@ -558,7 +596,7 @@ mod tests {
         let record = RunRecord::new(RecordBudget::Full);
 
         record.note(&dir, leaf("made"), "made".as_ref());
-        record.note_directory(&dir, leaf("sub"), "sub".as_ref());
+        record.note(&dir, leaf("sub"), "sub".as_ref());
 
         assert!(record.created_with(key("made")));
         assert!(record.created_with(key("sub")));

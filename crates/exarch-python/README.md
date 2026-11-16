@@ -115,7 +115,8 @@ decode raises `InvalidArchiveError`.
 
 ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
 `password` to `extract_archive`, `extract_archive_with_progress`, `list_archive`,
-`verify_archive`, `extract_archive_to_memory[_with_progress]` or
+`verify_archive`, `list_archive_bytes[_with_progress]`,
+`verify_archive_bytes[_with_progress]`, `extract_archive_to_memory[_with_progress]` or
 `extract_archive_to_callback`. The password must be a `bytearray`: `bytes` and `str` are
 refused with `TypeError` because immutable objects cannot be wiped. exarch wipes
 its own copy; you wipe yours.

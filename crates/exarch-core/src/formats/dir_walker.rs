@@ -349,7 +349,7 @@ impl DirWalker {
             let mut made_here = false;
             match parent.make_dir(leaf) {
                 Ok(()) => {
-                    root.created().note_directory(parent, leaf, walked);
+                    root.created().note(parent, leaf, walked);
                     made_here = true;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}

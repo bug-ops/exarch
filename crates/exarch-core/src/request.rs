@@ -93,8 +93,8 @@ impl<'a, C, O> Carrier<'a, C, O> {
     }
 
     #[cfg(feature = "encryption")]
-    fn with_password(mut self, password: Arc<Password>) -> Self {
-        self.password = Some(password);
+    fn with_password(mut self, password: Option<Arc<Password>>) -> Self {
+        self.password = password;
         self
     }
 
@@ -208,7 +208,7 @@ impl<'a> ExtractRequest<'a> {
     /// let config = SecurityConfig::default();
     /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
     /// let _ = ExtractRequest::new(&config)
-    ///     .with_password(password)
+    ///     .with_password(Some(password))
     ///     .extract("secret.zip", "out")?;
     /// # Ok(())
     /// # }
@@ -216,7 +216,7 @@ impl<'a> ExtractRequest<'a> {
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
-    pub fn with_password(self, password: Arc<Password>) -> Self {
+    pub fn with_password(self, password: Option<Arc<Password>>) -> Self {
         Self(self.0.with_password(password))
     }
 
@@ -381,7 +381,7 @@ impl<'a> ListRequest<'a> {
     /// let config = SecurityConfig::default();
     /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
     /// let _ = ListRequest::new(&config)
-    ///     .with_password(password)
+    ///     .with_password(Some(password))
     ///     .list("secret.zip")?;
     /// # Ok(())
     /// # }
@@ -389,7 +389,7 @@ impl<'a> ListRequest<'a> {
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
-    pub fn with_password(self, password: Arc<Password>) -> Self {
+    pub fn with_password(self, password: Option<Arc<Password>>) -> Self {
         Self(self.0.with_password(password))
     }
 
@@ -574,7 +574,7 @@ impl<'a> VerifyRequest<'a> {
     /// let config = SecurityConfig::default();
     /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
     /// let _ = VerifyRequest::new(&config)
-    ///     .with_password(password)
+    ///     .with_password(Some(password))
     ///     .verify("secret.zip")?;
     /// # Ok(())
     /// # }
@@ -582,7 +582,7 @@ impl<'a> VerifyRequest<'a> {
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
-    pub fn with_password(self, password: Arc<Password>) -> Self {
+    pub fn with_password(self, password: Option<Arc<Password>>) -> Self {
         Self(self.0.with_password(password))
     }
 
@@ -712,14 +712,14 @@ impl<'a> SinkExtractRequest<'a> {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = SecurityConfig::default();
     /// let password = Arc::new(Password::new(b"correct-horse".to_vec())?);
-    /// let _request = SinkExtractRequest::new(&config).with_password(password);
+    /// let _request = SinkExtractRequest::new(&config).with_password(Some(password));
     /// # Ok(())
     /// # }
     /// ```
     #[cfg(feature = "encryption")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
     #[must_use]
-    pub fn with_password(self, password: Arc<Password>) -> Self {
+    pub fn with_password(self, password: Option<Arc<Password>>) -> Self {
         Self(self.0.with_password(password))
     }
 

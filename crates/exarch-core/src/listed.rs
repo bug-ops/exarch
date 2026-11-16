@@ -550,8 +550,9 @@ fn list_with_limit(
     credentials: Credentials,
 ) -> Result<ListedArchive> {
     let format = detect_format(archive)?;
-    let mut pass =
-        ListPass::strict_with(options.stored_targets).with_credentials(credentials.clone());
+    let mut pass = ListPass::strict_with(options.stored_targets)
+        .with_credentials(credentials.clone())
+        .leaving_skipped_encrypted_unread();
     if let Some(progress) = progress {
         pass = pass.with_progress(progress);
     }

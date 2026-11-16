@@ -60,14 +60,9 @@ fn outcomes(
     config: &SecurityConfig,
 ) -> [Option<EncryptionRefusal>; 3] {
     let dest = TempDir::new().unwrap();
-    let mut extract = ExtractRequest::new(config);
-    let mut list = ListRequest::new(config);
-    let mut verify = VerifyRequest::new(config);
-    if let Some(password) = password {
-        extract = extract.with_password(password.clone());
-        list = list.with_password(password.clone());
-        verify = verify.with_password(password);
-    }
+    let extract = ExtractRequest::new(config).with_password(password.clone());
+    let list = ListRequest::new(config).with_password(password.clone());
+    let verify = VerifyRequest::new(config).with_password(password);
     [
         extract
             .extract(archive, dest.path())
@@ -92,7 +87,7 @@ fn extract_of_a_7z_with_a_non_utf8_password_is_unusable_password() {
         let dest = TempDir::new().unwrap();
 
         let error = ExtractRequest::new(&SecurityConfig::default())
-            .with_password(password(NOT_UTF8))
+            .with_password(Some(password(NOT_UTF8)))
             .extract(fixture_path(name), dest.path())
             .unwrap_err();
 
@@ -122,7 +117,7 @@ fn extract_of_an_aes_zip_with_a_non_utf8_password_is_not_unusable_password() {
     let dest = TempDir::new().unwrap();
 
     let error = ExtractRequest::new(&SecurityConfig::default())
-        .with_password(password(NOT_UTF8))
+        .with_password(Some(password(NOT_UTF8)))
         .extract(fixture_path("aes256.zip"), dest.path())
         .unwrap_err();
 

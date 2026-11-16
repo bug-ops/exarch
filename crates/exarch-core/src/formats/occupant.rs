@@ -57,6 +57,11 @@ impl OccupantPolicy {
         Self::new(options.existing_files, options.repeats)
     }
 
+    /// The repeated-paths policy of this product.
+    pub(crate) const fn repeats(self) -> RepeatedPaths {
+        self.repeats
+    }
+
     /// The budget of the record of an in-place run under this policy.
     pub(crate) const fn record_budget(self) -> RecordBudget {
         match self.repeats {
@@ -65,6 +70,42 @@ impl OccupantPolicy {
         }
     }
 
+    /// Decides an occupied path: the repeat rule first, then the
+    /// [`ExistingFiles`] policy for what it leaves.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`RepeatedPaths::refuse_repeat`] and
+    /// [`ExistingFiles::on_occupant`], and the I/O error of `occupant`.
+    pub(crate) fn on_occupant(
+        self,
+        arriving: EntryShape,
+        rel: &Path,
+        occupant: impl FnOnce() -> std::io::Result<Option<Occupant>>,
+        maker: impl FnOnce() -> Maker,
+        site: OccupiedSite<'_>,
+    ) -> Result<OccupantAction> {
+        if self.repeats == RepeatedPaths::KeepFirst {
+            return self.existing.on_occupant(
+                arriving,
+                rel,
+                occupant,
+                || maker() == Maker::Run,
+                site,
+            );
+        }
+        let found = occupant()?;
+        if let Some(found) = found {
+            self.repeats
+                .refuse_repeat(arriving, rel, found, maker, site)?;
+        }
+        // The maker was foreign or the occupant is gone, never the run.
+        self.existing
+            .on_occupant(arriving, rel, || Ok(found), || false, site)
+    }
+}
+
+impl RepeatedPaths {
     /// Refuses an entry `arriving` over the occupant `found` of `rel` when
     /// repeated paths are refused and the run made it or cannot show that it
     /// did not; any other occupant, and every occupant under
@@ -86,7 +127,7 @@ impl OccupantPolicy {
         maker: impl FnOnce() -> Maker,
         site: OccupiedSite<'_>,
     ) -> Result<()> {
-        if self.repeats == RepeatedPaths::KeepFirst {
+        if self == Self::KeepFirst {
             return Ok(());
         }
         match maker() {
@@ -97,39 +138,6 @@ impl OccupantPolicy {
             Maker::Unknown => Err(site.refuse(rel, Some(found), OccupiedBy::Existing)),
             Maker::Foreign => Ok(()),
         }
-    }
-
-    /// Decides an occupied path: the repeat rule first, then the
-    /// [`ExistingFiles`] policy for what it leaves.
-    ///
-    /// # Errors
-    ///
-    /// The refusals of [`refuse_repeat`](Self::refuse_repeat) and
-    /// [`ExistingFiles::on_occupant`], and the I/O error of `occupant`.
-    pub(crate) fn on_occupant(
-        self,
-        arriving: EntryShape,
-        rel: &Path,
-        occupant: impl FnOnce() -> std::io::Result<Option<Occupant>>,
-        maker: impl FnOnce() -> Maker,
-        site: OccupiedSite<'_>,
-    ) -> Result<OccupantAction> {
-        if self.repeats == RepeatedPaths::KeepFirst {
-            return self.existing.on_occupant(
-                arriving,
-                rel,
-                occupant,
-                || maker() == Maker::Run,
-                site,
-            );
-        }
-        let found = occupant()?;
-        if let Some(found) = found {
-            self.refuse_repeat(arriving, rel, found, maker, site)?;
-        }
-        // The maker was foreign or the occupant is gone, never the run.
-        self.existing
-            .on_occupant(arriving, rel, || Ok(found), || false, site)
     }
 }
 
@@ -269,7 +277,7 @@ impl ExistingFiles {
     /// # Errors
     ///
     /// The refusal of `site`, and the I/O error of `occupant`.
-    pub(crate) fn on_occupant(
+    fn on_occupant(
         self,
         arriving: EntryShape,
         rel: &Path,
@@ -583,8 +591,11 @@ mod tests {
     #[test]
     fn a_directory_over_a_directory_of_the_run_is_no_repeat() {
         let policy = OccupantPolicy::new(ExistingFiles::Skip, RepeatedPaths::Refuse);
-        let check =
-            |arriving, found| policy.refuse_repeat(arriving, x(), found, || Maker::Run, DETACHED);
+        let check = |arriving, found| {
+            policy
+                .repeats()
+                .refuse_repeat(arriving, x(), found, || Maker::Run, DETACHED)
+        };
 
         assert!(check(EntryShape::Directory, Occupant::Directory).is_ok());
         assert!(check(EntryShape::Directory, Occupant::File).is_err());

@@ -37,10 +37,9 @@ pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Comman
         VerificationOptions::default()
     };
 
-    let mut request = VerifyRequest::new(&config).with_options(options);
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+    let request = VerifyRequest::new(&config)
+        .with_options(options)
+        .with_password(password);
     let report = request.verify(&args.archive)?;
 
     formatter.format_verification_report(&report)?;

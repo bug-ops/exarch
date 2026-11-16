@@ -26,11 +26,7 @@ fn password() -> Arc<Password> {
 fn list(archive: &std::path::Path, with_password: bool) -> Vec<ArchiveEntry> {
     let config = SecurityConfig::default();
     let request = ListRequest::new(&config);
-    let request = if with_password {
-        request.with_password(password())
-    } else {
-        request
-    };
+    let request = request.with_password(with_password.then(password));
     request.list(archive).unwrap().entries().to_vec()
 }
 

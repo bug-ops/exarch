@@ -69,6 +69,7 @@ use crate::formats::zip::parse_zip_entry_name;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
 use crate::formats::zip::resolve_zip_entry_path;
+use crate::formats::zip::sealed_entry_needs_decryption;
 use crate::formats::zip::zip_entry_kind;
 use crate::formats::zip::zip_node_kind;
 use crate::formats::zip_tail::DescriptorTail;
@@ -224,6 +225,19 @@ pub(crate) struct ListPass<'a, 'c> {
     mode: PassMode<'a, 'c>,
     progress: Progress<'a>,
     credentials: Credentials,
+    skipped_encrypted: SkippedEncrypted,
+}
+
+/// What a ZIP listing does with a supplied password for an encrypted entry the
+/// selection does not certainly extract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SkippedEncrypted {
+    /// Opens it with the password, so a wrong password is reported.
+    #[default]
+    CheckPassword,
+    /// Lists it from its header with the payload unread, as the extraction the
+    /// listing precedes will skip it.
+    LeaveUnread,
 }
 
 impl<'a, 'c> ListPass<'a, 'c> {
@@ -240,6 +254,7 @@ impl<'a, 'c> ListPass<'a, 'c> {
             mode: PassMode::Strict(targets),
             progress: Progress::noop(),
             credentials: Credentials::NONE,
+            skipped_encrypted: SkippedEncrypted::CheckPassword,
         }
     }
 
@@ -249,6 +264,7 @@ impl<'a, 'c> ListPass<'a, 'c> {
             mode: PassMode::VerifyPreflight(pass),
             progress: Progress::noop(),
             credentials: Credentials::NONE,
+            skipped_encrypted: SkippedEncrypted::CheckPassword,
         }
     }
 
@@ -256,6 +272,13 @@ impl<'a, 'c> ListPass<'a, 'c> {
     /// decrypted instead of refused.
     pub(crate) fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = credentials;
+        self
+    }
+
+    /// Leaves the payload of an encrypted entry the selection skips unread,
+    /// whatever the password.
+    pub(crate) const fn leaving_skipped_encrypted_unread(mut self) -> Self {
+        self.skipped_encrypted = SkippedEncrypted::LeaveUnread;
         self
     }
 
@@ -656,6 +679,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     let mut quota = QuotaTracker::new();
     let reported = archive.structure().findings().to_vec();
     let credentials = archive.credentials().clone();
+    let skipped_encrypted = listing.skipped_encrypted;
     let archive = archive.reader_mut();
     listing.progress.set_total(archive.len());
 
@@ -667,13 +691,16 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                 })
             })
         };
-        // Without a password an encrypted entry is listed from its header and
-        // its content stays unread.
-        let sealed = !credentials.is_supplied()
-            && archive
-                .by_index_raw(i)
-                .map_err(|e| listed_failure(&e))?
-                .encrypted();
+        // An encrypted entry is listed from its header, its content unread,
+        // without a password, or, for the listing that precedes an extraction,
+        // when the selection does not certainly extract it.
+        let sealed = {
+            let raw = archive.by_index_raw(i).map_err(|e| listed_failure(&e))?;
+            raw.encrypted()
+                && (!credentials.is_supplied()
+                    || (skipped_encrypted == SkippedEncrypted::LeaveUnread
+                        && !sealed_entry_needs_decryption(&raw, config)))
+        };
         let mut entry = if sealed {
             archive.by_index_raw(i)
         } else {

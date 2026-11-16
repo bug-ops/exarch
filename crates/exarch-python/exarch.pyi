@@ -2145,6 +2145,7 @@ def list_archive_bytes(
     config: SecurityConfig | None = None,
     options: ListOptions | None = None,
     format: _ArchiveType | None = None,
+    password: bytearray | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, without extracting.
@@ -2156,6 +2157,12 @@ def list_archive_bytes(
         config: Optional SecurityConfig (uses secure defaults if None)
         format: The archive format; detected from the leading bytes if None
         options: Optional ListOptions, as in list_archive
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only, as in
+            list_archive: ``bytes`` and ``str`` raise ``TypeError``, an empty or
+            over-long (more than 1024 bytes) password raises ``ValueError``
+            before the archive is read. exarch wipes its own copy; wipe yours
+            afterwards with ``password[:] = bytes(len(password))``
 
     Returns:
         ArchiveManifest with entry metadata
@@ -2172,6 +2179,7 @@ def verify_archive_bytes(
     config: SecurityConfig | None = None,
     options: VerificationOptions | None = None,
     format: _ArchiveType | None = None,
+    password: bytearray | None = None,
 ) -> VerificationReport:
     """
     Verify the security of an archive held in memory.
@@ -2183,6 +2191,12 @@ def verify_archive_bytes(
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional VerificationOptions
         format: The archive format; detected from the leading bytes if None
+        password: Optional password of a password-protected ZIP (WinZip AES)
+            or 7z (AES-256) archive, as a ``bytearray`` only, as in
+            list_archive: ``bytes`` and ``str`` raise ``TypeError``, an empty or
+            over-long (more than 1024 bytes) password raises ``ValueError``
+            before the archive is read. exarch wipes its own copy; wipe yours
+            afterwards with ``password[:] = bytes(len(password))``
 
     Returns:
         VerificationReport with validation results
@@ -2453,13 +2467,14 @@ def list_archive_bytes_with_progress(
     options: ListOptions | None = None,
     format: _ArchiveType | None = None,
     progress: ProgressCallbackFn | None = None,
+    password: bytearray | None = None,
 ) -> ArchiveManifest:
     """
     List the contents of an archive held in memory, reporting progress.
 
     Same as list_archive_bytes, plus a callback invoked once per entry with
     (path, total, current, bytes_written); total is None for TAR and
-    bytes_written is always 0.
+    bytes_written is always 0. ``password`` is as in list_archive_bytes.
 
     Raises:
         Whatever progress itself raises: it cancels the listing before the next
@@ -2475,13 +2490,14 @@ def verify_archive_bytes_with_progress(
     options: VerificationOptions | None = None,
     format: _ArchiveType | None = None,
     progress: ProgressCallbackFn | None = None,
+    password: bytearray | None = None,
 ) -> VerificationReport:
     """
     Verify the security of an archive held in memory, reporting progress.
 
     Same as verify_archive_bytes, plus a callback invoked once per entry with
     (path, total, current, bytes_written); total is None for TAR and
-    bytes_written is always 0.
+    bytes_written is always 0. ``password`` is as in verify_archive_bytes.
 
     Raises:
         Whatever progress itself raises: it cancels the verification before the

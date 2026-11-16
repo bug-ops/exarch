@@ -553,6 +553,11 @@ pub fn extract_archive_to_memory_with_progress(
 /// * `options` - Optional `ListOptions`, as in `list_archive`
 /// * `format` - The archive format; detected from the leading bytes if None
 /// * `progress` - Optional progress callback function
+/// * `password` - Optional `bytearray` password of a password-protected ZIP
+///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
+///   `str` raise `TypeError` because they cannot be wiped, an empty or
+///   over-long (more than 1024 bytes) password raises `ValueError` before the
+///   archive is read. exarch wipes its own copy; wipe yours afterwards
 ///
 /// # Returns
 ///
@@ -578,7 +583,7 @@ pub fn extract_archive_to_memory_with_progress(
 ///     manifest = list_archive_bytes_with_progress(f.read(), progress=progress)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, options=None, format=None, progress=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, progress=None, password=None))]
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
@@ -586,8 +591,10 @@ pub fn list_archive_bytes_with_progress(
     options: Option<PyRef<'_, PyListOptions>>,
     format: Option<&str>,
     progress: Option<Py<PyAny>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format)?;
+    let password = password_of(password)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
 
@@ -601,6 +608,7 @@ pub fn list_archive_bytes_with_progress(
             ListRequest::new(&config)
                 .with_options(options)
                 .with_progress(progress)
+                .with_password(password)
                 .list_reader(reader)
                 .map(|manifest| {
                     PyArchiveManifest::new(manifest, &config, VolumeIdentity::default())
@@ -625,6 +633,11 @@ pub fn list_archive_bytes_with_progress(
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if None
 /// * `progress` - Optional progress callback function
+/// * `password` - Optional `bytearray` password of a password-protected ZIP
+///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
+///   `str` raise `TypeError` because they cannot be wiped, an empty or
+///   over-long (more than 1024 bytes) password raises `ValueError` before the
+///   archive is read. exarch wipes its own copy; wipe yours afterwards
 ///
 /// # Returns
 ///
@@ -650,7 +663,7 @@ pub fn list_archive_bytes_with_progress(
 ///     report = verify_archive_bytes_with_progress(f.read(), progress=progress)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, options=None, format=None, progress=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, progress=None, password=None))]
 pub fn verify_archive_bytes_with_progress(
     py: Python<'_>,
     data: ArchiveInput,
@@ -658,8 +671,10 @@ pub fn verify_archive_bytes_with_progress(
     options: Option<PyRef<'_, PyVerificationOptions>>,
     format: Option<&str>,
     progress: Option<Py<PyAny>>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyVerificationReport> {
     let format = parse_format(format)?;
+    let password = password_of(password)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyVerificationOptions::snapshot(options);
 
@@ -673,6 +688,7 @@ pub fn verify_archive_bytes_with_progress(
             VerifyRequest::new(&config)
                 .with_options(options)
                 .with_progress(progress)
+                .with_password(password)
                 .verify_reader(reader)
         },
         |_, _| {},
@@ -830,9 +846,7 @@ impl MemoryRequest {
         if let Some(bytes) = max_bytes {
             request = request.with_limit(MemoryLimit::new(bytes));
         }
-        if let Some(password) = password_of(password)? {
-            request = request.with_password(password);
-        }
+        request = request.with_password(password_of(password)?);
         Ok(Self { request, format })
     }
 
@@ -953,6 +967,11 @@ pub fn create_archive_to_bytes(
 /// * `options` - Optional `ListOptions`, as in `list_archive`
 /// * `format` - The archive format (`"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`,
 ///   `"TarZst"`, `"Zip"`, `"SevenZ"`); detected from the leading bytes if None
+/// * `password` - Optional `bytearray` password of a password-protected ZIP
+///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
+///   `str` raise `TypeError` because they cannot be wiped, an empty or
+///   over-long (more than 1024 bytes) password raises `ValueError` before the
+///   archive is read. exarch wipes its own copy; wipe yours afterwards
 ///
 /// # Returns
 ///
@@ -974,15 +993,17 @@ pub fn create_archive_to_bytes(
 ///     manifest = list_archive_bytes(f.read())
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, options=None, format=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, password=None))]
 pub fn list_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyListOptions>>,
     format: Option<&str>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyArchiveManifest> {
     let format = parse_format(format)?;
+    let password = password_of(password)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyListOptions::snapshot(options);
 
@@ -992,6 +1013,7 @@ pub fn list_archive_bytes(
             let reader = data.into_reader(format)?;
             ListRequest::new(&config)
                 .with_options(options)
+                .with_password(password)
                 .list_reader(reader)
                 .map(|manifest| {
                     PyArchiveManifest::new(manifest, &config, VolumeIdentity::default())
@@ -1009,6 +1031,11 @@ pub fn list_archive_bytes(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if None
+/// * `password` - Optional `bytearray` password of a password-protected ZIP
+///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
+///   `str` raise `TypeError` because they cannot be wiped, an empty or
+///   over-long (more than 1024 bytes) password raises `ValueError` before the
+///   archive is read. exarch wipes its own copy; wipe yours afterwards
 ///
 /// # Returns
 ///
@@ -1028,15 +1055,17 @@ pub fn list_archive_bytes(
 /// print(report.is_safe)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (data, config=None, options=None, format=None))]
+#[pyo3(signature = (data, config=None, options=None, format=None, password=None))]
 pub fn verify_archive_bytes(
     py: Python<'_>,
     data: ArchiveInput,
     config: Option<PyRef<'_, PySecurityConfig>>,
     options: Option<PyRef<'_, PyVerificationOptions>>,
     format: Option<&str>,
+    password: Option<&Bound<'_, PyByteArray>>,
 ) -> PyResult<PyVerificationReport> {
     let format = parse_format(format)?;
+    let password = password_of(password)?;
     let config = PySecurityConfig::snapshot(config);
     let options = PyVerificationOptions::snapshot(options);
 
@@ -1046,6 +1075,7 @@ pub fn verify_archive_bytes(
             let reader = data.into_reader(format)?;
             VerifyRequest::new(&config)
                 .with_options(options)
+                .with_password(password)
                 .verify_reader(reader)
         })
     });

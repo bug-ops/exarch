@@ -9,6 +9,7 @@ use super::header::BlockIndex;
 use super::header::FileIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
+use super::links::BlockCipher;
 use super::links::BlockScan;
 use super::links::BlockStop;
 use super::links::LinkCapture;
@@ -287,6 +288,11 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
         next_file: first,
         visited: BTreeSet::new(),
         stop: None,
+        cipher: if header.is_block_encrypted(block_index) {
+            BlockCipher::Aes
+        } else {
+            BlockCipher::Plain
+        },
     };
     let parallel = scan.pass.config().parallel_decode;
     let result = decode_block_entries(
@@ -297,7 +303,7 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
         knobs,
         &mut |file, reader| Ok(visit_announced(&mut scan, progress, header, file, reader)),
     );
-    let (stop, visited) = (scan.stop.take(), scan.visited);
+    let (stop, visited, cipher) = (scan.stop.take(), scan.visited, scan.cipher);
 
     let unvisited: Vec<FileIndex> = all
         .filter(|index| !visited.contains(&index.get()))
@@ -320,15 +326,10 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
             else {
                 return Err(e.into());
             };
+            let failure = cipher.classify(DecodeFailure::from_sevenz(e));
             let path = file_path(header, index);
             let others: Vec<FileIndex> = unvisited.into_iter().filter(|&i| i != index).collect();
-            return record_block_failure(
-                pass,
-                header,
-                (path.as_path(), slot),
-                DecodeFailure::from_sevenz(e),
-                &others,
-            );
+            return record_block_failure(pass, header, (path.as_path(), slot), failure, &others);
         }
         (None, Ok(_)) => {
             mark_files(

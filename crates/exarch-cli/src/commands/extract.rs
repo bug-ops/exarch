@@ -21,9 +21,9 @@ use crate::password;
 use crate::progress::BarLength;
 use crate::progress::progress_for;
 use crate::sandbox;
-use crate::sandbox::Grant;
-use crate::sandbox::Scope;
-use crate::sandbox::Writes;
+use crate::sandbox::DestinationScope;
+use crate::sandbox::ExtractPreflight;
+use crate::sandbox::ExtractStaging;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveError;
@@ -159,12 +159,10 @@ fn list_for_extract(
     watcher: &mut dyn ProgressCallback,
 ) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    let mut request = ListRequest::new(config)
+    let request = ListRequest::new(config)
         .with_options(options)
-        .with_progress(watcher);
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+        .with_progress(watcher)
+        .with_password(password);
     request
         .for_extraction(archive, reuse)
         .map_err(|err| convert_error(Operation::Extract, err, archive))
@@ -217,11 +215,11 @@ impl WriteMode {
         }
     }
 
-    const fn writes(self) -> Writes {
+    const fn sandbox_staging(self) -> ExtractStaging {
         if self.stages() {
-            Writes::CoreStaged
+            ExtractStaging::Core
         } else {
-            Writes::Destination
+            ExtractStaging::Destination
         }
     }
 
@@ -424,12 +422,10 @@ impl ExtractPlan {
                 staging,
                 reservation,
             } => {
-                let mut request = ExtractRequest::new(config)
+                let request = ExtractRequest::new(config)
                     .with_options(options)
-                    .with_progress(progress);
-                if let Some(password) = password {
-                    request = request.with_password(password);
-                }
+                    .with_progress(progress)
+                    .with_password(password);
                 match reservation {
                     Some(reservation) => request.extract_reserved(archive, *reservation),
                     None => request.extract(archive, output_dir),
@@ -493,13 +489,13 @@ fn plan_extraction(
 /// publishes it, so a failed run discards its output), any other destination is
 /// created in place.
 fn destination_for_sandbox(
-    sandboxed: bool,
+    preflight: Option<&ExtractPreflight>,
     route: ExtractRoute,
     mode: WriteMode,
     output_dir: &Path,
     archive: &Path,
 ) -> Result<Option<Box<StagingReservation>>> {
-    if !cfg!(target_os = "linux") || !sandboxed || mode.stages() {
+    if !cfg!(target_os = "linux") || !matches!(preflight, Some(ExtractPreflight::Destination(_))) {
         return Ok(None);
     }
     if route == ExtractRoute::Stream(Requested::InPlace) {
@@ -550,31 +546,28 @@ pub fn execute(
     };
     let config = security_config(args, base)?;
     let password = password::read(args.password.source().as_ref())?;
-    let preflight =
-        sandbox::preflight(args.sandbox.mode, write_mode.writes()).map_err(anyhow::Error::new)?;
+    let preflight = sandbox::preflight_extract(args.sandbox.mode, write_mode.sandbox_staging())
+        .map_err(anyhow::Error::new)?;
     let pending = interrupt::prepare(&output_dir, write_mode.run(), mode);
     let route = ExtractRoute::decide(args, write_mode, &output_dir);
     let reservation = destination_for_sandbox(
-        preflight.is_some(),
+        preflight.as_ref(),
         route,
         write_mode,
         &output_dir,
         &args.archive,
     )?;
-    sandbox::report(
-        preflight,
-        &Grant {
-            archive: &args.archive,
-            scope: reservation.as_deref().map_or(
-                Scope::ExtractInPlace {
-                    destination: &output_dir,
-                },
-                Scope::ExtractReserved,
+    let status = preflight.map(|preflight| match preflight {
+        ExtractPreflight::Destination(preflight) => preflight.confine(
+            &args.archive,
+            reservation.as_deref().map_or(
+                DestinationScope::InPlace(&output_dir),
+                DestinationScope::Reserved,
             ),
-        },
-        formatter,
-    )
-    .map_err(anyhow::Error::new)?;
+        ),
+        ExtractPreflight::CoreStaged(unconfined) => unconfined.status(),
+    });
+    sandbox::report(status, formatter).map_err(anyhow::Error::new)?;
 
     let guard = pending.start();
     let plan = plan_extraction(

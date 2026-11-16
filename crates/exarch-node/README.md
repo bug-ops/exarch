@@ -145,7 +145,9 @@ the promise.
 ZIP archives with WinZip AES and 7z archives with AES-256 are read when you pass
 a `Uint8Array` (a `Buffer` works) as the `password` argument of `extractArchive`,
 `extractArchiveSync`, `extractArchiveWithProgress`, `listArchive`,
-`listArchiveSync`, `verifyArchive`, `verifyArchiveSync`,
+`listArchiveSync`, `verifyArchive`, `verifyArchiveSync`, the
+`listArchiveBytes` and `verifyArchiveBytes` families (also the `WithProgress` and
+`Sync` forms; last parameter, after `signal` or `progress`),
 `extractArchiveToMemory[WithProgress][Sync]` or `extractArchiveToCallback[Sync]`
 (the last parameter, after `signal`). A string is refused
 because it cannot be wiped; exarch wipes its own copy and you wipe yours.

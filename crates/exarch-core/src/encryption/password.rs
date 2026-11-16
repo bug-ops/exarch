@@ -46,6 +46,25 @@ impl Password {
         }
     }
 
+    /// Wraps `bytes` as a password ready to share between requests.
+    ///
+    /// # Errors
+    ///
+    /// As [`Password::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Password;
+    ///
+    /// let password = Password::shared(b"correct-horse".to_vec())?;
+    /// assert_eq!(password.byte_len(), 13);
+    /// # Ok::<(), exarch_core::PasswordError>(())
+    /// ```
+    pub fn shared(bytes: Vec<u8>) -> Result<std::sync::Arc<Self>, PasswordError> {
+        Self::new(bytes).map(std::sync::Arc::new)
+    }
+
     /// The number of bytes in the password.
     #[must_use]
     pub fn byte_len(&self) -> usize {

@@ -372,10 +372,7 @@ where
         .with_options(request.options)
         .with_progress(progress);
     #[cfg(feature = "encryption")]
-    let extract = match request.password().cloned() {
-        Some(password) => extract.with_password(password),
-        None => extract,
-    };
+    let extract = extract.with_password(request.password().cloned());
     let result = extract.extract(reader, &mut sink);
     match (failure, result) {
         (Some(err), _) => Err(CallbackError::Callback(err)),

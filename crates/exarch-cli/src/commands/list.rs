@@ -72,10 +72,9 @@ pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> CommandR
     let options = ListOptions::default().with_stored_targets(stored_targets);
 
     // List archive
-    let mut request = ListRequest::new(&config).with_options(options);
-    if let Some(password) = password {
-        request = request.with_password(password);
-    }
+    let request = ListRequest::new(&config)
+        .with_options(options)
+        .with_password(password);
     let manifest = request.list(&args.archive)?;
 
     // Format output

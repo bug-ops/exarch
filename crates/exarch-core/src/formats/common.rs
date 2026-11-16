@@ -25,6 +25,7 @@ use std::io;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
+use std::mem::DropGuard;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -148,11 +149,10 @@ impl NotARegularFile {
 /// `try_start` is the single per-entry cancellation hook of extraction,
 /// listing, verification and creation: it polls
 /// [`ProgressCallback::is_cancelled`] before announcing an entry.
-pub(crate) struct EntryCompleteGuard<'a> {
-    progress: &'a mut dyn ProgressCallback,
-    path: &'a std::path::Path,
-    fired: bool,
-}
+pub(crate) struct EntryCompleteGuard<'a>(DropGuard<Announced<'a>, fn(Announced<'a>)>);
+
+/// The callback and the entry whose completion the guard announces.
+type Announced<'a> = (&'a mut dyn ProgressCallback, &'a Path);
 
 impl<'a> EntryCompleteGuard<'a> {
     /// Fires `on_entry_start` and returns the guard that will fire
@@ -171,11 +171,10 @@ impl<'a> EntryCompleteGuard<'a> {
             return Err(ArchiveError::Cancelled);
         }
         progress.on_entry_start(path, position);
-        Ok(Self {
-            progress,
-            path,
-            fired: false,
-        })
+        Ok(Self(DropGuard::new(
+            (progress, path),
+            |(progress, path)| progress.on_entry_complete(path),
+        )))
     }
 
     /// Returns a mutable reference to the underlying progress callback.
@@ -183,22 +182,13 @@ impl<'a> EntryCompleteGuard<'a> {
     /// Use this to pass the callback to nested helpers while keeping the guard
     /// in scope for RAII completion.
     pub(crate) fn progress_mut(&mut self) -> &mut dyn ProgressCallback {
-        self.progress
+        &mut *self.0.0
     }
 
     /// Fire `on_entry_complete` immediately and prevent the drop from firing
     /// again.
-    pub(crate) fn complete(mut self) {
-        self.fired = true;
-        self.progress.on_entry_complete(self.path);
-    }
-}
-
-impl Drop for EntryCompleteGuard<'_> {
-    fn drop(&mut self) {
-        if !self.fired {
-            self.progress.on_entry_complete(self.path);
-        }
+    pub(crate) fn complete(self) {
+        drop(self);
     }
 }
 
@@ -850,7 +840,7 @@ pub(crate) fn check_directory_occupant(
         Ok(None | Some(Occupant::Directory)) | Err(_) => return Ok(()),
         Ok(Some(found)) => found,
     };
-    policy.refuse_repeat(
+    policy.repeats().refuse_repeat(
         EntryShape::Directory,
         rel,
         found,

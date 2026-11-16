@@ -149,10 +149,9 @@ fn extract_archive(
     // Release GIL during I/O-heavy extraction
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
-            let mut request = ExtractRequest::new(&config).with_options(options);
-            if let Some(password) = password {
-                request = request.with_password(password);
-            }
+            let request = ExtractRequest::new(&config)
+                .with_options(options)
+                .with_password(password);
             request.extract(&archive_path, &output_dir)
         })
     })?;
@@ -171,8 +170,7 @@ fn extract_archive(
 fn password_of(password: Option<&Bound<'_, PyByteArray>>) -> PyResult<Option<Arc<Password>>> {
     password
         .map(|bytes| {
-            Password::new(bytes.to_vec())
-                .map(Arc::new)
+            Password::shared(bytes.to_vec())
                 .map_err(|error| PyValueError::new_err(error.to_string()))
         })
         .transpose()
@@ -406,10 +404,9 @@ fn list_archive(
     catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
             let volume = VolumeIdentity::of_optional(destination.as_ref().map(AsRef::as_ref))?;
-            let mut request = ListRequest::new(&config).with_options(options);
-            if let Some(password) = password {
-                request = request.with_password(password);
-            }
+            let request = ListRequest::new(&config)
+                .with_options(options)
+                .with_password(password);
             request
                 .list(&archive_path)
                 .map(|manifest| PyArchiveManifest::new(manifest, &config, volume))
@@ -469,10 +466,9 @@ fn verify_archive(
 
     let report = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
-            let mut request = VerifyRequest::new(&config).with_options(options);
-            if let Some(password) = password {
-                request = request.with_password(password);
-            }
+            let request = VerifyRequest::new(&config)
+                .with_options(options)
+                .with_password(password);
             request.verify(&archive_path)
         })
     })?;
@@ -748,12 +744,10 @@ fn extract_archive_with_progress(
         "archive extraction with progress",
         progress,
         |progress| {
-            let mut request = ExtractRequest::new(&config)
+            let request = ExtractRequest::new(&config)
                 .with_options(options)
-                .with_progress(progress);
-            if let Some(password) = password.clone() {
-                request = request.with_password(password);
-            }
+                .with_progress(progress)
+                .with_password(password.clone());
             request.extract(&archive_path, &output_dir)
         },
         attach_finished_extraction,

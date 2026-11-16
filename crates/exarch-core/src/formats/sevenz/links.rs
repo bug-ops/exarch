@@ -12,10 +12,12 @@ use super::header::PerBlock;
 use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use crate::ArchiveError;
+use crate::EncryptionRefusal;
 use crate::EntryCompression;
 use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::Violation;
 use crate::copy::CopyError;
 use crate::formats::bounded_read::invalid_data;
 use crate::formats::common;
@@ -429,6 +431,38 @@ impl LinkCapture<'_> {
     }
 }
 
+/// Whether a block's content is AES-encrypted, which decides how a decode
+/// verdict on its bytes is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockCipher {
+    Plain,
+    Aes,
+}
+
+impl BlockCipher {
+    /// `failure` as this block reports it: in an encrypted block a wrong
+    /// password or tampered data fails as a checksum, a truncation or a
+    /// malformed stream, which is the encryption refusal extraction raises. A
+    /// resource limit and a source fault are not verdicts on the bytes.
+    pub(super) fn classify(self, failure: DecodeFailure) -> DecodeFailure {
+        let verdict = !matches!(
+            failure,
+            DecodeFailure::ResourceLimit(_) | DecodeFailure::Io(_)
+        );
+        if self == Self::Aes && verdict {
+            DecodeFailure::NotDecodable(
+                Violation::Encrypted {
+                    reason: EncryptionRefusal::WrongPasswordOrCorrupt,
+                    name: None,
+                }
+                .into(),
+            )
+        } else {
+            failure
+        }
+    }
+}
+
 /// Per-block state while decoding one 7z block for an integrity pass.
 pub(super) struct BlockScan<'a, 'c> {
     pub(super) pass: &'a mut IntegrityPass<'c>,
@@ -437,6 +471,7 @@ pub(super) struct BlockScan<'a, 'c> {
     pub(super) next_file: usize,
     pub(super) visited: BTreeSet<usize>,
     pub(super) stop: Option<BlockStop>,
+    pub(super) cipher: BlockCipher,
 }
 
 /// Why the scan of a block ended early.
@@ -483,6 +518,10 @@ impl BlockScan<'_, '_> {
             None => self
                 .pass
                 .decode(slot, reader, file.size, Charge::Free, ReadFamily::SevenZ),
+        };
+        let outcome = match outcome {
+            DecodeOutcome::Failed(failure) => DecodeOutcome::Failed(self.cipher.classify(failure)),
+            other => other,
         };
         let abandon = match &outcome {
             DecodeOutcome::Failed(DecodeFailure::ResourceLimit(_)) => {

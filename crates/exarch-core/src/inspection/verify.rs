@@ -5,7 +5,6 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::EntrySelection;
-use crate::ExistingFiles;
 use crate::IntegrityCheck;
 use crate::NoopProgress;
 use crate::ProgressCallback;
@@ -22,7 +21,6 @@ use crate::formats::common::is_extension_allowed;
 use crate::formats::common::open_archive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
-use crate::formats::occupant::OccupantPolicy;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::tree_occupant_refusal;
 use crate::formats::run_record::Maker;
@@ -599,7 +597,8 @@ fn repeat_issue(
         return None;
     }
     let held = tree.occupant(landing.as_path())?;
-    OccupantPolicy::new(ExistingFiles::Skip, config.repeated_paths)
+    config
+        .repeated_paths
         .refuse_repeat(
             entry.kind.shape(),
             landing.as_path(),

@@ -79,8 +79,15 @@
 //!
 //! - Opening refuses `ZipCrypto` entries; AES entries pass admission, and a
 //!   listing without a password marks them unverified.
-//! - Extraction without a password fails `PasswordRequired`, and with a wrong
-//!   one `WrongPassword`, before it writes anything.
+//! - A password is needed only for an encrypted entry the selection certainly
+//!   extracts. An encrypted entry (file, directory or symlink) the selection
+//!   leaves out has its payload never read, with or without a password, but
+//!   still fails path validation and counts as skipped like any entry. An entry
+//!   that only a later filter skips (the extension allowlist) still needs the
+//!   password.
+//! - Extraction that selects an encrypted entry without a password fails
+//!   `PasswordRequired`, and with a wrong one `WrongPassword`, before it writes
+//!   anything.
 //! - An entry is always read to its end, so the AES authentication code is
 //!   checked (`AuthenticationFailed` on mismatch) before the entry is
 //!   published.
@@ -105,6 +112,7 @@
 //! // ... extract with config
 //! ```
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::io::Seek;
 use std::path::Path;
@@ -141,6 +149,8 @@ use crate::encryption::Credentials;
 use crate::security::Compressed;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
+use crate::selection::Decision;
+use crate::selection::EntryShape;
 use crate::sink::SinkReuse;
 
 use crate::copy::declared_size_exceeded;
@@ -150,6 +160,7 @@ use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
 use crate::security::admitted::EntrySize;
+use crate::security::fs_view::LinkKind;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
 use crate::security::validator::require_non_empty_name;
@@ -169,6 +180,8 @@ use super::target::Admission;
 use super::target::ExtractTarget;
 use super::target::FileRequest;
 use super::target::HostTarget;
+use super::target::Sealed;
+use super::target::SealedRoute;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
 use super::traits::sealed;
@@ -475,6 +488,39 @@ impl<R: Read + Seek> AdmittedZip<'_, R> {
 pub(crate) struct CheckedZip<'a, R: Read + Seek> {
     admitted: AdmittedZip<'a, R>,
     config: &'a SecurityConfig,
+    sealed: SealedSkips,
+}
+
+/// The encrypted entries the selection leaves out, by index.
+///
+/// Decided once from the central directory (name, kind and mode are plaintext)
+/// and shared by the password check and the extraction loop, so a password is
+/// demanded for exactly the encrypted entries the run reads. The loop confirms
+/// each member against the target's own routing before trusting it.
+#[derive(Debug, Default)]
+struct SealedSkips(BTreeSet<usize>);
+
+impl SealedSkips {
+    fn contains(&self, index: usize) -> bool {
+        self.0.contains(&index)
+    }
+}
+
+/// What routing an encrypted entry by name left to do.
+enum SealedStep {
+    /// Skipped, or a root no-op: nothing is read.
+    Done,
+    /// The target selected it after all: it must be decrypted and extracted.
+    Selected,
+}
+
+/// The shape extraction gives an entry of this central-directory kind.
+const fn zip_entry_shape(kind: ZipEntryKind) -> EntryShape {
+    match kind {
+        ZipEntryKind::Directory => EntryShape::Directory,
+        ZipEntryKind::Symlink => EntryShape::Link(LinkKind::Symlink),
+        ZipEntryKind::Regular => EntryShape::File,
+    }
 }
 
 impl<R: Read + Seek> std::fmt::Debug for CheckedZip<'_, R> {
@@ -490,16 +536,20 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
     ///
     /// Returns the target's construction error, or the first extraction
     /// refusal.
-    pub(crate) fn extract_with<T: ExtractTarget>(
+    pub(crate) fn extract_with<T: SealedRoute>(
         self,
         make_target: impl FnOnce(&'a SecurityConfig) -> Result<T>,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let mut target = make_target(self.config)?;
-        self.admitted
-            .archive
-            .extract_entries(&mut target, self.config, options, progress)
+        self.admitted.archive.extract_entries(
+            &mut target,
+            self.config,
+            &self.sealed,
+            options,
+            progress,
+        )
     }
 }
 
@@ -800,44 +850,69 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &'a SecurityConfig,
     ) -> Result<CheckedZip<'a, R>> {
         let admitted = self.admit_structure(config)?;
-        admitted.archive.verify_password()?;
-        Ok(CheckedZip { admitted, config })
+        let sealed = admitted.archive.sealed_skips(config)?;
+        admitted.archive.verify_password(&sealed)?;
+        Ok(CheckedZip {
+            admitted,
+            config,
+            sealed,
+        })
     }
 
-    /// Refuses an extraction that cannot decrypt every encrypted entry, before
-    /// anything is written: without a password, or with one that does not match
-    /// an entry's verifier. Each entry is opened once with the password, which
-    /// derives its key (1000 PBKDF2 rounds) and checks the 2-byte verifier; the
-    /// authentication code is checked when the entry is read.
-    fn verify_password(&mut self) -> Result<()> {
-        let Some(name) = self.structure.first_encrypted() else {
-            return Ok(());
-        };
-        if !self.credentials.is_supplied() {
-            return Err(Violation::Encrypted {
-                reason: crate::EncryptionRefusal::PasswordRequired,
-                name: Some(name.into()),
-            }
-            .into());
+    /// The encrypted entries the run reads without decrypting: every one the
+    /// selection does not certainly extract.
+    ///
+    /// A non-directory entry that resolves to the destination root is a no-op
+    /// either way. Include hits are not recorded here; the routing of the
+    /// extraction loop records them.
+    fn sealed_skips(&mut self, config: &SecurityConfig) -> Result<SealedSkips> {
+        let mut skips = SealedSkips::default();
+        if self.structure.first_encrypted().is_none() {
+            return Ok(skips);
         }
-        let open_failed = |index: usize, error: &zip::result::ZipError| {
-            encryption_refusal(error, &self.credentials).unwrap_or_else(|| {
-                ArchiveError::from(Malformation::ZipEntryOpenFailed {
-                    index,
-                    detail: error.to_string().into(),
-                })
-            })
-        };
         for index in 0..self.inner.len() {
-            let encrypted = self
+            let raw = self
                 .inner
                 .by_index_raw(index)
-                .map_err(|e| open_failed(index, &e))?
-                .encrypted();
-            if encrypted {
-                open_entry(&mut self.inner, index, &self.credentials)
-                    .map_err(|e| open_failed(index, &e))?;
+                .map_err(|e| open_failure(&self.credentials, index, &e))?;
+            if raw.encrypted() && !sealed_entry_needs_decryption(&raw, config) {
+                skips.0.insert(index);
             }
+        }
+        Ok(skips)
+    }
+
+    /// Refuses an extraction that cannot decrypt every encrypted entry it
+    /// reads, before anything is written: without a password, or with one that
+    /// does not match an entry's verifier. Each such entry is opened once with
+    /// the password, which derives its key (1000 PBKDF2 rounds) and checks the
+    /// 2-byte verifier; the authentication code is checked when the entry is
+    /// read. Entries in `skips` are never opened with a password.
+    fn verify_password(&mut self, skips: &SealedSkips) -> Result<()> {
+        if self.structure.first_encrypted().is_none() {
+            return Ok(());
+        }
+        for index in 0..self.inner.len() {
+            if skips.contains(index) {
+                continue;
+            }
+            let raw = self
+                .inner
+                .by_index_raw(index)
+                .map_err(|e| open_failure(&self.credentials, index, &e))?;
+            if !raw.encrypted() {
+                continue;
+            }
+            if !self.credentials.is_supplied() {
+                return Err(Violation::Encrypted {
+                    reason: crate::EncryptionRefusal::PasswordRequired,
+                    name: Some(crate::bytes_text(raw.name_raw()).into()),
+                }
+                .into());
+            }
+            drop(raw);
+            open_entry(&mut self.inner, index, &self.credentials)
+                .map_err(|e| open_failure(&self.credentials, index, &e))?;
         }
         Ok(())
     }
@@ -938,6 +1013,27 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(())
     }
 
+    /// Routes an encrypted entry the selection was expected to skip, from its
+    /// raw (never decrypted) handle: the root no-op first, since the routing
+    /// refuses a non-directory root, then the target's own decision.
+    fn route_sealed<T: SealedRoute>(
+        raw: zip::read::ZipFile<'_, Shared<R>>,
+        index: usize,
+        target: &mut T,
+        ctx: &mut ZipExtractionContext<'_>,
+    ) -> Result<SealedStep> {
+        let path = Self::resolve_entry_path(&raw, index, ctx.config)?;
+        if zip_node_kind(&path, &raw)? == NodeKind::Directory && !raw.is_dir() {
+            return Ok(SealedStep::Done);
+        }
+        let shape = zip_entry_shape(zip_entry_kind(raw.is_dir(), raw.unix_mode()));
+        drop(raw);
+        Ok(match target.route_sealed(&path, shape, &mut ctx.tally)? {
+            Sealed::Skipped(_) => SealedStep::Done,
+            Sealed::Selected => SealedStep::Selected,
+        })
+    }
+
     /// Re-types the `zip` crate's own declared-size ceiling as a security
     /// violation, matching what `copy_with_buffer` reports for the same
     /// forgery.
@@ -949,6 +1045,68 @@ impl<R: Read + Seek> ZipArchive<R> {
             other => other,
         }
     }
+}
+
+/// Why opening entry `index` failed: an encryption refusal when that is the
+/// cause, else an unreadable entry.
+fn open_failure(
+    credentials: &Credentials,
+    index: usize,
+    error: &zip::result::ZipError,
+) -> ArchiveError {
+    encryption_refusal(error, credentials).unwrap_or_else(|| {
+        ArchiveError::from(Malformation::ZipEntryOpenFailed {
+            index,
+            detail: error.to_string().into(),
+        })
+    })
+}
+
+/// Opens entry `index` for decryption after the target's routing selected an
+/// entry the pre-decision expected to skip: refused without a password, and
+/// with one read like any selected entry, so a wrong password is reported as
+/// such.
+fn reopen_selected<'a, R: Read + Seek>(
+    archive: &'a mut ZipReader<R>,
+    index: usize,
+    credentials: &Credentials,
+    name: &str,
+) -> Result<zip::read::ZipFile<'a, R>> {
+    if !credentials.is_supplied() {
+        return Err(Violation::Encrypted {
+            reason: crate::EncryptionRefusal::PasswordRequired,
+            name: Some(name.into()),
+        }
+        .into());
+    }
+    open_entry(archive, index, credentials).map_err(|e| open_failure(credentials, index, &e))
+}
+
+/// Whether the run must decrypt the encrypted entry `raw`, decided from its
+/// plaintext name, kind and mode alone.
+///
+/// Only an entry the selection certainly extracts needs the password. Any
+/// other, including a name that fails to resolve, is read raw and routed by
+/// name, so it fails path validation or is skipped exactly as an unencrypted
+/// entry would, and the routing confirms the decision.
+pub(crate) fn sealed_entry_needs_decryption<R: Read>(
+    raw: &zip::read::ZipFile<'_, R>,
+    config: &SecurityConfig,
+) -> bool {
+    let Ok(name) = raw.name() else {
+        return false;
+    };
+    let Ok(path) = resolve_zip_entry_path(&name, config) else {
+        return false;
+    };
+    if !raw.is_dir() && matches!(EntryPath::of(&path), EntryPath::Root(_)) {
+        return false;
+    }
+    let shape = zip_entry_shape(zip_entry_kind(raw.is_dir(), raw.unix_mode()));
+    matches!(
+        config.selection.decide(&path, shape, None),
+        Ok(Decision::Extract(_))
+    )
 }
 
 /// The shared name of a duplicate-name finding.
@@ -976,10 +1134,11 @@ fn repeated_name_refusal(name: &str) -> ArchiveError {
 impl<R: Read + Seek> ZipArchive<R> {
     /// Runs the extraction loop against `target`: the validation gates are the
     /// same whether it writes to the filesystem or to an entry sink.
-    fn extract_entries<T: ExtractTarget>(
+    fn extract_entries<T: SealedRoute>(
         &mut self,
         target: &mut T,
         config: &SecurityConfig,
+        skips: &SealedSkips,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -991,15 +1150,15 @@ impl<R: Read + Seek> ZipArchive<R> {
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            let zip_file = match open_entry(&mut self.inner, i, &self.credentials) {
+            let sealed = skips.contains(i);
+            let zip_file = match if sealed {
+                self.inner.by_index_raw(i)
+            } else {
+                open_entry(&mut self.inner, i, &self.credentials)
+            } {
                 Ok(f) => f,
                 Err(e) => {
-                    let err = encryption_refusal(&e, &self.credentials).unwrap_or_else(|| {
-                        ArchiveError::from(Malformation::ZipEntryOpenFailed {
-                            index: i,
-                            detail: e.to_string().into(),
-                        })
-                    });
+                    let err = open_failure(&self.credentials, i, &e);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
@@ -1028,16 +1187,39 @@ impl<R: Read + Seek> ZipArchive<R> {
                 config,
             };
 
-            let claimed = claim_kept(&zip_file, &entry_path, self.structure.reuse_mut());
-            let result = Self::process_entry(
-                zip_file,
-                i,
-                target,
-                &mut ctx,
-                self.structure.reuse(),
-                claimed,
-                self.structure.source(),
-            );
+            let result = if sealed {
+                let name = crate::bytes_text(zip_file.name_raw());
+                match Self::route_sealed(zip_file, i, target, &mut ctx) {
+                    Ok(SealedStep::Done) => Ok(()),
+                    Ok(SealedStep::Selected) => {
+                        reopen_selected(&mut self.inner, i, &self.credentials, &name).and_then(
+                            |reopened| {
+                                Self::process_entry(
+                                    reopened,
+                                    i,
+                                    target,
+                                    &mut ctx,
+                                    self.structure.reuse(),
+                                    None,
+                                    self.structure.source(),
+                                )
+                            },
+                        )
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                let claimed = claim_kept(&zip_file, &entry_path, self.structure.reuse_mut());
+                Self::process_entry(
+                    zip_file,
+                    i,
+                    target,
+                    &mut ctx,
+                    self.structure.reuse(),
+                    claimed,
+                    self.structure.source(),
+                )
+            };
 
             if let Err(e) = result {
                 drop(guard);

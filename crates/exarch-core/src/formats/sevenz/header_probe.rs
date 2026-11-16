@@ -188,11 +188,11 @@ fn probe_io<R: Read + Seek>(source: &mut R, max_bytes: u64) -> io::Result<Declar
         K_ENCODED_HEADER if size <= max_bytes => {
             source.seek(SeekFrom::Start(at))?;
             let record = read_bounded(&mut *source, size)?;
-            EncodedRecord::parse(&record)
-                .and_then(|record| record.decoded())
-                .map_or(DeclaredHeader::Unrecognized, |decoded| {
-                    DeclaredHeader::Encoded { decoded }
-                })
+            EncodedRecord::parse(&record).map_or(DeclaredHeader::Unrecognized, |record| {
+                DeclaredHeader::Encoded {
+                    decoded: record.largest_unpack_size,
+                }
+            })
         }
         _ => DeclaredHeader::Unrecognized,
     })
@@ -340,6 +340,7 @@ struct EncodedRecord<'a> {
     pack_pos: u64,
     pack_size: u64,
     first_unpack_size: u64,
+    largest_unpack_size: u64,
     coders: Vec<Coder<'a>>,
 }
 
@@ -355,11 +356,13 @@ impl<'a> EncodedRecord<'a> {
             pack_pos: streams.pack_pos,
             pack_size: streams.first_pack_size?,
             first_unpack_size: streams.folders.first_unpack_size?,
+            largest_unpack_size: streams.folders.largest_unpack_size?,
             coders: streams.folders.first_coders?,
         })
     }
 
-    /// The size the header decodes to, when one coder decodes it.
+    /// The size the header decodes to, when one coder decodes it. The only
+    /// size [`decode_header`] may count entries from.
     fn decoded(&self) -> Option<u64> {
         (self.coders.len() == 1).then_some(self.first_unpack_size)
     }
@@ -394,6 +397,7 @@ struct Folders<'a> {
     crcs: Digests<'a>,
     first_coders: Option<Vec<Coder<'a>>>,
     first_unpack_size: Option<u64>,
+    largest_unpack_size: Option<u64>,
 }
 
 /// Which of a list of streams carry a CRC.
@@ -561,6 +565,7 @@ impl<'a> Bytes<'a> {
             if index == 0 {
                 folders.first_unpack_size = Some(size);
             }
+            folders.largest_unpack_size = folders.largest_unpack_size.max(Some(size));
         }
         let mut next = self.byte()?;
         if next == K_CRC {
@@ -1009,7 +1014,22 @@ mod tests {
         let parsed = EncodedRecord::parse(&record).unwrap();
         assert_eq!(parsed.coders.len(), 2);
         assert_eq!(parsed.decoded(), None);
-        assert_eq!(probed_record(&record), DeclaredHeader::Unrecognized);
+        assert_eq!(
+            probed_record(&record),
+            DeclaredHeader::Encoded { decoded: 5 }
+        );
+    }
+
+    #[test]
+    fn the_probe_declares_the_largest_unpack_size_of_a_multi_coder_record() {
+        let mut record = record_of(&[(METHOD_COPY, &[]), (METHOD_LZMA2, &[1])], 7, 5);
+        let sizes = record.len() - 3;
+        record[sizes] = 90;
+        assert_eq!(
+            probed_record(&record),
+            DeclaredHeader::Encoded { decoded: 90 }
+        );
+        assert_eq!(EncodedRecord::parse(&record).unwrap().decoded(), None);
     }
 
     /// The archive made of `record` as its next header, with `packed` bytes

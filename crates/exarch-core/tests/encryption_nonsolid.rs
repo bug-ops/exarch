@@ -65,10 +65,7 @@ fn extract_path(
 ) -> (TempDir, Result<(), ArchiveError>) {
     let dest = TempDir::new().unwrap();
     let request = ExtractRequest::new(config);
-    let request = match password {
-        Some(password) => request.with_password(password),
-        None => request,
-    };
+    let request = request.with_password(password);
     let result = request.extract(archive, dest.path()).map(drop);
     (dest, result)
 }
@@ -159,11 +156,11 @@ fn nonsolid_sevenz_list_and_verify_follow_the_password() {
     let config = SecurityConfig::default();
     for archive in ["content.7z", "header.7z"] {
         let listed = ListRequest::new(&config)
-            .with_password(password(RIGHT))
+            .with_password(Some(password(RIGHT)))
             .list(fixture(archive))
             .unwrap();
         let report = VerifyRequest::new(&config)
-            .with_password(password(RIGHT))
+            .with_password(Some(password(RIGHT)))
             .verify(fixture(archive))
             .unwrap();
 
@@ -333,7 +330,7 @@ fn verify_of_an_encrypted_zip_with_the_password_decodes_every_entry() {
 
     let report = VerifyRequest::new(&SecurityConfig::default())
         .with_options(integrity_options())
-        .with_password(password(RIGHT))
+        .with_password(Some(password(RIGHT)))
         .verify(archive)
         .unwrap();
 
@@ -351,7 +348,7 @@ fn verify_of_a_tampered_encrypted_zip_reports_corrupt_data() {
 
     let report = VerifyRequest::new(&SecurityConfig::default())
         .with_options(integrity_options())
-        .with_password(password(RIGHT))
+        .with_password(Some(password(RIGHT)))
         .verify(&archive)
         .unwrap();
 

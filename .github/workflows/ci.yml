@@ -740,6 +740,17 @@ jobs:
       - name: Check MSRV for the workspace
         run: cargo check --workspace --all-features
 
+  # Tracked files that state an MSRV must match [workspace.package] rust-version
+  msrv-statements:
+    name: MSRV Statements
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check MSRV statements
+        run: .github/scripts/check-msrv-statements.sh
+
   # Agent skills under skills/: Agent Skills spec via the reference validator,
   # plus the project size and link limits it does not cover
   skills:
@@ -900,7 +911,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, wasm, bench-build, fuzz-build, skills]
+    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, msrv-statements, wasm, bench-build, fuzz-build, skills]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -919,6 +930,7 @@ jobs:
             "${{ needs.test-node.result }}"
             "${{ needs.test-node-runtimes.result }}"
             "${{ needs.msrv.result }}"
+            "${{ needs.msrv-statements.result }}"
             "${{ needs.wasm.result }}"
             "${{ needs.bench-build.result }}"
             "${{ needs.fuzz-build.result }}"

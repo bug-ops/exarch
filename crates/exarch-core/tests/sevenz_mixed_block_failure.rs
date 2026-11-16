@@ -31,7 +31,7 @@ fn extract(archive: &Path, with_password: bool) -> Result<(), ArchiveError> {
     let config = SecurityConfig::default();
     let request = ExtractRequest::new(&config);
     let request = if with_password {
-        request.with_password(Arc::new(Password::new(RIGHT.to_vec()).unwrap()))
+        request.with_password(Some(Arc::new(Password::new(RIGHT.to_vec()).unwrap())))
     } else {
         request
     };

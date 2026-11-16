@@ -553,6 +553,10 @@ fn register() -> std::io::Result<Option<Handlers>> {
 
 #[cfg(unix)]
 fn start_reading(mut signals: Handlers, handler: fn(Stop)) -> std::io::Result<()> {
+    signals
+        .pending()
+        .filter_map(Stop::from_raw_signal)
+        .for_each(handler);
     std::thread::Builder::new()
         .name("exarch-signals".to_owned())
         .spawn(move || {

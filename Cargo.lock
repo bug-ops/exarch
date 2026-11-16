@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bzip2",
  "criterion",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-node"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "exarch-core",
  "napi",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-python"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "exarch-core",
  "pyo3",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-testkit"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
 ]
@@ -2326,12 +2326,26 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zip"
-version = "9.4.1"
+version = "9.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f17fbc870bfac28c6228aed7d6e6df352e26bf7015c4313727e16a7a01ce5e"
+checksum = "e3476fd497ac8af5b1ec7b51acab7bef380f7e8dd8e0487595bafd839417a302"
 dependencies = [
  "aes",
  "bzip2",

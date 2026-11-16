@@ -3,7 +3,7 @@
 `cargo-fuzz` (libFuzzer) targets for the untrusted archive parsers in
 `exarch-core`, the in-memory path model behind `SinkExtractRequest`, and reader
 format detection. This narrows the verification gap tracked in #577 — it does
-not close it. Seven targets, 300 seconds each, run weekly on a corpus that
+not close it. Nine targets, 300 seconds each, run weekly on a corpus that
 persists across runs via CI cache; that is a real but narrow
 layer on top of the existing regression-test harness
 (`crates/exarch-core/tests/security/`), not a replacement for it.
@@ -99,7 +99,7 @@ would otherwise fail the build for no security reason.
 - **`fuzz-build`** (mandatory, every PR touching Rust code): `cargo +nightly
   check --manifest-path fuzz/Cargo.toml --all-targets`. Compile-only, catches
   a broken target before it can sit undetected until the next scheduled run.
-- **`fuzz`** (scheduled, weekly): runs all seven targets for 300 seconds each
+- **`fuzz`** (scheduled, weekly): runs all nine targets for 300 seconds each
   against a corpus that persists via `actions/cache`. Not part of the
   required `ci-success` check — non-blocking by design.
 
@@ -128,7 +128,7 @@ would otherwise fail the build for no security reason.
 
 `fuzz/oss-fuzz/` holds the submission scaffolding for upstream
 [OSS-Fuzz](https://google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/)
-integration: `project.yaml`, `Dockerfile`, and `build.sh`, building all seven
+integration: `project.yaml`, `Dockerfile`, and `build.sh`, building all nine
 targets in `fuzz/fuzz_targets/` via `cargo fuzz build`. This is scaffolding
 only — actual onboarding requires a PR to `google/oss-fuzz` reviewed and
 merged by Google, which is external to this repository and not done here.

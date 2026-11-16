@@ -15,6 +15,8 @@ Command-line utility for secure archive extraction and creation. Built on [exarc
 - **Symlink/hardlink validation** - Prevents symlink escape attacks
 - **Quota enforcement** - File count, total size, and per-file limits
 - **Multiple formats** - TAR (gz, bz2, xz, zstd), ZIP, and 7z support
+- **Encrypted archives** - Reads password-protected ZIP (AES) and 7z archives with a password that never touches argv or the environment
+- **Optional sandbox** - `--sandbox` adds a Linux Landlock backstop on top of the path checks
 - **Multiple output modes** - Human-readable and JSON output
 
 ## Installation
@@ -154,6 +156,8 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
 | `--mark-propagation` | never | Copy the archive file's download-origin mark (macOS quarantine attribute, Windows Mark-of-the-Web) onto extracted files: `never` copies nothing, `when-marked` copies it when the archive bears one. A no-op on Linux |
+| `--repeated-paths` | keep-first | How an archive that names one path twice is handled (also accepted by `list` and `verify`): `keep-first` keeps the first copy and lets `--force` decide each repeat; `refuse` rejects the archive (`extract`, `list`) or reports it (`verify`) instead. With `--atomic` nothing is left behind |
+| `--sandbox` | off | Confine the process with Linux Landlock (Linux 5.19 or newer; also accepted by `list` and `verify`): `off`, `best-effort` (reports the outcome) or `require` (fails with `SandboxNotEnforced` unless fully enforced). Not combinable with `--atomic` |
 | `--force` | false | Overwrite existing files |
 | `--atomic` | false | Extract atomically: write to a temp directory and rename into place on success, cleaning up on failure. The destination must be missing or empty (a non-empty one is refused with `OutputExists`). Combined with `--force`, the existing destination is renamed aside first, the new content renamed into its place second, and only once that swap succeeds is the old destination removed — a failure at any point leaves either the old or the new content in place under the destination name. |
 | `--include` | — | Act only on entries matching the pattern (repeatable; a component, a `tmp*` prefix, a `*.rs` suffix or a relative path); a pattern that matches no entry is an error. Also accepted by `list` and `verify` |
@@ -169,6 +173,21 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 
 > [!IMPORTANT]
 > `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. It also refuses `.`, `..`, any directory that contains the working directory or the archive, a filesystem root, and any use of `--include`, `--exclude`, `--strip-components` or `--flatten`. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
+
+### Occupied Destinations
+
+An entry that would land on something already in the destination is refused with a typed error in every format and on every platform, and the message names the kind of occupant. By default the error is `OutputExists` and lists every conflict. With `--force`, a file or link over an existing symlink is refused as `SECURITY_VIOLATION` / `EXISTING_SYMLINK` ("refusing to replace the existing symlink at <entry>"), because a symlink is never replaced in place; a file over a directory, a directory over a file and an entry below a file stay `OutputExists`. With `--json`, `error.conflicts` is an array of `{path, occupant}` objects and an error about a symlink carries `error.by`, telling who made it.
+
+An archive path that is not a regular file (a FIFO, a pipe, a directory, a device) is refused at once with `SourceNotAccessible` instead of blocking.
+
+### Sandbox
+
+```bash
+exarch extract --sandbox best-effort archive.tar.gz out/
+exarch extract --sandbox require archive.tar.gz out/
+```
+
+`--sandbox` restricts the process with Linux Landlock so that a bug in a parser cannot write outside the destination. `best-effort` never fails the run and reports what the kernel enforced; `require` stops with `SandboxNotEnforced` (exit 1) before any entry is read unless the confinement is complete, and always does off Linux. Full enforcement needs Landlock ABI v3 (Linux 6.2); Linux 5.19 enforces part of it. `--json` adds a top-level `sandbox` object that says what was enforced. `create` does not accept the flag.
 
 ## Encrypted Archives
 
@@ -217,6 +236,9 @@ exarch create backup.tar.gz ./project --include-hidden
 
 # Overwrite existing archive
 exarch create -f backup.tar.gz ./src
+
+# Compress ZIP entries on four threads
+exarch create --threads 4 archive.zip ./data
 ```
 
 ### Create Options
@@ -230,12 +252,13 @@ exarch create -f backup.tar.gz ./src
 | `--strip-prefix` | | Strip path prefix |
 | `--max-file-size` | — | Skip source files larger than this threshold (supports K/M/G/T suffixes) |
 | `--preserve-permissions` | true | Store Unix permissions in the archive; pass `--preserve-permissions=false` for a portable archive |
+| `--threads` | | Compress ZIP entries on up to N threads; the archive bytes do not change and other formats ignore it (default: one thread) |
 | `--force` | `-f` | Overwrite existing file |
-
-> [!NOTE]
-> Two sources that would produce the same entry name (for example `create out.tar c1 c2` where both hold `same.txt`) are refused before anything is written.
 | `--quiet` | `-q` | Suppress output |
 | `--json` | | Output JSON format |
+
+> [!NOTE]
+> Two sources that would produce the same entry name (for example `create out.tar c1 c2` where both hold `same.txt`) are refused before anything is written. The archive is byte-identical across runs: sources are walked in file-name order and ZIP entries carry the source modification time. A source that changes while it is archived fails with `SourceChanged`, and FIFOs, sockets and devices are skipped.
 
 > [!TIP]
 > Archive format is detected from the output file extension. Supported formats: `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`, `.zip`
@@ -260,6 +283,7 @@ exarch list [OPTIONS] <ARCHIVE>
 | `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | Preview what `extract` would do: each entry is annotated `[lands at <path>]` or `[skipped: <kind>]`, and `--json` adds a `disposition` per entry |
 | `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |
+| `--repeated-paths`, `--sandbox`, `--password-file`, `--password-fd`, `--password-prompt` | Same as `extract` |
 | `--allow-solid-archives` | Allow solid 7z archives (higher memory usage during listing) |
 | `--json`, `-j` | Output results in JSON format |
 
@@ -305,6 +329,7 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 | `--allow-solid-archives` | Allow solid 7z archives during verification |
 | `--zip-consistency` | `enforce` (default) reports ZIP structure that different readers interpret differently as issues; `ignore` raises no structural issue |
 | `--parallel-decode-memory` | Memory for decoding 7z LZMA2 runs ahead on worker threads with `--check-integrity` (default 128M, K/M/G/T suffixes), or `off` (same as `extract`) |
+| `--repeated-paths`, `--sandbox`, `--password-file`, `--password-fd`, `--password-prompt` | Same as `extract` |
 | `--json` | Output results in JSON format |
 
 > [!TIP]

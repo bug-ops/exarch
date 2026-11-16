@@ -284,7 +284,8 @@ Extract an archive to the specified directory with security validation.
 | `HardlinkEscapeError` | Hardlink target outside extraction directory |
 | `ZipBombError` | Potential zip bomb detected |
 | `QuotaExceededError` | Resource quota exceeded |
-| `SecurityViolationError` | Security policy violation |
+| `SecurityViolationError` | Security policy violation; `by` says who made the symlink of an `EXISTING_SYMLINK` refusal |
+| `OutputExistsError` | An extraction met an occupied destination (`conflicts` is a `list[OccupiedPath]` of `path` and `occupant`), or a creation output exists. A destination below a file raises `NotADirectoryError` |
 | `UnsupportedFormatError` | Archive format not supported |
 | `UnknownFormatError` | Archive format cannot be determined from path or magic bytes (subclass of `UnsupportedFormatError`) |
 | `InvalidArchiveError` | Archive is corrupted |
@@ -354,6 +355,9 @@ config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 config = config.with_zip_consistency(
     "ignore"
 )  # ZIP structure policy: "enforce" (default) or "ignore"
+config = config.with_repeated_paths(
+    "refuse"
+)  # Reject an archive that names one path twice; "keep_first" (default) keeps the first copy
 config = config.with_parallel_decode_memory(
     256 * 1024 * 1024
 )  # 7z LZMA2 lookahead memory (default 128 MiB); None decodes on one thread

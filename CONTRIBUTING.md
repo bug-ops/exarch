@@ -32,11 +32,20 @@ rustup component add rustfmt clippy
 cargo install cargo-nextest cargo-deny cargo-llvm-cov
 
 # Build all crates
-cargo build --workspace
+cargo build --workspace --all-features
 
-# Run tests
-cargo nextest run --workspace
+# Run tests (the Python and Node.js bindings are tested separately, see below)
+cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node
 ```
+
+### Cargo Features
+
+| Crate | Feature | Purpose |
+|-------|---------|---------|
+| `exarch-core` | `encryption` | Reads password-protected ZIP (WinZip AES) and 7z (AES-256) archives through `Password`. `exarch-cli` and the bindings enable it; `--all-features` covers it in tests |
+| `exarch-core` | `testing` | Exposes security primitives for benchmarks and integration tests; not for production |
+| `exarch-cli` | `test-hooks` | Debug-only seams (a stalled read at a chosen entry, a sandbox probe) used by the forced-exit and sandbox tests (`tests/forced_exit.rs`, `tests/sandbox_stage.rs`); never enabled in a shipped binary |
+| `exarch-python` | `panic-injection` | A deliberate-panic hook for the panic-safety test; never enabled for published wheels |
 
 ### Building Bindings
 
@@ -48,6 +57,12 @@ maturin develop
 pytest tests/
 ```
 
+CI also checks that the type stubs match the runtime. After `maturin develop`:
+
+```bash
+python -m mypy.stubtest exarch --allowlist stubtest-allowlist.txt
+```
+
 **Node.js bindings:**
 ```bash
 cd crates/exarch-node
@@ -55,6 +70,10 @@ npm install
 npm run build
 npm test
 ```
+
+The release gate checks the exact packed tarball against the committed loader
+(`index.js`) and `package.json`. Run it locally with `npm run check:package`,
+or `node scripts/check-package.mjs <tarball>` for a tarball you packed.
 
 ## Development Workflow
 
@@ -109,7 +128,11 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace
 
 # Run tests
-cargo nextest run --all-features --workspace
+cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node
+cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node
+
+# Check that every tracked file states the MSRV of Cargo.toml
+.github/scripts/check-msrv-statements.sh
 
 # Security audit
 cargo deny check
@@ -117,7 +140,7 @@ cargo deny check
 
 **Quick alias:**
 ```bash
-alias exarch-check='cargo +nightly fmt --all -- --check && cargo clippy --all-targets --all-features --workspace -- -D warnings && cargo nextest run --all-features --workspace'
+alias exarch-check='cargo +nightly fmt --all -- --check && cargo clippy --all-targets --all-features --workspace -- -D warnings && cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node'
 ```
 
 ## Testing
@@ -125,8 +148,8 @@ alias exarch-check='cargo +nightly fmt --all -- --check && cargo clippy --all-ta
 ### Running Tests
 
 ```bash
-# All tests
-cargo nextest run --workspace
+# All tests (bindings excluded)
+cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node
 
 # Specific crate
 cargo nextest run -p exarch-core
@@ -158,9 +181,9 @@ The C codecs need a WASI libc and `llvm-ar`; the `wasm` job in
 
 ### Fuzzing
 
-Seven `cargo-fuzz` targets live in `fuzz/` (`tar`, `zip`, `sevenz`,
-`safe_path`, `extract_archive`, `sink`, `detect`). Changes to archive parsers,
-`extract_to_sink` or `ArchiveReader::detect` must keep `cargo +nightly check
+Nine `cargo-fuzz` targets live in `fuzz/` (`tar`, `zip`, `sevenz`,
+`safe_path`, `glob`, `sink`, `detect`, `encrypted`, `extract_archive`). Changes
+to archive parsers, decryption, `extract_to_sink` or `ArchiveReader::detect` must keep `cargo +nightly check
 --manifest-path fuzz/Cargo.toml --all-targets` passing. See
 [`fuzz/README.md`](fuzz/README.md) for running targets and turning a crash into
 a regression test.
@@ -174,10 +197,19 @@ a regression test.
 - `crates/exarch-core/tests/fixtures/generate_7z_p7zip_fixture.sh` needs Docker; it builds
   `symlink-p7zip.7z` and `symlink-p7zip-dir.7z` with a pinned p7zip 16.02.
 
+Other test data is committed, not generated: `crates/exarch-core/tests/data/`
+holds the encrypted-archive and tar-minefield corpora (each with a `README.md`
+describing its provenance), and `crates/exarch-python/tests/fixtures/` the
+Python fixtures. `exarch-core` tests read their fixtures from inside the
+crate (`crates/exarch-core/tests/`), so the packaged crate still compiles its
+tests; the tar-minefield corpus and its test are excluded from the package.
+
 ### Writing Tests
 
 - Place unit tests in the same file as the code being tested
 - Place integration tests in `tests/` directory
+- Tests that wait on a child process or a signal wait on a ready line or the
+  child's output, never a fixed sleep
 - Security validators must have **100% test coverage**
 - Overall project coverage target: **80%+**
 - Write `assert_matches!(value, pattern)`, never `assert!(matches!(value, pattern))`:

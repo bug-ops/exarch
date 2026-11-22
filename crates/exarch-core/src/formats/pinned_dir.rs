@@ -91,6 +91,7 @@ use crate::DestinationStep;
 use crate::Result;
 use crate::mark::MarkRun;
 use crate::security::fs_view::Occupant;
+use crate::security::permissions::CreateMode;
 use crate::types::DestDir;
 
 #[cfg(windows)]
@@ -588,7 +589,7 @@ mod imp {
     use crate::formats::file_identity::IdentityKey;
     use crate::formats::occupant::ReplacePermit;
     use crate::security::fs_view::Occupant;
-    use crate::security::permissions::SanitizedMode;
+    use crate::security::permissions::CreateMode;
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const DIR_ACCESS: OFlags = OFlags::PATH;
@@ -977,18 +978,32 @@ mod imp {
 
         /// Creates `name` exclusively, never following a symlink at it.
         ///
-        /// With `mode`, the file is created owner-only and the caller gives it
-        /// exactly `mode` through the open descriptor (`fchmod`) via the
-        /// returned [`PendingMode`], so the umask cannot reduce it and no path
-        /// is resolved again. The caller applies the mode once it has written
-        /// whatever must precede a restrictive mode (the download-origin mark).
+        /// With an [`Exact`](CreateMode::Exact) mode, the file is created
+        /// owner-only and the caller gives it exactly that mode through the
+        /// open descriptor (`fchmod`) via the returned [`PendingMode`], so the
+        /// umask cannot reduce it and no path is resolved again. With an
+        /// [`Umasked`](CreateMode::Umasked) mode the create call carries the
+        /// mode (plus owner read and write) and the kernel applies the umask;
+        /// [`PendingMode`] then only takes back the owner bits the mode lacks.
+        /// The caller applies the mode once it has written whatever must
+        /// precede a restrictive mode (the download-origin mark).
         pub(crate) fn create_new_deferred(
             &self,
             name: Leaf<'_>,
-            mode: Option<SanitizedMode>,
+            mode: Option<CreateMode>,
         ) -> io::Result<(File, PendingMode)> {
-            let creation =
-                mode.map_or(Mode::from_bits_truncate(0o666), |_| Mode::RUSR | Mode::WUSR);
+            let creation = match mode {
+                None => Mode::from_bits_truncate(0o666),
+                Some(CreateMode::Exact(_)) => Mode::RUSR | Mode::WUSR,
+                Some(CreateMode::Umasked(mode)) => Mode::from_bits_truncate(
+                    // A sanitized mode fits 0o7777, so the raw type (u16 on
+                    // some targets) holds it.
+                    // Owner rw stays on until `PendingMode::apply`: the
+                    // download-origin xattr write needs write permission even
+                    // through an open fd.
+                    rustix::fs::RawMode::try_from(mode.as_u32() | 0o600).unwrap_or(0o600),
+                ),
+            };
             let fd = rustix::fs::openat(
                 &self.0,
                 name.as_os_str(),
@@ -1198,7 +1213,7 @@ mod imp {
     use crate::formats::reparse;
     use crate::formats::reparse::ReparseTarget;
     use crate::security::fs_view::Occupant;
-    use crate::security::permissions::SanitizedMode;
+    use crate::security::permissions::CreateMode;
 
     const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
@@ -1473,7 +1488,7 @@ mod imp {
         pub(crate) fn create_new_deferred(
             &self,
             name: Leaf<'_>,
-            mode: Option<SanitizedMode>,
+            mode: Option<CreateMode>,
         ) -> io::Result<(File, PendingMode)> {
             let request = Request {
                 access: FILE_GENERIC_WRITE,
@@ -1532,7 +1547,7 @@ impl VettedDir {
     pub(crate) fn create_new(
         &self,
         name: Leaf<'_>,
-        mode: Option<crate::security::permissions::SanitizedMode>,
+        mode: Option<CreateMode>,
     ) -> std::io::Result<std::fs::File> {
         let (file, pending) = self.create_new_deferred(name, mode)?;
         pending.apply(&file)?;
@@ -1549,7 +1564,7 @@ impl VettedDir {
 /// succeeded, or the file would keep the owner-only mode.
 #[derive(Debug)]
 #[must_use = "the file stays owner-only until the mode is applied"]
-pub(crate) struct PendingMode(Option<crate::security::permissions::SanitizedMode>);
+pub(crate) struct PendingMode(Option<CreateMode>);
 
 impl PendingMode {
     /// A mode that was already set, so applying it does nothing.
@@ -1557,19 +1572,32 @@ impl PendingMode {
         Self(None)
     }
 
-    /// Sets the mode through the open descriptor (`fchmod`), so the umask
-    /// cannot reduce it and no path is resolved again. Windows has no Unix
-    /// mode and does nothing.
+    /// Sets the mode through the open descriptor (`fchmod`), so no path is
+    /// resolved again. An exact mode is set whole, so the umask cannot reduce
+    /// it. An umasked mode already carries the umask from the create; only
+    /// the owner read and write bits the mode lacks (owner-only entries) are
+    /// taken back, from the mode the kernel actually gave, so the umask is
+    /// never read. Windows has no Unix mode and does nothing.
     ///
     /// # Errors
     ///
-    /// The I/O error of the `fchmod`.
+    /// The I/O error of the `fstat` or `fchmod`.
     #[cfg(unix)]
     pub(crate) fn apply(self, file: &std::fs::File) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        self.0.map_or(Ok(()), |mode| {
-            file.set_permissions(std::fs::Permissions::from_mode(mode.as_u32()))
-        })
+        let set = |bits: u32| file.set_permissions(std::fs::Permissions::from_mode(bits));
+        match self.0 {
+            None => Ok(()),
+            Some(CreateMode::Exact(mode)) => set(mode.as_u32()),
+            Some(CreateMode::Umasked(mode)) => {
+                let lacking = 0o600 & !mode.as_u32();
+                if lacking == 0 {
+                    return Ok(());
+                }
+                let given = file.metadata()?.permissions().mode() & 0o7777;
+                set(given & !lacking)
+            }
+        }
     }
 
     /// There is no mode to set on this platform.
@@ -1790,7 +1818,8 @@ mod tests {
         let config = crate::SecurityConfig::default();
         let mode = crate::security::permissions::sanitize_permissions(RawMode::new(0o640), &config);
 
-        dir.create_new(leaf("f"), Some(mode)).unwrap();
+        dir.create_new(leaf("f"), Some(CreateMode::Exact(mode)))
+            .unwrap();
 
         let actual = fs::metadata(temp.path().join("f"))
             .unwrap()

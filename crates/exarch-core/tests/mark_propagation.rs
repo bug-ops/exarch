@@ -120,7 +120,9 @@ const FILES: [&str; 4] = ["App.app/Contents/MacOS/run", "ro.txt", "exec", "link.
 const DIRECTORIES: [&str; 3] = ["App.app", "App.app/Contents", "App.app/Contents/MacOS"];
 
 fn config() -> SecurityConfig {
-    SecurityConfig::default().with_allow_hardlinks(true)
+    SecurityConfig::default()
+        .with_preserve_permissions(true)
+        .with_allow_hardlinks(true)
 }
 
 fn when_marked() -> ExtractionOptions {

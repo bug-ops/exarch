@@ -18,7 +18,7 @@ use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::mark::MarkRun;
 use crate::security::fs_view::FsView;
-use crate::security::permissions::SanitizedMode;
+use crate::security::permissions::CreateMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -36,7 +36,7 @@ pub(super) struct FileWrite<'a> {
     pub(super) copy_buffer: &'a mut CopyBuffer,
     pub(super) permit: QuotaPermit,
     pub(super) marking: Option<&'a MarkRun>,
-    pub(super) mode: Option<SanitizedMode>,
+    pub(super) mode: Option<CreateMode>,
     pub(super) progress: &'a mut dyn ProgressCallback,
 }
 

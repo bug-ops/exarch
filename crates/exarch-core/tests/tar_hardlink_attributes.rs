@@ -31,6 +31,7 @@ const LINK_MTIME: u64 = 1;
 
 fn links_config() -> SecurityConfig {
     SecurityConfig::default()
+        .with_preserve_permissions(true)
         .with_allow_symlinks(true)
         .with_allow_hardlinks(true)
 }

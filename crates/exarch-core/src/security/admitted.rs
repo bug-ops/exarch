@@ -9,8 +9,8 @@
 use crate::Result;
 use crate::SecurityConfig;
 use crate::security::hardlink::HardlinkTarget;
+use crate::security::permissions::CreateMode;
 use crate::security::permissions::RawMode;
-use crate::security::permissions::SanitizedMode;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
@@ -84,6 +84,9 @@ impl<P: ParentCheck> PendingFile<P> {
     /// Reserves the file's size against `quota`, checks the ratio and
     /// sanitizes the mode.
     ///
+    /// The mode is paired with how the configured `PermissionPolicy` gives it
+    /// to the file: minus the umask (`Normalize`) or exactly (`Preserve`).
+    ///
     /// # Errors
     ///
     /// Returns the quota or ratio refusal.
@@ -97,7 +100,9 @@ impl<P: ParentCheck> PendingFile<P> {
         Ok(ValidatedFile {
             path: self.path,
             permit,
-            mode: self.mode.map(|m| sanitize_permissions(m, config)),
+            mode: self
+                .mode
+                .map(|m| CreateMode::new(sanitize_permissions(m, config), config.permissions)),
         })
     }
 }
@@ -107,7 +112,7 @@ impl<P: ParentCheck> PendingFile<P> {
 pub(crate) struct ValidatedFile<P: ParentCheck = Resolved> {
     path: SafePath<P>,
     permit: QuotaPermit,
-    mode: Option<SanitizedMode>,
+    mode: Option<CreateMode>,
 }
 
 impl<P: ParentCheck> ValidatedFile<P> {
@@ -118,7 +123,7 @@ impl<P: ParentCheck> ValidatedFile<P> {
 
     /// Splits the proof into its path, the quota permit for the file's size
     /// and the sanitized permissions, when the format records them.
-    pub(crate) fn into_parts(self) -> (SafePath<P>, QuotaPermit, Option<SanitizedMode>) {
+    pub(crate) fn into_parts(self) -> (SafePath<P>, QuotaPermit, Option<CreateMode>) {
         (self.path, self.permit, self.mode)
     }
 }
@@ -153,6 +158,7 @@ mod tests {
     use crate::ArchiveError;
     use crate::SecurityConfig;
     use crate::security::fs_view::HostFs;
+    use crate::security::permissions::SanitizedMode;
     use crate::security::validator::ValidatorCore;
     use crate::types::DestDir;
 
@@ -182,7 +188,41 @@ mod tests {
 
         let (path, _permit, mode) = file.into_parts();
         assert_eq!(path.as_path(), Path::new("a.txt"));
-        assert_eq!(mode.unwrap().as_u32() & 0o6000, 0, "setuid is stripped");
+        let mode = mode.unwrap();
+        assert_matches!(
+            mode,
+            CreateMode::Umasked(_),
+            "Normalize leaves the umask to the kernel"
+        );
+        assert_eq!(mode.sanitized().as_u32() & 0o6000, 0, "setuid is stripped");
+    }
+
+    #[test]
+    fn preserve_gives_the_exact_sanitized_mode() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
+        let mut core = ValidatorCore::new(&config);
+        let ctx = core.context::<HostFs>();
+
+        let file = core
+            .validate_file_in(
+                Path::new("a.txt"),
+                sizes(3),
+                Some(RawMode::new(0o4755)),
+                &dest,
+                &HostFs,
+                &ctx,
+            )
+            .unwrap()
+            .into_admitted();
+
+        let (_, _permit, mode) = file.into_parts();
+        assert_eq!(
+            mode.map(CreateMode::sanitized).map(SanitizedMode::as_u32),
+            Some(0o755)
+        );
+        assert_matches!(mode, Some(CreateMode::Exact(_)));
     }
 
     #[test]

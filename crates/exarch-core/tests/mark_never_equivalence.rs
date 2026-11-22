@@ -25,10 +25,14 @@ use common::tree_snapshot;
 use common::zip_fixture;
 
 fn extract(archive: &Path, out: &Path, options: ExtractionOptions) -> ExtractionReport {
-    ExtractRequest::new(&SecurityConfig::default().with_allow_hardlinks(true))
-        .with_options(options)
-        .extract(archive, out)
-        .unwrap()
+    ExtractRequest::new(
+        &SecurityConfig::default()
+            .with_preserve_permissions(true)
+            .with_allow_hardlinks(true),
+    )
+    .with_options(options)
+    .extract(archive, out)
+    .unwrap()
 }
 
 fn counts(report: &ExtractionReport) -> (usize, usize, usize, u64) {

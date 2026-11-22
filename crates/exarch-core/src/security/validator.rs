@@ -563,7 +563,6 @@ mod tests {
     use crate::security::Compressed;
     use crate::security::Uncompressed;
     use crate::security::fs_view::HostFs;
-    use crate::security::permissions::SanitizedMode;
     use crate::types::DestDir;
     use std::assert_matches;
     use tempfile::TempDir;
@@ -690,7 +689,7 @@ mod tests {
         let (path, _permit, mode) = harness.plain_file("file.txt", 1024).unwrap().into_parts();
 
         assert_eq!(path.as_path(), Path::new("file.txt"));
-        assert_eq!(mode.map(SanitizedMode::as_u32), Some(0o644));
+        assert_eq!(mode.map(|m| m.sanitized().as_u32()), Some(0o644));
     }
 
     #[test]
@@ -768,7 +767,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        assert_eq!(mode.map(SanitizedMode::as_u32), Some(0o755));
+        assert_eq!(mode.map(|m| m.sanitized().as_u32()), Some(0o755));
     }
 
     #[test]

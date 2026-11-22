@@ -58,7 +58,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--password-file <PATH>` / `--password-fd <N>` / `--password-prompt` | none | Password of an encrypted ZIP (WinZip AES) or 7z; one source at most, also on `list` and `verify`; failures carry `error.reason` in `--json`. Never an argument value or an environment variable. See [references/formats.md](references/formats.md). |
 | `--max-compression-ratio` | 100 | Zip-bomb threshold (ZIP and non-solid 7z). |
 | `--max-path-depth` | 32 | Max path components per entry. |
-| `--preserve-permissions` | off | Keep archive modes (setuid/setgid/sticky always stripped). |
+| `--preserve-permissions` | off | Set archive modes exactly, ignoring the umask (setuid/setgid/sticky always stripped). Off: archive mode minus the umask, execute bit kept, as `tar` without `-p`. |
 | `--allow-symlinks` / `--allow-hardlinks` | off | Allow links that resolve inside the destination. |
 | `--allow-absolute-paths` / `--allow-world-writable` / `--allow-solid-archives` | off | Relax the matching default-deny check. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP structural ambiguity check. |

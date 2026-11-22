@@ -39,6 +39,7 @@ use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PinnedHostFs;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::hardlink_target_missing;
+use crate::security::permissions::CreateMode;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::validator::Gated;
@@ -587,8 +588,8 @@ impl ExtractTarget for HostTarget<'_> {
         // The target may be a pre-existing file of the destination, so its mode
         // is sanitized like an archive mode: never setuid, setgid, sticky or
         // (unless allowed) world-writable, and never wider than the target.
-        let link_mode =
-            target_mode.map(|mode| sanitize_permissions(RawMode::new(mode), self.config));
+        let link_mode = target_mode
+            .map(|mode| CreateMode::Exact(sanitize_permissions(RawMode::new(mode), self.config)));
 
         let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link)?;
         let marking = self.root.marking();

@@ -224,7 +224,7 @@ pub(super) fn unix_file_type(entry: &sevenz_rust2::ArchiveEntry) -> Option<commo
 ///
 /// The file-type bits are dropped; setuid, setgid, sticky and the world-write
 /// bit are left to `sanitize_permissions`, as for TAR.
-pub(super) fn file_permissions(entry: &sevenz_rust2::ArchiveEntry) -> Option<RawMode> {
+pub(crate) fn file_permissions(entry: &sevenz_rust2::ArchiveEntry) -> Option<RawMode> {
     unix_mode(entry).map(|mode| RawMode::new(mode & 0o7777))
 }
 

@@ -43,7 +43,7 @@ fn zip_archive(dir: &TempDir, name: &str) -> PathBuf {
 }
 
 fn force(archive: &Path, out: &Path) {
-    ExtractRequest::new(&SecurityConfig::default())
+    ExtractRequest::new(&SecurityConfig::default().with_preserve_permissions(true))
         .with_options(ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite))
         .extract(archive, out)
         .unwrap();

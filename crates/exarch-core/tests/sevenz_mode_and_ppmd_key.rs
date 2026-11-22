@@ -21,6 +21,10 @@ use sevenz_rust2::ArchiveWriter;
 use sevenz_rust2::SourceReader;
 use tempfile::TempDir;
 
+fn preserving() -> SecurityConfig {
+    SecurityConfig::default().with_preserve_permissions(true)
+}
+
 const S_IFREG: u32 = 0o100_000;
 #[cfg(unix)]
 const S_IFDIR: u32 = 0o040_000;
@@ -112,7 +116,7 @@ fn host_mode(dest: &TempDir, name: &str) -> u32 {
 fn stored_modes_are_restored_and_executables_keep_the_execute_bit() {
     let bytes = unix_files(&[("run.sh", 0o755), ("ro.txt", 0o444), ("plain.txt", 0o640)]);
 
-    let dest = extract_to_host(&bytes, &SecurityConfig::default());
+    let dest = extract_to_host(&bytes, &preserving());
 
     assert_eq!(host_mode(&dest, "run.sh"), 0o755);
     assert_eq!(host_mode(&dest, "ro.txt"), 0o444);
@@ -123,7 +127,7 @@ fn stored_modes_are_restored_and_executables_keep_the_execute_bit() {
 fn memory_extraction_reports_the_same_sanitized_modes() {
     let bytes = unix_files(&[("run.sh", 0o755), ("ro.txt", 0o444), ("plain.txt", 0o640)]);
 
-    let mut modes = memory_modes(&bytes, &SecurityConfig::default());
+    let mut modes = memory_modes(&bytes, &preserving());
     modes.sort();
 
     assert_eq!(
@@ -147,17 +151,14 @@ fn setuid_setgid_and_sticky_are_stripped_and_world_write_follows_policy() {
         ("world", 0o777),
     ]);
 
-    let default = extract_to_host(&bytes, &SecurityConfig::default());
+    let default = extract_to_host(&bytes, &preserving());
     assert_eq!(host_mode(&default, "suid"), 0o755);
     assert_eq!(host_mode(&default, "sgid"), 0o755);
     assert_eq!(host_mode(&default, "both"), 0o755);
     assert_eq!(host_mode(&default, "sticky"), 0o775);
     assert_eq!(host_mode(&default, "world"), 0o775);
 
-    let permissive = extract_to_host(
-        &bytes,
-        &SecurityConfig::default().with_allow_world_writable(true),
-    );
+    let permissive = extract_to_host(&bytes, &preserving().with_allow_world_writable(true));
     assert_eq!(host_mode(&permissive, "suid"), 0o755);
     assert_eq!(host_mode(&permissive, "both"), 0o755);
     assert_eq!(host_mode(&permissive, "sticky"), 0o777);
@@ -183,7 +184,7 @@ fn the_bits_match_tar_for_the_same_stored_mode() {
     let tar_path = scratch.path().join("a.tar");
     std::fs::write(&tar_path, tar_bytes).unwrap();
     let tar_dest = TempDir::new().unwrap();
-    ExtractRequest::new(&SecurityConfig::default())
+    ExtractRequest::new(&preserving())
         .extract(&tar_path, tar_dest.path())
         .unwrap();
 
@@ -193,7 +194,7 @@ fn the_bits_match_tar_for_the_same_stored_mode() {
         .map(|(index, mode)| (format!("f{index}"), *mode))
         .collect();
     let pairs: Vec<(&str, u32)> = names.iter().map(|(n, m)| (n.as_str(), *m)).collect();
-    let sevenz_dest = extract_to_host(&unix_files(&pairs), &SecurityConfig::default());
+    let sevenz_dest = extract_to_host(&unix_files(&pairs), &preserving());
 
     for (name, _) in &names {
         assert_eq!(
@@ -207,7 +208,7 @@ fn the_bits_match_tar_for_the_same_stored_mode() {
 #[cfg(unix)]
 #[test]
 fn mode_zero_is_applied_as_is() {
-    let dest = extract_to_host(&unix_files(&[("locked", 0)]), &SecurityConfig::default());
+    let dest = extract_to_host(&unix_files(&[("locked", 0)]), &preserving());
 
     assert_eq!(host_mode(&dest, "locked"), 0);
     std::fs::set_permissions(
@@ -227,14 +228,14 @@ fn entries_without_a_stored_mode_keep_the_default() {
         with_unix_mode(ArchiveEntry::new_directory("dir"), S_IFDIR | 0o555),
     ]);
 
-    let dest = extract_to_host(&bytes, &SecurityConfig::default());
+    let dest = extract_to_host(&bytes, &preserving());
 
     let default = host_mode(&dest, "flagless");
     assert_eq!(host_mode(&dest, "windows-only"), default);
     assert_eq!(host_mode(&dest, "high-bits-no-flag"), default);
     assert_ne!(host_mode(&dest, "dir") & 0o200, 0, "directory stays usable");
     assert_eq!(
-        memory_modes(&bytes, &SecurityConfig::default())
+        memory_modes(&bytes, &preserving())
             .into_iter()
             .filter(|(_, mode)| mode.is_some())
             .count(),
@@ -250,7 +251,7 @@ fn the_flag_without_type_bits_is_a_regular_file_with_its_mode() {
         0x8000 | (0o750 << 16),
     )]);
 
-    let dest = extract_to_host(&bytes, &SecurityConfig::default());
+    let dest = extract_to_host(&bytes, &preserving());
 
     assert_eq!(host_mode(&dest, "typeless"), 0o750);
 }
@@ -262,7 +263,7 @@ fn every_permission_and_special_bit_is_masked_to_the_sanitized_range() {
         S_IFREG | 0o7777,
     )]);
 
-    let modes = memory_modes(&bytes, &SecurityConfig::default());
+    let modes = memory_modes(&bytes, &preserving());
 
     assert_eq!(modes, [("ones".to_owned(), Some(0o775))]);
 }
@@ -300,7 +301,7 @@ fn force_over_an_existing_file_applies_the_archive_mode() {
     let path = scratch.path().join("a.7z");
     std::fs::write(&path, unix_files(&[("run.sh", 0o755)])).unwrap();
 
-    ExtractRequest::new(&SecurityConfig::default())
+    ExtractRequest::new(&preserving())
         .with_options(ExtractionOptions::default().with_existing_files(ExistingFiles::Overwrite))
         .extract(&path, dest.path())
         .unwrap();
@@ -314,7 +315,7 @@ fn force_over_an_existing_file_applies_the_archive_mode() {
 fn a_skipped_duplicate_keeps_the_first_files_mode() {
     let bytes = unix_files(&[("dup", 0o640), ("dup", 0o755)]);
 
-    let dest = extract_to_host(&bytes, &SecurityConfig::default());
+    let dest = extract_to_host(&bytes, &preserving());
 
     assert_eq!(host_mode(&dest, "dup"), 0o640);
 }

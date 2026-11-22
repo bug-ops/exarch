@@ -239,8 +239,8 @@ fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
 ///   operation and format: files, directories, links and skipped entries
 ///   (default: 10,000)
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
-/// * `preserve_permissions` - Preserve file permissions from archive (default:
-///   False)
+/// * `preserve_permissions` - Give extracted files the archive mode exactly
+///   instead of minus the umask (default: False)
 /// * `allowed_extensions` - List of allowed file extensions, or `None` to allow
 ///   every extension (the default); an empty list is refused, and assigning
 ///   `None` is the only way to clear the list
@@ -563,7 +563,8 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
-    /// Sets whether to preserve permissions from archive.
+    /// Sets whether extracted files get the archive mode exactly instead of
+    /// minus the umask.
     #[pyo3(signature = (preserve=true))]
     fn with_preserve_permissions(
         mut slf: PyRefMut<'_, Self>,

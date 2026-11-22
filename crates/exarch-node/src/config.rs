@@ -592,7 +592,8 @@ impl SecurityConfig {
         Ok(self)
     }
 
-    /// Sets whether to preserve permissions from archive.
+    /// Sets whether extracted files get the archive mode exactly instead of
+    /// minus the umask.
     #[napi(js_name = "withPreservePermissions")]
     pub fn with_preserve_permissions(&mut self, preserve: bool) -> &Self {
         self.inner.permissions = PermissionPolicy::from_preserve(preserve);
@@ -842,7 +843,8 @@ impl SecurityConfig {
         exact_f64(self.inner.max_path_depth.get())
     }
 
-    /// Whether to preserve permissions from archive.
+    /// Whether extracted files get the archive mode exactly instead of minus
+    /// the umask.
     #[napi(getter)]
     pub fn get_preserve_permissions(&self) -> bool {
         self.inner.permissions.preserves()

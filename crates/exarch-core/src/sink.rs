@@ -74,6 +74,7 @@ use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTarget;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
+use crate::security::permissions::CreateMode;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::AdmittedSize;
 use crate::security::quota::EntryCount;
@@ -477,7 +478,8 @@ pub trait EntrySink {
     /// admitted for it.
     ///
     /// `mode` is the permission bits after setuid, setgid and sticky are
-    /// stripped, if the archive carries any.
+    /// stripped, if the archive carries any. A sink has no umask to apply, so
+    /// the value is the same under every `PermissionPolicy`.
     ///
     /// # Errors
     ///
@@ -646,6 +648,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
         tally: &mut Tally<'_>,
     ) -> Result<Option<StagedFile>> {
         let (path, permit, mode) = admitted.into_parts();
+        let mode = mode.map(CreateMode::sanitized);
         let size = permit.into_admitted();
         // Overflow guard only, as on the host: the sum is not stored.
         common::checked_add_bytes(tally.report.bytes_written, size.get())?;

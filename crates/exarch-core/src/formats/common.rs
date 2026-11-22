@@ -67,7 +67,7 @@ use crate::mark::MarkRun;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
-use crate::security::permissions::SanitizedMode;
+use crate::security::permissions::CreateMode;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
 use crate::types::SafePath;
@@ -329,12 +329,13 @@ pub(crate) fn check_entry_name_limits(
 ///
 /// # Permission Enforcement
 ///
-/// On Unix, file permissions are enforced via `File::set_permissions()` on
-/// the already-open file descriptor (`fchmod`), not a path-based
-/// `std::fs::set_permissions()` call, to bypass the process umask without
-/// reopening a TOCTOU window between file creation and permission
-/// enforcement (issue #460). This ensures the exact sanitized mode from
-/// `SecurityConfig` is applied, regardless of the caller's umask. See
+/// On Unix, the mode is given through the create call and the already-open
+/// file descriptor (`fchmod`), never a path-based `std::fs::set_permissions()`
+/// call, so no TOCTOU window opens between file creation and permission
+/// enforcement (issue #460). Under `PermissionPolicy::Preserve` the exact
+/// sanitized mode is set, whatever the caller's umask. Under
+/// `PermissionPolicy::Normalize` the sanitized mode is passed to the create and
+/// the kernel subtracts the umask, which is never read. See
 /// [`VettedDir::create_new_deferred`] for the full contract.
 ///
 /// # Security - Pinned Parent Directory (issue #818)
@@ -393,7 +394,7 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
     faults: ReadFaults<'_>,
     safe_path: &SafePath<P>,
-    mode: Option<SanitizedMode>,
+    mode: Option<CreateMode>,
     permit: QuotaPermit,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
@@ -515,7 +516,7 @@ pub(crate) enum ModeTiming {
 pub(crate) fn create_temp_sibling_with(
     dir: &VettedDir,
     entry: Leaf<'_>,
-    mode: Option<SanitizedMode>,
+    mode: Option<CreateMode>,
     timing: ModeTiming,
     _replace: &ReplacePermit,
     mut next_candidate: impl FnMut() -> TempLeaf,
@@ -574,7 +575,7 @@ impl ModeTiming {
 pub(crate) fn create_file(
     dir: &VettedDir,
     leaf: Leaf<'_>,
-    mode: Option<SanitizedMode>,
+    mode: Option<CreateMode>,
     timing: ModeTiming,
 ) -> std::io::Result<(File, PendingMode)> {
     let (file, pending) = dir.create_new_deferred(leaf, mode)?;
@@ -649,7 +650,7 @@ fn open_output_slot(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
-    mode: Option<SanitizedMode>,
+    mode: Option<CreateMode>,
     duplicates: OccupantPolicy,
     root: &PinnedRoot,
     timing: ModeTiming,
@@ -1281,13 +1282,13 @@ mod tests {
         );
     }
 
-    /// Builds a [`SanitizedMode`] for tests that don't otherwise need a
+    /// Builds an exact [`CreateMode`] for tests that don't otherwise need a
     /// `SecurityConfig` in scope. None of the modes used across these tests
     /// carry setuid/setgid/world-writable bits, so sanitizing with the
     /// default config never changes the value.
-    fn sanitized(mode: u32) -> SanitizedMode {
+    fn sanitized(mode: u32) -> CreateMode {
         let config = SecurityConfig::default();
-        sanitize_permissions(RawMode::new(mode), &config)
+        CreateMode::Exact(sanitize_permissions(RawMode::new(mode), &config))
     }
 
     fn test_walker() -> DirWalker {
@@ -1300,7 +1301,7 @@ mod tests {
 
     /// Creates `path` the way extraction does: exclusively, relative to a
     /// handle on its parent directory.
-    fn create_file_with_mode(path: &Path, mode: Option<SanitizedMode>) -> std::io::Result<File> {
+    fn create_file_with_mode(path: &Path, mode: Option<CreateMode>) -> std::io::Result<File> {
         let parent = pinned(&DestDir::new(path.parent().expect("parent")).expect("dest"));
         let (_, leaf) = Leaf::split(Path::new(path.file_name().expect("name"))).expect("leaf");
         parent.dir().reopen()?.create_new(leaf, mode)
@@ -1948,7 +1949,7 @@ mod tests {
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(sanitized_mode),
+            Some(CreateMode::Exact(sanitized_mode)),
             permit,
             &pinned(&dest),
             &mut report,

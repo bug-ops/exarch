@@ -6,10 +6,11 @@
 #![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
+mod sink_support;
+
 use exarch_core::ExtractRequest;
 use exarch_core::SecurityConfig;
-use std::io::Cursor;
-use std::io::Write;
+use sink_support::testkit::raw_zip::RawEntry;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -33,14 +34,19 @@ fn tar_archive(dir: &TempDir) -> PathBuf {
 }
 
 fn zip_archive(dir: &TempDir) -> PathBuf {
-    let mut writer = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
-    for (index, mode) in STORED.iter().enumerate() {
-        let options = zip::write::SimpleFileOptions::default().unix_permissions(*mode);
-        writer.start_file(format!("f{index}"), options).unwrap();
-        writer.write_all(b"hi").unwrap();
-    }
+    // The zip writer masks modes to 0o777, so the raw builder stores the full
+    // mode. The zip reader clears special bits itself, so this case guards the
+    // end result, not `sanitize_permissions`.
+    let entries = STORED
+        .iter()
+        .enumerate()
+        .map(|(index, mode)| RawEntry {
+            external_attributes: (0o100_000 | mode) << 16,
+            ..RawEntry::stored(&format!("f{index}"), b"hi")
+        })
+        .collect();
     let path = dir.path().join("a.zip");
-    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+    std::fs::write(&path, sink_support::zip_archive(entries)).unwrap();
     path
 }
 
@@ -49,7 +55,7 @@ fn assert_sticky_stripped(make: fn(&TempDir) -> PathBuf) {
     let archive = make(&work);
     let out = TempDir::new().unwrap();
 
-    ExtractRequest::new(&SecurityConfig::default())
+    ExtractRequest::new(&SecurityConfig::default().with_preserve_permissions(true))
         .extract(&archive, out.path())
         .unwrap();
 
@@ -88,7 +94,7 @@ fn directory_modes_are_not_restored_so_sticky_never_appears() {
     std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
     let out = TempDir::new().unwrap();
 
-    ExtractRequest::new(&SecurityConfig::default())
+    ExtractRequest::new(&SecurityConfig::default().with_preserve_permissions(true))
         .extract(&archive, out.path())
         .unwrap();
 

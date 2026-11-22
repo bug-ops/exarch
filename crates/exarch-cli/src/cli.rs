@@ -678,11 +678,12 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub allow_absolute_paths: bool,
 
-    /// Allow world-writable files in extracted archives
+    /// Allow world-writable files in extracted archives (the umask removes
+    /// the bit again unless --preserve-permissions is set)
     #[arg(long)]
     pub allow_world_writable: bool,
 
-    /// Preserve file permissions from archive
+    /// Set archive file modes exactly instead of reducing them by the umask
     #[arg(long)]
     pub preserve_permissions: bool,
 

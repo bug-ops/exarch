@@ -231,6 +231,7 @@ npm install tar adm-zip  # For comparison
 
 ### High variance in results
 
+- Run on an idle host: serially, as the last step, with no parallel builds, and only when the 1-minute load average (`uptime`) is at or below about 7; record the load with each result
 - Close other applications
 - Run multiple times
 - Use `--warm-up-time 5` for longer warmup

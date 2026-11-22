@@ -70,9 +70,10 @@ pub(super) struct FileWrite<'a> {
 /// the permit's byte count is `entry.size` — the declared uncompressed size
 /// read from 7z's own (attacker-controlled) archive metadata, the same value
 /// already used to authorize `permit`. The copy goes through
-/// [`copy_bounded`], which enforces it as a hard streaming ceiling and
-/// an exact post-copy match rather than trusting it a second time, closing
-/// the same gap TAR/ZIP close via [`common::extract_file_with_permit`].
+/// [`copy_bounded`](crate::copy::copy_bounded), which enforces it as a hard
+/// streaming ceiling and an exact post-copy match rather than trusting it a
+/// second time, closing the same gap TAR/ZIP close via
+/// [`common::extract_file_with_permit`].
 ///
 /// # Errors
 ///
@@ -154,8 +155,9 @@ pub(super) fn write_file_direct(
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
 /// Same enforcement as [`write_file_direct`]: the copy runs through
-/// [`copy_bounded`] with the permit's byte count (`entry.size`) as a hard
-/// streaming ceiling and exact post-copy match, not trusted metadata.
+/// [`copy_bounded`](crate::copy::copy_bounded) with the permit's byte count
+/// (`entry.size`) as a hard streaming ceiling and exact post-copy match, not
+/// trusted metadata.
 ///
 /// # Errors
 ///
@@ -188,8 +190,8 @@ pub(super) fn write_file_with_permit(
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
 /// Same enforcement as [`write_file_direct`]: the copy runs through
-/// [`copy_bounded`] with the permit's byte count as a hard streaming
-/// ceiling and exact post-copy match, not trusted metadata.
+/// [`copy_bounded`](crate::copy::copy_bounded) with the permit's byte count as
+/// a hard streaming ceiling and exact post-copy match, not trusted metadata.
 ///
 /// # Errors
 ///

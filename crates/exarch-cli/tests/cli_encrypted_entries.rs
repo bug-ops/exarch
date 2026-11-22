@@ -1,7 +1,7 @@
 //! Acceptance contract of #1242 and #1243 on the CLI: `list -l` marks encrypted
 //! entries (`"encrypted": bool` in JSON, `(encrypted)` in the human line), and
 //! `verify` treats a 7z with AES content under a plain header like an AES ZIP.
-//! The fixtures are the core's encrypted archives.
+//! The fixtures are copies of the core encrypted archives.
 
 #![expect(
     clippy::expect_used,
@@ -19,9 +19,9 @@ use common::Member;
 use common::write_tar;
 use tempfile::TempDir;
 
-fn core_fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../exarch-core/tests/data/encryption")
+        .join("tests/fixtures")
         .join(name)
 }
 
@@ -42,7 +42,7 @@ fn entries(json: &serde_json::Value) -> &Vec<serde_json::Value> {
 
 #[test]
 fn list_long_json_marks_every_entry_of_an_aes_zip_with_a_boolean() {
-    let (code, json) = json_run(&["list", "--json", "-l"], &core_fixture("aes256.zip"));
+    let (code, json) = json_run(&["list", "--json", "-l"], &fixture("encrypted-aes256.zip"));
 
     assert_eq!(code, 0, "{json}");
     for entry in entries(&json) {
@@ -55,7 +55,7 @@ fn list_long_json_marks_every_entry_of_an_aes_zip_with_a_boolean() {
 
 #[test]
 fn list_long_json_marks_the_files_of_a_7z_with_encrypted_content() {
-    let (code, json) = json_run(&["list", "--json", "-l"], &core_fixture("content.7z"));
+    let (code, json) = json_run(&["list", "--json", "-l"], &fixture("encrypted-content.7z"));
 
     assert_eq!(code, 0, "{json}");
     let files: Vec<_> = entries(&json)
@@ -72,7 +72,7 @@ fn list_long_json_marks_a_plain_zip_a_plain_7z_and_a_tar_false_everywhere() {
     let tar = dir.path().join("m.tar");
     write_tar(&tar, &[Member::File("a"), Member::Dir("d")]);
 
-    for archive in [core_fixture("plain.zip"), core_fixture("plain.7z"), tar] {
+    for archive in [fixture("plain.zip"), fixture("plain.7z"), tar] {
         let (code, json) = json_run(&["list", "--json", "-l"], &archive);
 
         assert_eq!(code, 0, "{json}");
@@ -86,12 +86,12 @@ fn list_long_json_marks_a_plain_zip_a_plain_7z_and_a_tar_false_everywhere() {
 fn list_long_human_marks_encrypted_entries_and_only_those() {
     let encrypted = cargo_bin_cmd!("exarch")
         .args(["list", "-l"])
-        .arg(core_fixture("aes256.zip"))
+        .arg(fixture("encrypted-aes256.zip"))
         .output()
         .unwrap();
     let plain = cargo_bin_cmd!("exarch")
         .args(["list", "-l"])
-        .arg(core_fixture("plain.zip"))
+        .arg(fixture("plain.zip"))
         .output()
         .unwrap();
 
@@ -111,11 +111,11 @@ fn list_long_human_marks_encrypted_entries_and_only_those() {
 fn verify_check_integrity_of_aes_content_7z_matches_the_aes_zip_exit_and_status() {
     let (zip_code, zip) = json_run(
         &["verify", "--json", "--check-integrity"],
-        &core_fixture("aes256.zip"),
+        &fixture("encrypted-aes256.zip"),
     );
     let (sevenz_code, sevenz) = json_run(
         &["verify", "--json", "--check-integrity"],
-        &core_fixture("content.7z"),
+        &fixture("encrypted-content.7z"),
     );
 
     assert_eq!((zip_code, sevenz_code), (0, 0), "{sevenz}");
@@ -134,7 +134,7 @@ fn verify_of_aes_content_7z_reports_no_encrypted_security_issue_and_no_high_issu
         &["verify", "--json"][..],
         &["verify", "--json", "--check-integrity"],
     ] {
-        let (_code, json) = json_run(flags, &core_fixture("content.7z"));
+        let (_code, json) = json_run(flags, &fixture("encrypted-content.7z"));
 
         for issue in json["data"]["issues"].as_array().expect("issues array") {
             assert_ne!(issue["severity"], "HIGH", "{issue}");
@@ -150,7 +150,7 @@ fn extract_of_aes_content_7z_without_a_password_still_fails_before_writing() {
 
     let output = cargo_bin_cmd!("exarch")
         .args(["extract", "--json"])
-        .arg(core_fixture("content.7z"))
+        .arg(fixture("encrypted-content.7z"))
         .arg(&out)
         .output()
         .unwrap();

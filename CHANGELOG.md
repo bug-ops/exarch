@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TAR: a PAX record whose value contains a newline is accepted when its declared length frames it, so archives with binary `SCHILY.xattr.*` values extract again; ambiguous records stay refused (#1291).
+- TAR: the PAX sparse-map record `SUN.holesdata` is refused as an unsupported record, like `GNU.sparse.*` (#1291).
+- Creation: a single source file over `--max-file-size` is skipped as `over_max_file_size` in TAR as well as ZIP (#1291).
+- Creation: ZIP `create` clamps a source mtime in year 10000 or later to the last DOS date instead of panicking (#1291).
+- `verify`: a declared-size overrun or a not-decodable coder in an AES 7z block keeps its own report instead of `wrong_password_or_corrupt` (#1291).
+- Docs: the 15 intra-doc links that broke with `--document-private-items` resolve (#1291).
+- Tests: the `exarch-cli` encryption tests read fixtures from inside the package (#1291).
 - Fuzzing: the `encrypted` target accepts empty files in its authenticity check, so a renamed directory entry no longer fails the run (#1283).
 
 ## [0.11.0] - 2026-11-16

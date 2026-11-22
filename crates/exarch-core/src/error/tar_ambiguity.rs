@@ -196,8 +196,8 @@ pub enum TarAmbiguity {
         key: String,
     },
 
-    /// A PAX record (`GNU.sparse.*`, `SCHILY.realsize`) changes how the entry
-    /// data is read, which not every reader supports.
+    /// A PAX record (`GNU.sparse.*`, `SCHILY.realsize`, `SUN.holesdata`)
+    /// changes how the entry data is read, which not every reader supports.
     UnsupportedRecord {
         /// Lossy, truncated key; for display only.
         key: String,

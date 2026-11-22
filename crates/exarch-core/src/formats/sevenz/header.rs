@@ -4,7 +4,7 @@
 //! table sized to the blocks, every per-file table sized to the files, and
 //! pack-stream and file spans that lie within the archive, and rejects a header
 //! with streams info and no files info. [`SevenZHeader`] can only be obtained
-//! from [`read_sevenz_header`], so the accessors below index without a bounds
+//! from [`open_sevenz_header`], so the accessors below index without a bounds
 //! check at the call site. The one gap upstream leaves, pack streams without
 //! blocks, is closed in `SevenZHeader::check`.
 
@@ -133,7 +133,7 @@ impl<T> std::ops::IndexMut<BlockIndex> for PerBlock<T> {
 /// Holds, for every block, an entry in `block_first_pack_stream_index` and
 /// `block_first_file_index`, for every file an entry in `file_block_index`, and
 /// for every pack stream an offset; every mapped block and every block's file
-/// span lies within the archive. Obtained only from [`read_sevenz_header`].
+/// span lies within the archive. Obtained only from [`open_sevenz_header`].
 #[derive(Debug, Clone)]
 pub(crate) struct SevenZHeader {
     archive: Archive,

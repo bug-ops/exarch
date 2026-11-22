@@ -615,8 +615,11 @@ impl<R: Read + Seek> ZipArchive<R> {
     ///
     /// # Errors
     ///
-    /// Same as [`ZipArchive::new`], plus the typed refusals of an encrypted
-    /// entry: no password, `ZipCrypto`.
+    /// Returns an error if:
+    /// - File is not a valid ZIP archive
+    /// - Central directory is corrupted, or changes while it is being read
+    /// - An entry is encrypted with `ZipCrypto`, or with AES and no password is
+    ///   supplied
     pub(crate) fn open(
         reader: R,
         config: &SecurityConfig,
@@ -631,7 +634,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     ///
     /// # Errors
     ///
-    /// Same as [`ZipArchive::new`].
+    /// Same as [`Self::open`].
     pub(crate) fn for_extraction(
         reader: R,
         config: &SecurityConfig,
@@ -649,7 +652,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     ///
     /// # Errors
     ///
-    /// Same as [`ZipArchive::new`].
+    /// Same as [`Self::open`].
     pub(crate) fn for_sink(
         reader: R,
         config: &SecurityConfig,

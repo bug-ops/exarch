@@ -318,8 +318,7 @@ fn test_sandbox_require_with_a_password_file_outside_the_destination_matches_the
         return;
     }
     let dir = TempDir::new().unwrap();
-    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../exarch-core/tests/data/encryption/aes256.zip");
+    let archive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted-aes256.zip");
     let password_file = dir.path().join("pw");
     std::fs::write(&password_file, b"correct-horse\n").unwrap();
     std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();

@@ -2862,6 +2862,18 @@ fn an_encrypted_block_reports_a_decode_verdict_as_the_encryption_refusal() {
         DecodeFailure::Io(_)
     );
     assert_matches!(
+        BlockCipher::Aes.classify(DecodeFailure::DeclaredSizeOverrun { declared: 1 }),
+        DecodeFailure::DeclaredSizeOverrun { declared: 1 }
+    );
+    assert_matches!(
+        BlockCipher::Aes.classify(DecodeFailure::NotDecodable(ArchiveError::Cancelled)),
+        DecodeFailure::NotDecodable(ArchiveError::Cancelled)
+    );
+    assert_matches!(
+        BlockCipher::Aes.classify(DecodeFailure::ResourceLimit(ArchiveError::Cancelled)),
+        DecodeFailure::ResourceLimit(ArchiveError::Cancelled)
+    );
+    assert_matches!(
         BlockCipher::Plain.classify(DecodeFailure::Checksum),
         DecodeFailure::Checksum
     );

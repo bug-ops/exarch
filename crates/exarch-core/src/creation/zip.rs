@@ -419,18 +419,35 @@ fn options_with_mode(
 /// unavailable or before 1980, and the last representable second when it is
 /// after 2107, so the archive bytes do not depend on when it was created.
 fn modified_time(metadata: &std::fs::Metadata) -> zip::DateTime {
-    let Some(at) = metadata.modified().ok().map(time::OffsetDateTime::from) else {
+    metadata
+        .modified()
+        .ok()
+        .map_or_else(zip::DateTime::default, dos_time)
+}
+
+/// Converts `at` to the DOS range without ever building a date the `time`
+/// crate cannot represent, which `OffsetDateTime::from(SystemTime)` panics on.
+fn dos_time(at: std::time::SystemTime) -> zip::DateTime {
+    let Ok(since_epoch) = at.duration_since(std::time::UNIX_EPOCH) else {
         return zip::DateTime::default();
     };
-    if at.year() > i32::from(LAST_DOS_YEAR) {
+    if since_epoch.as_secs() >= DOS_END_UNIX_SECS {
         return zip::DateTime::from_date_and_time(LAST_DOS_YEAR, 12, 31, 23, 59, 58)
             .unwrap_or_default();
     }
+    let Some(at) =
+        time::OffsetDateTime::UNIX_EPOCH.checked_add(since_epoch.try_into().unwrap_or_default())
+    else {
+        return zip::DateTime::default();
+    };
     zip::DateTime::try_from(time::PrimitiveDateTime::new(at.date(), at.time())).unwrap_or_default()
 }
 
 /// The last year a DOS timestamp can hold.
 const LAST_DOS_YEAR: u16 = 2107;
+
+/// Unix seconds of 2108-01-01T00:00:00Z, the first instant past the DOS range.
+const DOS_END_UNIX_SECS: u64 = 4_354_819_200;
 
 /// Normalizes a path for ZIP archive format.
 ///
@@ -464,6 +481,66 @@ mod tests {
     use std::fs;
     use std::fs::File;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_dos_end_constant_is_2108_01_01() {
+        let end =
+            time::OffsetDateTime::from_unix_timestamp(i64::try_from(DOS_END_UNIX_SECS).unwrap())
+                .unwrap();
+        assert_eq!(
+            (end.year(), end.month(), end.day(), end.hour()),
+            (2108, time::Month::January, 1, 0)
+        );
+        assert_eq!(end.minute() + end.second(), 0);
+    }
+
+    #[test]
+    fn test_dos_time_clamps_instants_beyond_year_10000_without_panicking() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let last = zip::DateTime::from_date_and_time(2107, 12, 31, 23, 59, 58).unwrap();
+        for secs in [
+            DOS_END_UNIX_SECS,
+            253_402_300_799,
+            253_402_300_800,
+            u64::from(u32::MAX) * 1000,
+            u64::from(u32::MAX) * 100_000,
+        ] {
+            let Some(at) = UNIX_EPOCH.checked_add(Duration::from_secs(secs)) else {
+                continue;
+            };
+            assert_eq!(dos_time(at), last, "secs={secs}");
+        }
+    }
+
+    #[test]
+    fn test_dos_time_clamp_starts_exactly_at_the_dos_end() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let clamp = zip::DateTime::from_date_and_time(2107, 12, 31, 23, 59, 58).unwrap();
+        let encoded_before = zip::DateTime::from_date_and_time(2107, 12, 31, 23, 59, 56).unwrap();
+
+        assert_eq!(dos_time(at(DOS_END_UNIX_SECS - 3)), encoded_before);
+        assert_ne!(dos_time(at(DOS_END_UNIX_SECS - 3)), clamp);
+        assert_eq!(dos_time(at(DOS_END_UNIX_SECS - 1)), clamp);
+        assert_eq!(dos_time(at(DOS_END_UNIX_SECS)), clamp);
+        assert_eq!(dos_time(at(DOS_END_UNIX_SECS + 1)), clamp);
+    }
+
+    #[test]
+    fn test_dos_time_before_1980_and_before_epoch_is_default() {
+        use std::time::Duration;
+        use std::time::UNIX_EPOCH;
+
+        assert_eq!(dos_time(UNIX_EPOCH), zip::DateTime::default());
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1 << 33))
+            .expect("an instant 272 years before the epoch is representable on every platform");
+        assert_eq!(dos_time(before_epoch), zip::DateTime::default());
+    }
 
     #[test]
     fn test_create_zip_single_file() {

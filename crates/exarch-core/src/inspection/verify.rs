@@ -890,7 +890,6 @@ fn is_suspicious_extension(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::inspection::manifest::EntryCompression;

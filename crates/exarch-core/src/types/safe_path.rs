@@ -671,7 +671,13 @@ pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
 /// assert!(!is_windows_reserved_component(OsStr::new("console.txt")));
 /// ```
 #[must_use]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
     const PLAIN: [&str; 8] = [
         "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$", "CONFIG$",
@@ -737,9 +743,9 @@ pub(crate) fn has_null_bytes(path: &Path) -> bool {
 
 #[cfg(test)]
 #[allow(
-    clippy::expect_used,
     clippy::field_reassign_with_default,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    reason = "tests adjust a default value field by field; items sit next to their only use"
 )]
 mod tests {
     use super::*;
@@ -1064,7 +1070,6 @@ mod tests {
 
     // Single component path test
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_safe_path_single_component() {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default();

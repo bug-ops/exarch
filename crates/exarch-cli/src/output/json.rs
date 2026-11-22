@@ -500,7 +500,6 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::output::formatter::SizeUnits;

@@ -175,7 +175,6 @@ pub(crate) fn open_spool() -> Option<TempSpool> {
 
 #[cfg(test)]
 mod spool_tests {
-    #![allow(clippy::unwrap_used)]
 
     use super::*;
     #[cfg(any(target_os = "linux", target_os = "android"))]

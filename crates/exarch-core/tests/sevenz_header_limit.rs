@@ -5,8 +5,8 @@
 //! declares is held to `max_file_count` before the entry table is built, as
 //! `QuotaExceeded { HeaderEntryCount }`.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::path::Path;

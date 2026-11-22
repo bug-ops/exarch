@@ -4,8 +4,8 @@
 //! wrong entry, and a size-sum check cannot see a shift made of zero-size
 //! sub-streams.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

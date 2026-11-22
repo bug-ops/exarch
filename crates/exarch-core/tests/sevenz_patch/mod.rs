@@ -1,7 +1,9 @@
 //! Byte-level edits of the encrypted 7z fixtures in `tests/data/encryption`,
 //! shared by the encryption precedence and mixed-block tests.
 
-#![allow(dead_code, clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![allow(dead_code, reason = "helpers are used by only some test binaries")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::path::PathBuf;

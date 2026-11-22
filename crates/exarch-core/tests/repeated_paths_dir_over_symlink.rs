@@ -3,7 +3,8 @@
 //! under `RepeatedPaths::Refuse` (#1258), and `KeepFirst` is unchanged.
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

@@ -174,13 +174,25 @@ impl HardlinkTarget {
 /// # }
 /// ```
 #[derive(Debug, Default)]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub struct HardlinkTracker {
     /// Maps target path to the first link path that referenced it
     seen_targets: HashMap<PathBuf, PathBuf>,
 }
 
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 impl HardlinkTracker {
     /// Creates a new hardlink tracker.
     #[must_use]
@@ -358,9 +370,8 @@ impl HardlinkTracker {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
 )]
 mod tests {
     use super::*;
@@ -581,7 +592,6 @@ mod tests {
     /// symlink resolving outside dest, the hardlink must be rejected.
     #[test]
     #[cfg(unix)]
-    #[allow(clippy::unwrap_used)]
     fn test_hardlink_two_hop_chain_rejected() {
         use std::fs;
         use std::os::unix;

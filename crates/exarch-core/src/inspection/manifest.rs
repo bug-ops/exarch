@@ -847,7 +847,6 @@ closed_enum! {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

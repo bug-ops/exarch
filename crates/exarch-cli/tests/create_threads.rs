@@ -2,7 +2,7 @@
 //! count, `create` only) yields the same ZIP bytes as the default sequential
 //! run.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 

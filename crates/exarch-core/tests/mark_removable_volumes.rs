@@ -7,8 +7,8 @@
 //! them and sets `EXARCH_REQUIRE_MARK_VOLUMES` to fail instead of skip.
 
 #![cfg(windows)]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::path::PathBuf;

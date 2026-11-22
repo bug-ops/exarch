@@ -5,7 +5,7 @@
 //! The fixtures are the core's AES archives (password `correct-horse`): a
 //! `WinZip` AES-256 ZIP and a non-solid 7z with an encrypted header.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

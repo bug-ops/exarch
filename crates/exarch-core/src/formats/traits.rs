@@ -111,7 +111,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_trait_extract_returns_report() {
         let format = TestFormat;
         let temp = tempfile::TempDir::new().unwrap();
@@ -122,7 +121,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_trait_list_returns_empty_manifest() {
         let format = TestFormat;
         let manifest = format.list().unwrap();
@@ -131,7 +129,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_trait_verify_returns_clean_report_for_empty_archive() {
         let format = TestFormat;
         let report = format

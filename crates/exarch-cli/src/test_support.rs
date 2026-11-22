@@ -3,8 +3,6 @@
 //! The core reports are `#[non_exhaustive]`, so a test cannot write a struct
 //! literal; these keep the call sites short.
 
-#![allow(clippy::expect_used)]
-
 use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
 use exarch_core::ArchiveType;

@@ -758,7 +758,6 @@ fn nonzero_file_id(identifier: [u8; 16]) -> Option<u128> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod stream_volume_tests {
     use super::volume_names_streams;
 
@@ -783,7 +782,6 @@ mod file_id_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod owner_only_tests {
     use super::OwnerOnlyDescriptor;
     use crate::formats::pinned_dir::dacl_probe;

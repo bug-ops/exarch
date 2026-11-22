@@ -8,8 +8,8 @@
 //! each `DecodeReuse` mode and each flag turned on, the extracted tree, the
 //! modes, the link targets and the report match a plain extraction.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 mod sink_support;

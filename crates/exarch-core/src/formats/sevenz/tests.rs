@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use super::SEVENZ_MAGIC;
 use super::admit::ADMITTED;
 use super::admit::RefusalScope;

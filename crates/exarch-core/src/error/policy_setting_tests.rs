@@ -1,7 +1,5 @@
 //! Drift guard: every [`PolicySetting`] has a refusal that reports it.
 
-#![allow(clippy::expect_used)]
-
 use std::assert_matches;
 use std::ffi::OsStr;
 use std::io::Cursor;

@@ -2,8 +2,12 @@
 //! every fixture they either fail with the same error (variant and cause) or
 //! succeed with the same files, symlinks and report counters.
 
-#![allow(clippy::unwrap_used, clippy::needless_pass_by_value)]
-#![allow(clippy::disallowed_methods)]
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "test helpers take their arguments by value for brevity"
+)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

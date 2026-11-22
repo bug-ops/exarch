@@ -5,7 +5,7 @@
 //! Fixtures are in `tests/data/encryption/` (see its README).
 
 #![cfg(feature = "encryption")]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

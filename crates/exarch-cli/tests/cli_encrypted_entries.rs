@@ -3,7 +3,11 @@
 //! `verify` treats a 7z with AES content under a plain header like an AES ZIP.
 //! The fixtures are the core's encrypted archives.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 mod common;
 

@@ -112,7 +112,7 @@ fn is_not_held(error: &io::Error) -> bool {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use std::assert_matches;
     use std::os::unix::fs::PermissionsExt;

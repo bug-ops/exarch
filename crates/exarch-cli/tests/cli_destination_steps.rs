@@ -3,7 +3,7 @@
 //! file over an existing symlink) and #1205 (`verify` reports a directory
 //! over an earlier file as the typed Medium refusal).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(clippy::expect_used, reason = "integration test helpers")]
 
 mod common;
 

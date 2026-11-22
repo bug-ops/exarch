@@ -696,7 +696,6 @@ mod linux {
     }
 
     #[cfg(test)]
-    #[allow(clippy::unwrap_used)]
     mod tests {
         use std::assert_matches;
         use std::os::fd::OwnedFd;
@@ -1375,7 +1374,6 @@ mod macos {
     }
 
     #[cfg(test)]
-    #[allow(clippy::unwrap_used)]
     mod tests {
         use std::assert_matches;
         use std::process::Command;

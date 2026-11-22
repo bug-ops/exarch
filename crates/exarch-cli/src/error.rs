@@ -1395,7 +1395,6 @@ pub fn is_cancelled(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use exarch_core::Compressed;
@@ -2373,7 +2372,6 @@ mod tests {
     /// `dedicated_context` with (a `PartialExtraction` is unwrapped first).
     /// `ArchiveError` has no `ALL`, so a variant added to core needs a sample
     /// here by hand.
-    #[allow(clippy::unwrap_used)]
     fn every_archive_error_variant() -> Vec<ArchiveError> {
         let path = || PathBuf::from("p");
         vec![

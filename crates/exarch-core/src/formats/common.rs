@@ -1247,7 +1247,6 @@ pub(crate) fn copy_file_content_with_permit(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -2005,7 +2004,7 @@ mod tests {
     /// nextest runs each test in its own process, so umask mutation is safe.
     #[cfg(unix)]
     #[test]
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "the test swaps the process umask through libc")]
     fn test_create_file_with_mode_bypasses_strict_umask() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2289,8 +2288,8 @@ mod tests {
 /// directions: whichever is wrong, the outcome is a refusal or a skip, never a
 /// write or a rename.
 #[cfg(all(test, unix))]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod refuse_probe_tests {
-    #![allow(clippy::unwrap_used)]
 
     use super::*;
     use crate::formats::pinned_dir::support::leaf;

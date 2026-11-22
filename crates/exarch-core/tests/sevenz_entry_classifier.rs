@@ -2,8 +2,8 @@
 //! a reparse point is refused before any write, an anti item is skipped
 //! everywhere, and an empty name is rejected by all three.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::io::Cursor;

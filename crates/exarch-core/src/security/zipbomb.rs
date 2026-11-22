@@ -43,7 +43,13 @@ pub struct Uncompressed(pub u64);
 /// # Errors
 ///
 /// Returns an error if the compression ratio exceeds the configured maximum.
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub fn validate_compression_ratio(
     compressed: Compressed,
     uncompressed: Uncompressed,
@@ -173,7 +179,6 @@ impl DeclaredCompressedBudget {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

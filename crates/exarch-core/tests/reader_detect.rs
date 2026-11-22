@@ -1,8 +1,8 @@
 //! `ArchiveReader::detect` and `detect_stream` pick the same format as the
 //! path-based detection, and fail with a typed reason where they cannot.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

@@ -1,7 +1,7 @@
 //! Declared ZIP compressed sizes are validated against the archive length.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

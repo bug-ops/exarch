@@ -1,8 +1,7 @@
 //! A `max_tar_metadata_bytes` of `u64::MAX` is a legal budget: the budget no
 //! longer uses that value as its disarmed marker.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::num::NonZeroU64;
 

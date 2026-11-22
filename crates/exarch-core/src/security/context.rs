@@ -110,7 +110,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_walker_proof_keeps_the_symlink_state() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::formats::pinned_dir::PinnedRoot::open_for_test(temp.path()).unwrap();

@@ -1,7 +1,8 @@
 //! A cancellation requested while one large entry is being copied stops that
 //! entry, in extraction and creation, instead of waiting for its end (#1045).
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

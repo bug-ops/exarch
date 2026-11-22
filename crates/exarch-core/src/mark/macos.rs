@@ -55,7 +55,6 @@ fn write(mark: Mark, fd: &impl AsFd) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -13,7 +13,11 @@
 //!   PAX and GNU long-name records.
 //! - GHSA-23hp (node-tar): declared vs. actual entry size mismatches.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use crate::sink_support::testkit::pax::record as pax_record;
 use exarch_core::ArchiveError;

@@ -23,8 +23,14 @@
 // in private modules; `redundant_pub_crate` contradicts `unreachable_pub` and
 // would push them back to `pub`.
 #![warn(unreachable_pub)]
-#![allow(clippy::redundant_pub_crate)]
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "contradicts unreachable_pub, which this crate enables"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::disallowed_methods, reason = "test fixture setup")
+)]
 #![cfg_attr(
     not(test),
     warn(clippy::indexing_slicing, clippy::arithmetic_side_effects)

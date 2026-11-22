@@ -50,7 +50,13 @@ use crate::types::SafeSymlink;
 /// # Ok(())
 /// # }
 /// ```
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub fn validate_symlink(
     link_path: &SafePath,
     target: &Path,
@@ -62,9 +68,8 @@ pub fn validate_symlink(
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
 )]
 mod tests {
     use super::*;

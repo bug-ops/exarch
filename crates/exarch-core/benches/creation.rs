@@ -2,17 +2,17 @@
 //!
 //! Measures creation throughput across different formats, compression levels,
 //! and directory structures.
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "benchmark fixture setup")]
 #![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::similar_names,
     clippy::cast_sign_loss,
     clippy::uninlined_format_args,
     clippy::items_after_statements,
     clippy::redundant_closure_for_method_calls,
-    clippy::iter_filter_is_ok
+    clippy::iter_filter_is_ok,
+    reason = "bench binaries have no public API; items sit next to their only use; paired names mirror each other"
 )]
+#![expect(clippy::unwrap_used, reason = "benchmark setup")]
 
 use criterion::BenchmarkId;
 use criterion::Criterion;

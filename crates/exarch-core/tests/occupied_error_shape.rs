@@ -2,8 +2,7 @@
 //! its occupant kind, the symlink refusal carries the maker, and the text and
 //! the binding detail name the occupant.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::path::PathBuf;

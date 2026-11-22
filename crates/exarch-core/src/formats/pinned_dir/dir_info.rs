@@ -93,7 +93,6 @@ pub(super) fn names(buffer: &[u8]) -> Result<Vec<Vec<u16>>, Refusal> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

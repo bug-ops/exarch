@@ -444,7 +444,7 @@ fn vet_symlinked_directory(
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use std::assert_matches;
 
@@ -662,7 +662,7 @@ mod tests {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod throttle_tests {
     use std::assert_matches;
 

@@ -2,7 +2,6 @@
 //! who may reach a staging directory.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs::OpenOptions;
 use std::io;

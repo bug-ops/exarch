@@ -1,6 +1,12 @@
 //! Helpers shared by the integration tests.
 
-#![allow(dead_code, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![allow(dead_code, reason = "helpers are used by only some test binaries")]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 /// Flips the low bit of the first byte of `marker` found in `bytes`, so stored
 /// data fails its checksum.

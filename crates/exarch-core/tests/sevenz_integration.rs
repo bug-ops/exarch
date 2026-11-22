@@ -1,7 +1,11 @@
 //! Integration tests for 7z format extraction
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 mod common;
 

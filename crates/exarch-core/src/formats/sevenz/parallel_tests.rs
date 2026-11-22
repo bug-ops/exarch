@@ -1,7 +1,5 @@
 //! The parallel LZMA2 path hands the consumer what the sequential path does.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use super::decode::decode_archive_entries;
 use super::decode::parallel_stream;
 use super::header::HeaderLimit;

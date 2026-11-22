@@ -86,7 +86,6 @@ pub(crate) fn compute_archive_path(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use crate::pattern::EntryPattern;

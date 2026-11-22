@@ -282,7 +282,6 @@ pub(super) fn streaming_resume(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::super::xl_type::EntryKind;
     use super::*;

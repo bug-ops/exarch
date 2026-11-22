@@ -7,8 +7,8 @@
 //! (nothing written outside the destination, no panic, no hang), and the
 //! pinned outcome kind of each case, which is allowed to change on purpose.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::collections::BTreeSet;
 use std::path::Path;

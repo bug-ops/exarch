@@ -480,7 +480,6 @@ fn get_file_size(metadata: &Metadata) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use crate::pattern::EntryPattern;

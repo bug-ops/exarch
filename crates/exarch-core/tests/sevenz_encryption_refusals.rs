@@ -5,7 +5,7 @@
 //! `weak_encryption_refused`, `kdf_cost_exceeded`.
 
 #![cfg(feature = "encryption")]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sevenz_patch;
 

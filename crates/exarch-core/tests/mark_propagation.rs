@@ -5,8 +5,8 @@
 //! Linux has no mark, so this file has no tests there.
 
 #![cfg(any(target_os = "macos", windows))]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::collections::BTreeSet;

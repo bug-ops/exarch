@@ -6,8 +6,8 @@
 //! not scale with their number. Its own test binary because
 //! `#[global_allocator]` is process-wide.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

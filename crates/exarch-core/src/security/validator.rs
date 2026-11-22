@@ -555,9 +555,8 @@ impl<'a> ValidatorCore<'a> {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
 )]
 mod tests {
     use super::*;

@@ -198,7 +198,6 @@ pub(crate) fn identity_of(path: &Path) -> io::Result<FileIdentity> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

@@ -11,7 +11,11 @@
 //! empty target past the header-field-level shortcuts, exercising the same
 //! path a real crafted archive would take.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

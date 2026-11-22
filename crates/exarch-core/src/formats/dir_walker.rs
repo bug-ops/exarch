@@ -491,7 +491,7 @@ impl Followed {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use super::*;
     use crate::OccupiedBy;
@@ -1083,7 +1083,7 @@ mod tests {
 }
 
 #[cfg(all(test, windows))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod windows_tests {
     use super::*;
     use crate::formats::pinned_dir::support::junction;

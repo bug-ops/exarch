@@ -2,11 +2,11 @@
 //! (`EXARCH_TEST_STALL_AT_ENTRY`) and synchronizes on the ready line the hook
 //! writes to stderr, never on a sleep.
 
-#![allow(
-    dead_code,
-    clippy::unwrap_used,
+#![allow(dead_code, reason = "helpers are used by only some test binaries")]
+#![expect(
     clippy::expect_used,
-    clippy::disallowed_methods
+    clippy::unwrap_used,
+    reason = "integration test helpers"
 )]
 
 use std::io::BufRead as _;

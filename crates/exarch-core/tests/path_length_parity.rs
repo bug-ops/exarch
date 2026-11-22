@@ -1,8 +1,8 @@
 //! `list`, `verify` and `extract` give one verdict on an entry path that is
 //! longer than the host path limit, whatever its component count.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[cfg(unix)]
 use std::num::NonZeroUsize;

@@ -1,8 +1,6 @@
 //! Behaviour of `extract_to_sink` that has no path-based counterpart: how it
 //! treats the sink, its inputs and its unsupported shapes.
 
-#![allow(clippy::unwrap_used)]
-
 mod sink_support;
 
 use std::assert_matches;

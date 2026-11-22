@@ -4,8 +4,8 @@
 //! directory that was extracted into.
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::io::Cursor;
 use std::io::Write as _;

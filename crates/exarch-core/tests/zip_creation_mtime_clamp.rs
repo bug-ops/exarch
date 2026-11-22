@@ -2,7 +2,8 @@
 //! representable date, 2107-12-31 23:59:58 (#1263); a pre-1980 mtime keeps
 //! clamping to 1980-01-01.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::fs::File;
 use std::fs::FileTimes;

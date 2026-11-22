@@ -1403,7 +1403,10 @@ impl ZipEntryAdapter {
         // SAFETY: size has already been validated to be <=
         // MAX_STORED_SYMLINK_TARGET which is well within usize
         // range on all platforms
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "test sizes are far below the target type's limit"
+        )]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file
             .take(common::MAX_STORED_SYMLINK_TARGET + 1)
@@ -1582,11 +1585,10 @@ fn admit_payload<R: Read>(
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::items_after_statements,
     clippy::uninlined_format_args,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field, with items next to their use"
 )]
 mod tests {
     use super::*;

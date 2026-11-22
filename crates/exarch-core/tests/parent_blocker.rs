@@ -2,8 +2,8 @@
 //! into a file, a dangling or looping symlink, or a link to a file fails with
 //! one entry-naming message and category in extraction and in `verify` (#804).
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::path::Path;

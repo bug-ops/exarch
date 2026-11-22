@@ -383,7 +383,6 @@ fn release_reservation(_: &File, _: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

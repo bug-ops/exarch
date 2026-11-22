@@ -2,7 +2,7 @@
 //! reaches outside the package, and every fixture a packaged source names ships
 //! with the package.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::path::PathBuf;

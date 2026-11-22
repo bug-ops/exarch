@@ -5,7 +5,8 @@
 //! error, and a wrong password is still `wrong_password_or_corrupt`.
 
 #![cfg(feature = "encryption")]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

@@ -2,8 +2,8 @@
 //! a no-op, anything else (file, symlink, hardlink, special file) is rejected
 //! by `extract`, `list` and `verify` alike.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::io::Write;

@@ -156,7 +156,6 @@ fn prompt() -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
     use std::io::Write as _;

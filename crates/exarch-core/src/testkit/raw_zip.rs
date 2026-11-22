@@ -8,7 +8,8 @@
     clippy::cast_possible_truncation,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    reason = "test helpers panic on malformed fixtures and truncate small sizes"
 )]
 
 /// DOS date of a new entry: 1980-01-01.

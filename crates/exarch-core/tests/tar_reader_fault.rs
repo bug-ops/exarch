@@ -2,8 +2,7 @@
 //! errno wherever it lands in a TAR (header, PAX record, payload, skipped
 //! drain, trailer), never a corrupt-archive verdict (issue #858).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

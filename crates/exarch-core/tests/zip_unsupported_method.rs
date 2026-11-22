@@ -1,8 +1,8 @@
 //! Unsupported ZIP compression methods are rejected at open, identically by
 //! extract, list and verify, before anything is written.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

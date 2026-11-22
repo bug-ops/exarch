@@ -747,7 +747,7 @@ fn roll_back(
 /// directory made as `seed` says of the destination's identity, and returns
 /// the report it produced.
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 pub(super) fn swap_adopted_for_test(
     adoption: Adoption,
     seed: impl FnOnce(FileIdentity) -> Seed,
@@ -759,7 +759,7 @@ pub(super) fn swap_adopted_for_test(
 /// Like [`swap_adopted_for_test`] inside `parent`, which keeps the published
 /// destination `parent/dest` for the caller to inspect.
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 pub(super) fn swap_adopted_in(
     parent: &Path,
     adoption: Adoption,
@@ -772,7 +772,7 @@ pub(super) fn swap_adopted_in(
 /// permissions and the report of the extraction given, returning what the swap
 /// returned.
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 pub(super) fn swap_adoption_in(
     parent: &Path,
     adoption: io::Result<Adoption>,
@@ -801,7 +801,6 @@ pub(super) fn swap_adoption_in(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod refusal_tests {
     use std::assert_matches;
     use std::io;
@@ -869,7 +868,7 @@ mod refusal_tests {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod displace_tests {
     use std::path::Path;
     use std::path::PathBuf;
@@ -1032,7 +1031,7 @@ mod displace_tests {
 }
 
 #[cfg(all(test, windows))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod windows_tests {
     use std::os::windows::process::CommandExt;
     use std::path::Path;

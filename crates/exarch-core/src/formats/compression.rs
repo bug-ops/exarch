@@ -575,7 +575,6 @@ impl<W: Write> Write for TarEncoder<W> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::creation::CompressionLevel;

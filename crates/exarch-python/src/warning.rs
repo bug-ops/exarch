@@ -592,11 +592,6 @@ pub fn creation_warnings<'py>(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests assert by panicking"
-)]
 mod tests {
     use super::*;
     use exarch_core::IoKind;

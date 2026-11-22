@@ -3,7 +3,7 @@
 //! `src/testkit/` and are included by path, so no packaged `.rs` file and no
 //! manifest entry names the testkit crate.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::path::PathBuf;

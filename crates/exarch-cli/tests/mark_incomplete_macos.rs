@@ -2,7 +2,7 @@
 //! denies extended-attribute writes on the destination (write arm) or reads on
 //! the archive (read arm) (#1212).
 #![cfg(target_os = "macos")]
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::process::Command;

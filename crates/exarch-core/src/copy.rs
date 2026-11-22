@@ -101,7 +101,11 @@ impl CopyBuffer {
     /// Returns the buffer size in bytes.
     #[inline]
     #[must_use]
-    #[allow(dead_code, clippy::unused_self)]
+    #[allow(
+        dead_code,
+        clippy::unused_self,
+        reason = "only tests read the buffer size"
+    )]
     pub(crate) fn size(&self) -> usize {
         COPY_BUFFER_SIZE
     }
@@ -315,7 +319,6 @@ fn copy_polled<R: Read + ?Sized, W: Write + ?Sized>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

@@ -10,8 +10,8 @@
 //! `skip_duplicates`.  The ZIP-specific unit tests in `src/formats/zip.rs`
 //! cover this boundary.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[cfg(unix)]
 use exarch_core::ArchiveError;

@@ -1702,11 +1702,6 @@ impl From<exarch_core::VerificationIssue> for VerificationIssue {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests assert by panicking"
-)]
 mod tests {
     use super::*;
     use crate::utils::union_line;

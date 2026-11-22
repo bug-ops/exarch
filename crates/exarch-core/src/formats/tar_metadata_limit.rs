@@ -642,7 +642,6 @@ impl<R: Read> Read for BudgetedReader<R> {
 /// [`budgeted_reader_with`] over a stream whose raw input is not metered.
 // A test helper: a zero budget is a bug in the test itself.
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 #[must_use]
 pub(crate) fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
     let limit = NonZeroU64::new(limit).expect("a test budget is non-zero");
@@ -1149,7 +1148,6 @@ pub(crate) fn budgeted_tar_entries<R: Read>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

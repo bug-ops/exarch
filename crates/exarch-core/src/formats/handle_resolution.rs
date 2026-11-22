@@ -572,7 +572,7 @@ impl<'r> LinkCursor<'r> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use super::*;
     use std::assert_matches;

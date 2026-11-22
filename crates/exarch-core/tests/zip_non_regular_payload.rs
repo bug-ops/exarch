@@ -1,8 +1,7 @@
 //! A directory entry that declares a payload is refused by every extraction
 //! entry point, including the in-memory one.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

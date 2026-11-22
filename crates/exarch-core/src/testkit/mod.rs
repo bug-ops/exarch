@@ -4,7 +4,11 @@
 //! with `#[path = "../src/testkit/mod.rs"]`, and the unpublished
 //! `exarch-testkit` crate re-exports the same files for the CLI tests.
 
-#![allow(dead_code, unreachable_pub)]
+#![allow(
+    dead_code,
+    unreachable_pub,
+    reason = "files shared with test binaries that use only part of them"
+)]
 
 pub mod pax;
 pub mod raw_zip;

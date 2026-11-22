@@ -29,8 +29,12 @@
 //! (instead of reproducing a multi-gigabyte archive) so the budget can be
 //! verified without allocating large amounts of memory in CI.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
-#![allow(clippy::disallowed_methods)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use crate::sink_support::testkit::pax::record as pax_record;
 use exarch_core::ArchiveError;

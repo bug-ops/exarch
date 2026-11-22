@@ -5,7 +5,8 @@
 //! archive does, with the same report, through `extract_archive` and through a
 //! listed archive.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

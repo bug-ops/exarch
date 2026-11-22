@@ -5,8 +5,8 @@
 //! among the parents gives the same typed error from both, and a path that
 //! cannot be inspected is an I/O error rather than a security refusal.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

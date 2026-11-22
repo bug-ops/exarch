@@ -3,9 +3,6 @@
 //! `{path, occupant}` objects and `error.by` names who made the occupant
 //! (#1180, #1183).
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-
 mod common;
 
 use common::Member;

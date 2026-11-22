@@ -2,8 +2,6 @@
 //! writer. Each run happens on a worker thread with a deadline so a
 //! regression fails the test instead of hanging it.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use crate::ArchiveError;
 use crate::EntryPosition;
 use crate::ProgressCallback;

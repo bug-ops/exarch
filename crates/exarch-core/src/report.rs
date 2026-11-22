@@ -770,7 +770,6 @@ impl ProgressCallback for NoopProgress {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use std::assert_matches;

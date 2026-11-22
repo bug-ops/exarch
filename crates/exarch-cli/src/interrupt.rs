@@ -518,7 +518,7 @@ fn handle_stop(window: &Window, interrupt: &Interrupt, stop: Stop, exit: impl Fn
 /// query that installs nothing. This is the CLI's only `unsafe`: neither std
 /// nor `signal-hook` can read a disposition.
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "queries a signal disposition through libc")]
 fn ignored_on_entry(signal: std::ffi::c_int) -> bool {
     // SAFETY: a null new action only queries; an all-zero C `sigaction` is
     // valid and is read only after success.
@@ -893,7 +893,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::expect_used)]
     fn a_write_blocked_on_a_full_pipe_is_abandoned_within_the_budget() {
         use std::io::Write as _;
         use std::sync::Arc;
@@ -961,14 +960,12 @@ mod tests {
     }
 
     #[cfg(not(target_os = "wasi"))]
-    #[allow(clippy::expect_used)]
     fn place_of(output: &Path, run: Run) -> StagingPlace {
         exarch_core::staging_place(output, run.staged_kind()).expect("resolve the place")
     }
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    #[allow(clippy::expect_used)]
     fn only_a_replace_names_the_backup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out");
@@ -1000,7 +997,6 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    #[allow(clippy::expect_used)]
     fn each_run_names_what_it_leaves() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out");
@@ -1046,7 +1042,6 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    #[allow(clippy::expect_used)]
     fn the_place_is_resolved_when_the_window_opens() {
         static OPENING: Window = Window::new();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1070,7 +1065,6 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    #[allow(clippy::expect_used)]
     fn a_place_unresolved_at_arm_time_is_resolved_when_the_exit_is_forced() {
         let dir = tempfile::tempdir().expect("tempdir");
         let canonical = dir.path().canonicalize().expect("canonicalize");
@@ -1115,7 +1109,6 @@ mod tests {
 
     #[cfg(not(target_os = "wasi"))]
     #[test]
-    #[allow(clippy::expect_used)]
     fn a_repeated_stop_keeps_the_guard_from_dropping_until_the_exit_ends() {
         use std::sync::mpsc;
         use std::time::Duration;

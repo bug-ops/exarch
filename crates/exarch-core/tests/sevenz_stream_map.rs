@@ -5,8 +5,6 @@
 //! The fixture is the 66-byte fuzzer vector from `sevenz-rust2`; see the
 //! provenance note in `tests/fixtures/generate_7z_fixtures.sh`.
 
-#![allow(clippy::unwrap_used)]
-
 use std::assert_matches;
 use std::path::PathBuf;
 

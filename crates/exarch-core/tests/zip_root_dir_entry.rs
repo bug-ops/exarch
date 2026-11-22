@@ -2,8 +2,8 @@
 //! `bsdtar --format zip -cf out.zip .`, is the destination itself and a no-op,
 //! as in TAR. A root entry that is a symlink or carries data is rejected.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::io::Cursor;
 use std::io::Write;

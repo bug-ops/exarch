@@ -5,7 +5,8 @@
 //! entry (#1261).
 
 #![cfg(feature = "encryption")]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::io::Cursor;
 use std::io::Write as _;

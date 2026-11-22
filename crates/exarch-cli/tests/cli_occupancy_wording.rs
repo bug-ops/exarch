@@ -2,7 +2,7 @@
 //! occupant kind and the maker, as `error.conflicts` does) and #1203 (a
 //! symlink parent names the refused entry and carries `by`).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(clippy::expect_used, reason = "integration test helpers")]
 
 mod common;
 

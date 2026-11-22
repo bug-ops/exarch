@@ -53,13 +53,18 @@ use crate::types::SafePath;
 /// # Ok(())
 /// # }
 /// ```
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub fn validate_path(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<SafePath> {
     SafePath::validate(path, dest, config)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

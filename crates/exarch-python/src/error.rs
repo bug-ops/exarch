@@ -637,9 +637,8 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    reason = "test assertions use positional format arguments"
 )]
 mod tests {
     use super::*;

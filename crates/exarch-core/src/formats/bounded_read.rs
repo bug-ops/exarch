@@ -65,7 +65,6 @@ pub(crate) fn read_up_to<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> io
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

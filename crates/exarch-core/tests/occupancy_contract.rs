@@ -3,8 +3,7 @@
 //! maker on every existing-symlink violation, and a closed `DestinationStep`
 //! whose tokens reach the FFI detail.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::path::PathBuf;

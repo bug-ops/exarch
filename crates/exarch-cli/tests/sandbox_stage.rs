@@ -9,6 +9,7 @@
 
 #![cfg(target_os = "linux")]
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 mod common;
 #[cfg(feature = "test-hooks")]

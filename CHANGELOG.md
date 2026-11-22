@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Lints: clippy exempts tests from `unwrap_used`/`expect_used` via `clippy.toml`, `disallowed_methods` exemptions became `#[expect]`, every `#[allow]` carries a reason, and `.cargo/config.toml` denies build warnings (#PR).
+- Lints: clippy exempts tests from `unwrap_used`/`expect_used` via `clippy.toml`, `disallowed_methods` exemptions became `#[expect]`, every `#[allow]` carries a reason, and `.cargo/config.toml` denies build warnings (#1286).
 
 ### Fixed
 

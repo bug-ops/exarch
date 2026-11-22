@@ -2240,7 +2240,7 @@ class MemoryFile(MemoryEntry):
 
     @property
     def mode(self) -> int | None:
-        """Permission bits after setuid, setgid and sticky were stripped, if the archive carries a mode."""
+        """Permission bits with setuid, setgid and sticky stripped, if the archive has a mode."""
         ...
 
 @final

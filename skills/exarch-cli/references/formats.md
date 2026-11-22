@@ -23,9 +23,11 @@ A TAR holding constructs that readers (`bsdtar`, Python `tarfile`) parse differe
 - non-zero bytes between an `x`/`g`/`L`/`K` body and the next 512-byte boundary;
 - a non-empty GNU long name/link body not ending in exactly one NUL.
 
-Not covered: PAX keys that extractors apply (xattrs, flags, ACLs) and data after a plain TAR's end marker. A global header with other records (such as `git archive`'s `comment`) is accepted.
+`list` applies a local PAX `mtime` record. Global `g` headers, `uname`, `gname`, `uid`, `gid`, and `SCHILY.fflags` are ignored on purpose. Not covered: PAX keys that extractors apply (xattrs, ACLs) and data after a plain TAR's end marker. A global header with other records (such as `git archive`'s `comment`) is accepted.
 
-A TAR regular, continuous, or sparse entry whose name ends in `/` and that carries data fails with `InvalidArchive`. Non-file entry types (FIFO, device, undefined typeflags) are `SecurityViolation`.
+A TAR regular, continuous, or sparse entry whose name ends in `/` and that carries data fails with `InvalidArchive`. Non-file entry types (FIFO, device, undefined typeflags) are `SecurityViolation`; an unknown typeflag reads `unsupported entry type: 'D' (0x44)`.
+
+A GNU volume label (`V`) with zero size is skipped by `extract`, `list`, and `verify`. A local `x`/`L`/`K` header before it, or a non-zero size, is `TAR_AMBIGUITY`; a global `g` before it is accepted; a blank size field fails `InvalidArchive`.
 
 Compressed TAR: the stream after the end marker is read to its end. A corrupt trailer or later member is `InvalidArchive` (`TAR_TRAILER`) and discards the partial extraction; more than `max_tar_metadata_bytes` (default 4 MiB, minimum 1 MiB) of decoded bytes after the marker is a `SecurityViolation` (`TAR_TRAILER`, `relaxable_by` `max_tar_metadata_bytes`), so `cat a.tar.gz b.tar.gz` works only while later members decode to less than that; a zero-padded `.tar.zst` is refused.
 
@@ -53,6 +55,7 @@ Details that matter:
 
 ## 7z
 
+- `extract` restores `mode & 0o777` of a regular file that carries a Unix mode; setuid, setgid, and sticky never apply, and world-write follows `--allow-world-writable`. Entries without a Unix mode, directories, and symlinks keep the default mode. `list` and `verify` output is unchanged.
 - Symlink entries (Unix mode `0x8000` flag plus `S_IFLNK`) hold their target in the entry data:
   - `list` leaves it unread unless `--read-link-targets`.
   - `verify` without `--allow-symlinks` fails `symlinks not allowed`; with it, targets are validated only under `--check-integrity` (see [verify.md](verify.md)).
@@ -72,7 +75,7 @@ Details that matter:
 - Password sources: `--password-file <PATH>` (first line, at most 1 KiB, a regular file; on Unix not readable by group or others, else `chmod 600`), `--password-fd <N>` (Unix, first line of an inherited descriptor, e.g. `3< file`), `--password-prompt` (no echo; fails without a terminal). The flags exclude each other; there is no argument or environment variable. A password for an unencrypted archive is ignored. A password file or descriptor that cannot be read fails before the archive is opened.
 - A ZIP needs a password only when the run extracts an encrypted entry. An encrypted entry (file, directory or symlink) that `--include`/`--exclude` leave out has its payload never read, with or without a password (a wrong password is not reported); it still fails path validation and counts as not selected. An entry skipped only by a later filter (the extension allowlist) still needs the password.
 - Without a password: `extract` that selects an encrypted ZIP entry fails `ENCRYPTED` (`password_required`) before writing; `list` shows the entries of a ZIP and of a 7z with a plain header, marked `encrypted` (a 7z with an encrypted header fails `password_required`); `verify --check-integrity` counts the encrypted ZIP entries and the files of an AES 7z block as unverified with reason `encrypted` (`WARNING`, exit `0`).
-- Wrong password: ZIP `wrong_password` (verifier mismatch, before any write) or `authentication_failed` (tampered data); 7z `wrong_password_or_corrupt`. A password that is not UTF-8 text fails a 7z `unusable_password`. Key derivation of a 7z over the library budget `max_kdf_work` (2^27 rounds, no CLI flag) fails `kdf_cost_exceeded`.
+- Wrong password: ZIP `wrong_password` (verifier mismatch, before any write) or `authentication_failed` (tampered data); 7z `wrong_password_or_corrupt` (from `extract` and `verify`, also on a PPMd block). A password that is not UTF-8 text fails a 7z `unusable_password`. Key derivation of a 7z over the library budget `max_kdf_work` (2^27 rounds, no CLI flag) fails `kdf_cost_exceeded`.
 - A 7z with an encrypted header is held to the same header limits as one with a plain header: a header too large for the configured limits fails as a quota refusal, never as a wrong-password result.
 - `verify` of a wrong password on an AES 7z block reports `ENCRYPTED` / `wrong_password_or_corrupt` for each affected entry and continues; the rest of that block is reported as not verified.
 - The password is never printed, logged or put in JSON.

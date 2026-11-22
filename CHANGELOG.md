@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fuzzing: the `encrypted` target accepts empty files in its authenticity check, so a renamed directory entry no longer fails the run (#1283).
+
 ## [0.11.0] - 2026-11-16
 
 ### Breaking

@@ -9,8 +9,10 @@
 //! 2. Authenticated content cannot be forged. The input is read as a list of
 //!    byte edits (offset, xor) applied to a real AES-256 ZIP; whatever the
 //!    extraction then delivers to the sink as file content must be one of the
-//!    two plaintexts of the original archive. A flipped ciphertext, a truncated
-//!    entry or a forged length that releases anything else fails the run.
+//!    two plaintexts of the original archive, or empty (entry names are not
+//!    authenticated, so a renamed directory entry is an empty file). A flipped
+//!    ciphertext, a truncated entry or a forged length that releases anything
+//!    else fails the run.
 //!
 //! The password of the fixtures is `correct-horse`.
 
@@ -84,7 +86,7 @@ fn assert_only_authentic_content(bytes: Vec<u8>) {
     for (path, entry) in sink.iter() {
         if let MemoryEntry::File { data, .. } = entry {
             assert!(
-                PLAINTEXTS.contains(&data.as_slice()),
+                data.is_empty() || PLAINTEXTS.contains(&data.as_slice()),
                 "unauthenticated content released for {path:?}: {} bytes",
                 data.len()
             );

@@ -381,7 +381,7 @@ closed_enum! {
     /// releases: the existing-files policy decides every repeat, so the first
     /// copy stays. `Refuse` removes the parser differential by refusing the
     /// archive instead, under every
-    /// [`ExistingFiles`](crate::ExistingFiles) mode.
+    /// [`ExistingFiles`] mode.
     ///
     /// Pair `Refuse` with [`Staging::Atomic`](crate::Staging) to leave nothing
     /// behind when a repeat is found after the first copy was written.
@@ -1380,7 +1380,7 @@ impl SecurityConfig {
     }
 
     /// Adds an include glob pattern, parsed with the grammar of `create -x`
-    /// (see [`EntryPattern`](crate::EntryPattern)).
+    /// (see [`EntryPattern`]).
     ///
     /// Only entries that match an include pattern (and no exclude pattern) are
     /// extracted. A pattern that matches nothing in the archive fails the
@@ -1409,7 +1409,7 @@ impl SecurityConfig {
     }
 
     /// Adds an exclude glob pattern, parsed with the grammar of `create -x`
-    /// (see [`EntryPattern`](crate::EntryPattern)).
+    /// (see [`EntryPattern`]).
     ///
     /// An exclude pattern always wins over an include pattern. One that
     /// matches nothing is not an error.

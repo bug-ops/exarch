@@ -3,7 +3,7 @@
 //! Every regular file of at most [`PREPARED_ENTRY_LIMIT`] bytes is compressed
 //! into memory by a [`PreparedJob`] and appended with `add_prepared_file`, in
 //! every mode. [`Workers`] only decides which thread runs a job, so the bytes
-//! of an archive never depend on [`Parallelism`](crate::Parallelism).
+//! of an archive never depend on [`Parallelism`].
 //!
 //! This is the only module that names the `zip` prepared-entry API.
 

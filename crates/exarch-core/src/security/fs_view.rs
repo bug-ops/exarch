@@ -709,7 +709,7 @@ closed_enum! {
 impl Occupant {
     /// The text of a refusal to replace this occupant at `rel`: the
     /// destination-less wording of
-    /// [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied),
+    /// [`ArchiveError::DestinationOccupied`],
     /// built by the same function so the in-memory tree's I/O error and the
     /// typed refusal name the entry and the occupant in the same words.
     pub(crate) fn refusal(self, rel: &Path) -> String {

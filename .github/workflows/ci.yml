@@ -198,6 +198,7 @@ jobs:
             echo "::error::cargo doc reported an output filename collision (see #429)"
             exit 1
           fi
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features -p exarch-core --document-private-items
 
   # Security audit
   security:

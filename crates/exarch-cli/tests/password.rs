@@ -6,6 +6,7 @@
 //! `WinZip` AES-256 ZIP and a non-solid 7z with an encrypted header.
 
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 mod common;
 

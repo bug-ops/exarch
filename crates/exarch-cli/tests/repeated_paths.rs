@@ -2,6 +2,8 @@
 //! <keep-first|refuse>` on `extract`, `list` and `verify`; the default keeps
 //! the first copy.
 
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
+
 mod common;
 
 use assert_cmd::cargo::cargo_bin_cmd;

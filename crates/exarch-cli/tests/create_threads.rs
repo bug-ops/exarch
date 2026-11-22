@@ -3,6 +3,7 @@
 //! run.
 
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 use std::path::Path;
 

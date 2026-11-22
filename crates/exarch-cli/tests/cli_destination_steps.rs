@@ -4,6 +4,7 @@
 //! over an earlier file as the typed Medium refusal).
 
 #![expect(clippy::expect_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 mod common;
 

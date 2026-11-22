@@ -3,6 +3,7 @@
 //! the archive (read arm) (#1212).
 #![cfg(target_os = "macos")]
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 use std::path::Path;
 use std::process::Command;

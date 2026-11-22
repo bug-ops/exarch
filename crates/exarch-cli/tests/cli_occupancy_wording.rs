@@ -3,6 +3,7 @@
 //! symlink parent names the refused entry and carries `by`).
 
 #![expect(clippy::expect_used, reason = "integration test helpers")]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 mod common;
 

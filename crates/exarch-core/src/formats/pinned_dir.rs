@@ -982,10 +982,6 @@ mod imp {
         /// returned [`PendingMode`], so the umask cannot reduce it and no path
         /// is resolved again. The caller applies the mode once it has written
         /// whatever must precede a restrictive mode (the download-origin mark).
-        ///
-        /// The file is left owner-only when `mode` is given: the caller applies
-        /// the mode through the returned [`PendingMode`] once it has written
-        /// whatever must precede a restrictive mode (the download-origin mark).
         pub(crate) fn create_new_deferred(
             &self,
             name: Leaf<'_>,

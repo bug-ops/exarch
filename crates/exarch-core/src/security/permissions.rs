@@ -41,7 +41,7 @@ impl RawMode {
 /// doc comment. `SanitizedMode` can only be constructed by
 /// `sanitize_permissions` — its single field is private, so external
 /// callers (and other modules in this crate) cannot fabricate one that
-/// skipped the setuid/setgid/world-writable stripping.
+/// skipped the setuid/setgid/sticky/world-writable stripping.
 ///
 /// # Examples
 ///
@@ -80,6 +80,10 @@ impl SanitizedMode {
 /// lead to privilege escalation:
 /// - Setuid bit (04000): Allows execution with file owner's privileges
 /// - Setgid bit (02000): Allows execution with file group's privileges
+/// - Sticky bit (01000): Cleared on regular files, so every format yields the
+///   same mode for the same stored bits; it has no effect on a regular file on
+///   Linux and a historical one on some BSDs. Directory modes are not restored
+///   by any format, so directories are unaffected
 /// - World-writable bit (0002): Stripped by default unless
 ///   `allow_world_writable` is set
 ///
@@ -115,6 +119,10 @@ impl SanitizedMode {
 /// let sanitized = sanitize_permissions(RawMode::new(0o6755), &config);
 /// assert_eq!(sanitized.as_u32(), 0o755);
 ///
+/// // Sticky bit is stripped
+/// let sanitized = sanitize_permissions(RawMode::new(0o1755), &config);
+/// assert_eq!(sanitized.as_u32(), 0o755);
+///
 /// // World-writable bit is stripped by default
 /// let sanitized = sanitize_permissions(RawMode::new(0o777), &config);
 /// assert_eq!(sanitized.as_u32(), 0o775);
@@ -139,6 +147,9 @@ pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig) -> Sanitized
 
     // Strip setgid bit (02000)
     sanitized &= !0o2000;
+
+    // Strip sticky bit (01000)
+    sanitized &= !0o1000;
 
     // M-CODE-1: Strip world-writable bit (0002) unless explicitly allowed
     if !config.allowed.world_writable.is_allowed() {
@@ -243,21 +254,21 @@ mod tests {
     }
 
     #[test]
-    fn test_sticky_bit_preservation() {
+    fn test_sticky_bit_stripped() {
         let config = SecurityConfig::default();
         let sanitized = sanitize_permissions(RawMode::new(0o1755), &config).as_u32();
-        assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should be preserved");
-        assert_eq!(sanitized, 0o1755, "full mode should be preserved");
+        assert_eq!(sanitized & 0o1000, 0, "sticky bit should be stripped");
+        assert_eq!(sanitized, 0o755, "only the sticky bit should be removed");
     }
 
     #[test]
-    fn test_sticky_bit_with_setuid_stripped() {
+    fn test_sticky_bit_stripped_with_setuid_and_setgid() {
         let config = SecurityConfig::default();
         let sanitized = sanitize_permissions(RawMode::new(0o7755), &config).as_u32();
-        assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should remain");
+        assert_eq!(sanitized & 0o1000, 0, "sticky should be stripped");
         assert_eq!(sanitized & 0o4000, 0, "setuid should be stripped");
         assert_eq!(sanitized & 0o2000, 0, "setgid should be stripped");
-        assert_eq!(sanitized, 0o1755, "result should be sticky + rwxr-xr-x");
+        assert_eq!(sanitized, 0o755, "result should be rwxr-xr-x");
     }
 
     // M-CODE-1: Test world-writable with config flag

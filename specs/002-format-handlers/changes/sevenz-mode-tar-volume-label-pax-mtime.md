@@ -22,7 +22,7 @@ related:
 
 ### FR-078
 
-WHEN a 7z entry classified as a regular file (`SevenZKind::File`) has `has_windows_attributes` set and the Unix-extension flag `0x8000` set in `windows_attributes`, THE SYSTEM SHALL restore its permission bits: the raw mode is `(windows_attributes >> 16) & 0o777` (the sticky bit is dropped at the derivation site, so it is never restored), it goes through the same `sanitize_permissions` / `SanitizedMode` pipeline as TAR and ZIP (setuid and setgid stripped, world-writable stripped unless `allowed.world_writable` admits it; `sanitize_permissions` itself is unchanged), and the file is created with that mode by the host target and handed to an `EntrySink` as the same `SanitizedMode`. The flag is read in exactly one place, shared with the file-type classification of FR-043, so type and permission never come from different conditions. Rules:
+WHEN a 7z entry classified as a regular file (`SevenZKind::File`) has `has_windows_attributes` set and the Unix-extension flag `0x8000` set in `windows_attributes`, THE SYSTEM SHALL restore its permission bits: the raw mode is `(windows_attributes >> 16) & 0o7777` (file-type bits only dropped, the same mask as TAR; #1305 replaced the earlier `& 0o777`), it goes through the same `sanitize_permissions` / `SanitizedMode` pipeline as TAR and ZIP (setuid, setgid and sticky stripped, world-writable stripped unless `allowed.world_writable` admits it; see the 001-security-pipeline delta `sanitizer-clears-sticky-bit`), and the file is created with that mode by the host target and handed to an `EntrySink` as the same `SanitizedMode`. The flag is read in exactly one place, shared with the file-type classification of FR-043, so type and permission never come from different conditions. Rules:
 
 - No attributes, or attributes without `0x8000`, mean no mode: the file keeps the default mode (`0666 & ~umask`).
 - A flag set with no file-type bits is a regular file and its mode is restored.
@@ -62,7 +62,7 @@ WHEN `list` reads a TAR entry that a local PAX header carries a parseable `mtime
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | 7z regular file stored `0755`, `0444` or `0640` with the Unix flag | Extracted with that mode through the sanitizer; host and sink agree (FR-078, #1296) |
-| 7z regular file stored `0o4755`, `0o2755`, `0o6755`, `0o1777` or `0o777` | Same as TAR for the same bits, except the sticky bit, which 7z never restores; setuid, setgid and (by default) world-writable are cleared (FR-078) |
+| 7z regular file stored `0o4755`, `0o2755`, `0o6755`, `0o1777` or `0o777` | Same as TAR and ZIP for the same bits; setuid, setgid, sticky and (by default) world-writable are cleared (FR-078, #1305) |
 | 7z regular file stored mode `0` | Applied as-is (FR-078) |
 | 7z entry without attributes or without the `0x8000` flag, or only the Windows read-only attribute | Default mode, as before (FR-078) |
 | 7z directory with a stored mode, symlink with a stored mode | Mode ignored (FR-078) |

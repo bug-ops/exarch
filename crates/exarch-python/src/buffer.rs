@@ -119,8 +119,8 @@ impl PyMemoryEntry {
 /// # Attributes
 ///
 /// * `data` - The file's bytes
-/// * `mode` - Permission bits after setuid and setgid were stripped (`None`
-///   unless the archive carries a mode)
+/// * `mode` - Permission bits after setuid, setgid and sticky were stripped
+///   (`None` unless the archive carries a mode)
 #[pyclass(name = "MemoryFile", extends = PyMemoryEntry, frozen)]
 pub struct PyMemoryFile {
     data: Py<PyBytes>,
@@ -556,8 +556,9 @@ pub fn extract_archive_to_memory_with_progress(
 /// * `password` - Optional `bytearray` password of a password-protected ZIP
 ///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
 ///   `str` raise `TypeError` because they cannot be wiped, an empty or
-///   over-long (more than 1024 bytes) password raises `ValueError` before the
-///   archive is read. exarch wipes its own copy; wipe yours afterwards
+///   over-long (more than `Password::MAX_LEN` bytes) password raises
+///   `ValueError` before the archive is read. exarch wipes its own copy; wipe
+///   yours afterwards
 ///
 /// # Returns
 ///
@@ -636,8 +637,9 @@ pub fn list_archive_bytes_with_progress(
 /// * `password` - Optional `bytearray` password of a password-protected ZIP
 ///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
 ///   `str` raise `TypeError` because they cannot be wiped, an empty or
-///   over-long (more than 1024 bytes) password raises `ValueError` before the
-///   archive is read. exarch wipes its own copy; wipe yours afterwards
+///   over-long (more than `Password::MAX_LEN` bytes) password raises
+///   `ValueError` before the archive is read. exarch wipes its own copy; wipe
+///   yours afterwards
 ///
 /// # Returns
 ///
@@ -970,8 +972,9 @@ pub fn create_archive_to_bytes(
 /// * `password` - Optional `bytearray` password of a password-protected ZIP
 ///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
 ///   `str` raise `TypeError` because they cannot be wiped, an empty or
-///   over-long (more than 1024 bytes) password raises `ValueError` before the
-///   archive is read. exarch wipes its own copy; wipe yours afterwards
+///   over-long (more than `Password::MAX_LEN` bytes) password raises
+///   `ValueError` before the archive is read. exarch wipes its own copy; wipe
+///   yours afterwards
 ///
 /// # Returns
 ///
@@ -1034,8 +1037,9 @@ pub fn list_archive_bytes(
 /// * `password` - Optional `bytearray` password of a password-protected ZIP
 ///   (`WinZip` AES) or 7z (AES-256) archive, as in `list_archive`: `bytes` and
 ///   `str` raise `TypeError` because they cannot be wiped, an empty or
-///   over-long (more than 1024 bytes) password raises `ValueError` before the
-///   archive is read. exarch wipes its own copy; wipe yours afterwards
+///   over-long (more than `Password::MAX_LEN` bytes) password raises
+///   `ValueError` before the archive is read. exarch wipes its own copy; wipe
+///   yours afterwards
 ///
 /// # Returns
 ///

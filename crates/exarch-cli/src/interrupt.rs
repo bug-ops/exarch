@@ -588,25 +588,18 @@ fn start_reading((): Handlers, handler: fn(Stop)) -> std::io::Result<()> {
 /// drop drops what was buffered and starts the reader, which finds the window
 /// closed and gives every later signal its default action.
 #[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
-struct Unread(Option<Handlers>);
+type Unread = core::mem::DropGuard<Option<Handlers>, fn(Option<Handlers>)>;
 
 #[cfg(not(target_os = "wasi"))]
-impl Unread {
-    fn start(mut self) {
-        if let Some(handlers) = self.0.take() {
-            read_from(handlers);
-        }
-    }
+fn unread(handlers: Option<Handlers>) -> Unread {
+    core::mem::DropGuard::new(handlers, start_unread)
 }
 
 #[cfg(not(target_os = "wasi"))]
-impl Drop for Unread {
-    fn drop(&mut self) {
-        if let Some(mut handlers) = self.0.take() {
-            discard_buffered(&mut handlers);
-            read_from(handlers);
-        }
+fn start_unread(handlers: Option<Handlers>) {
+    if let Some(mut handlers) = handlers {
+        discard_buffered(&mut handlers);
+        read_from(handlers);
     }
 }
 
@@ -647,7 +640,9 @@ impl PendingInterrupt {
     /// action stays.
     pub fn start(self) -> InterruptGuard {
         let Self { guard, unread } = self;
-        unread.start();
+        if let Some(handlers) = core::mem::DropGuard::dismiss(unread) {
+            read_from(handlers);
+        }
         guard
     }
 }
@@ -680,7 +675,7 @@ pub fn prepare(output: &Path, run: Run, mode: OutputMode) -> PendingInterrupt {
     stall_hook::stall_after_prepare();
     PendingInterrupt {
         guard,
-        unread: Unread(handlers),
+        unread: unread(handlers),
     }
 }
 

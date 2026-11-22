@@ -1879,10 +1879,10 @@ export type ExistingFiles = 'skip' | 'overwrite' | 'refuse'
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -1955,10 +1955,10 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2275,10 +2275,10 @@ export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array,
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2471,10 +2471,10 @@ export type LinkTargetState = 'recorded' | 'missing' | 'unread' | 'unreadable' |
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2515,9 +2515,9 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
  *   7z (AES-256) archive. A string is refused because it cannot be wiped; an
- *   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
- *   the archive is read. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`
+ *   empty or over-long (more than `Password::MAX_LEN` bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2552,9 +2552,9 @@ export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8A
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
  *   7z (AES-256) archive. A string is refused because it cannot be wiped; an
- *   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
- *   the archive is read. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`
+ *   empty or over-long (more than `Password::MAX_LEN` bytes) password is
+ *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2589,9 +2589,9 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2636,9 +2636,9 @@ export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIte
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -2677,10 +2677,10 @@ export declare function listArchiveBytesWithProgressSync(data: Uint8Array, confi
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -2869,8 +2869,8 @@ export interface MemoryFileEntry {
    */
   data: Uint8Array
   /**
-   * Permission bits after setuid and setgid were stripped; absent when the
-   * archive carries no mode.
+   * Permission bits after setuid, setgid and sticky were stripped; absent
+   * when the archive carries no mode.
    */
   mode?: number
 }
@@ -3286,10 +3286,10 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *
@@ -3329,9 +3329,9 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3364,9 +3364,9 @@ export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3401,9 +3401,9 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3448,9 +3448,9 @@ export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncI
  * * `password` - Optional `Uint8Array` (a `Buffer` works), as in
  *   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
  *   AES) or 7z (AES-256) archive. A string is refused because it cannot be
- *   wiped; an empty or over-long (more than 1024 bytes) password is
- *   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
- *   yours with `buf.fill(0)`
+ *   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+ *   password is `InvalidArg`, before the archive is read. exarch wipes its own
+ *   copy; wipe yours with `buf.fill(0)`
  *
  * # Returns
  *
@@ -3488,10 +3488,10 @@ export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, con
  * * `password` - Optional `Uint8Array` (a `Buffer` works) with the password of
  *   a password-protected ZIP (`WinZip` AES) or 7z (AES-256) archive. A string
  *   is refused because it cannot be wiped; an empty or over-long (more than
- *   1024 bytes) password is `InvalidArg`. A password for an archive that is
- *   not encrypted is ignored. exarch wipes its own copy; wipe yours with
- *   `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password rejects
- *   with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
+ *   `Password::MAX_LEN` bytes) password is `InvalidArg`. A password for an
+ *   archive that is not encrypted is ignored. exarch wipes its own copy; wipe
+ *   yours with `buf.fill(0)`. A missing, wrong or weak (`ZipCrypto`) password
+ *   rejects with `SECURITY_VIOLATION`, `subCode` `'ENCRYPTED'` and a `reason`
  *
  * # Returns
  *

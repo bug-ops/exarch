@@ -1842,7 +1842,7 @@ def extract_archive(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
             ``str`` raise ``TypeError`` because immutable objects cannot be
-            wiped. An empty or over-long (more than 1024 bytes) password raises
+            wiped. An empty or over-long (more than `Password::MAX_LEN` bytes) password raises
             ``ValueError``. A password for an archive that is not encrypted is
             ignored. exarch wipes its own copy; wipe yours afterwards with
             ``password[:] = bytes(len(password))``. A missing, wrong or weak
@@ -1908,7 +1908,7 @@ def extract_archive_with_progress(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
             ``str`` raise ``TypeError`` because immutable objects cannot be
-            wiped. An empty or over-long (more than 1024 bytes) password raises
+            wiped. An empty or over-long (more than `Password::MAX_LEN` bytes) password raises
             ``ValueError``. A password for an archive that is not encrypted is
             ignored. exarch wipes its own copy; wipe yours afterwards with
             ``password[:] = bytes(len(password))``. A missing, wrong or weak
@@ -2085,7 +2085,7 @@ def list_archive(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
             ``str`` raise ``TypeError`` because immutable objects cannot be
-            wiped. An empty or over-long (more than 1024 bytes) password raises
+            wiped. An empty or over-long (more than `Password::MAX_LEN` bytes) password raises
             ``ValueError``. A password for an archive that is not encrypted is
             ignored. exarch wipes its own copy; wipe yours afterwards with
             ``password[:] = bytes(len(password))``. A missing, wrong or weak
@@ -2120,7 +2120,7 @@ def verify_archive(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only: ``bytes`` and
             ``str`` raise ``TypeError`` because immutable objects cannot be
-            wiped. An empty or over-long (more than 1024 bytes) password raises
+            wiped. An empty or over-long (more than `Password::MAX_LEN` bytes) password raises
             ``ValueError``. A password for an archive that is not encrypted is
             ignored. exarch wipes its own copy; wipe yours afterwards with
             ``password[:] = bytes(len(password))``. A missing, wrong or weak
@@ -2160,7 +2160,7 @@ def list_archive_bytes(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only, as in
             list_archive: ``bytes`` and ``str`` raise ``TypeError``, an empty or
-            over-long (more than 1024 bytes) password raises ``ValueError``
+            over-long (more than `Password::MAX_LEN` bytes) password raises ``ValueError``
             before the archive is read. exarch wipes its own copy; wipe yours
             afterwards with ``password[:] = bytes(len(password))``
 
@@ -2194,7 +2194,7 @@ def verify_archive_bytes(
         password: Optional password of a password-protected ZIP (WinZip AES)
             or 7z (AES-256) archive, as a ``bytearray`` only, as in
             list_archive: ``bytes`` and ``str`` raise ``TypeError``, an empty or
-            over-long (more than 1024 bytes) password raises ``ValueError``
+            over-long (more than `Password::MAX_LEN` bytes) password raises ``ValueError``
             before the archive is read. exarch wipes its own copy; wipe yours
             afterwards with ``password[:] = bytes(len(password))``
 
@@ -2240,7 +2240,7 @@ class MemoryFile(MemoryEntry):
 
     @property
     def mode(self) -> int | None:
-        """Permission bits after setuid and setgid were stripped, if the archive carries a mode."""
+        """Permission bits with setuid, setgid and sticky stripped, if the archive has a mode."""
         ...
 
 @final
@@ -2451,7 +2451,7 @@ def extract_archive_to_memory_with_progress(
 
     Raises:
         TypeError: password is ``bytes`` or ``str``
-        ValueError: password is empty or longer than 1024 bytes
+        ValueError: password is empty or longer than `Password::MAX_LEN` bytes
         Whatever progress itself raises: it cancels the extraction before the
         next entry, the collected entries are discarded and the exception
         carries writes == "discarded" (no counters) and

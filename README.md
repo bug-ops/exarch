@@ -147,7 +147,7 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 | Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
-| Permission sanitization | Strips setuid/setgid bits | Enabled |
+| Permission sanitization | Strips setuid/setgid/sticky bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 500 MB |
 
 > [!CAUTION]

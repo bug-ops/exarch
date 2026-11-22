@@ -222,11 +222,10 @@ pub(super) fn unix_file_type(entry: &sevenz_rust2::ArchiveEntry) -> Option<commo
 
 /// The permission bits the entry stores, `None` when it carries no Unix mode.
 ///
-/// Only the low nine bits are kept: setuid, setgid and sticky never reach the
-/// sanitizer, which still strips setuid/setgid and the world-write bits by
-/// policy.
+/// The file-type bits are dropped; setuid, setgid, sticky and the world-write
+/// bit are left to `sanitize_permissions`, as for TAR.
 pub(super) fn file_permissions(entry: &sevenz_rust2::ArchiveEntry) -> Option<RawMode> {
-    unix_mode(entry).map(|mode| RawMode::new(mode & 0o777))
+    unix_mode(entry).map(|mode| RawMode::new(mode & 0o7777))
 }
 
 /// Checks whether the Windows attributes claim a directory.

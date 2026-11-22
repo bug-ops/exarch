@@ -58,7 +58,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--password-file <PATH>` / `--password-fd <N>` / `--password-prompt` | none | Password of an encrypted ZIP (WinZip AES) or 7z; one source at most, also on `list` and `verify`; failures carry `error.reason` in `--json`. Never an argument value or an environment variable. See [references/formats.md](references/formats.md). |
 | `--max-compression-ratio` | 100 | Zip-bomb threshold (ZIP and non-solid 7z). |
 | `--max-path-depth` | 32 | Max path components per entry. |
-| `--preserve-permissions` | off | Keep archive modes (setuid/setgid always stripped). |
+| `--preserve-permissions` | off | Keep archive modes (setuid/setgid/sticky always stripped). |
 | `--allow-symlinks` / `--allow-hardlinks` | off | Allow links that resolve inside the destination. |
 | `--allow-absolute-paths` / `--allow-world-writable` / `--allow-solid-archives` | off | Relax the matching default-deny check. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP structural ambiguity check. |
@@ -139,7 +139,7 @@ Fields, sub-codes, `error.kind` enum, skip kinds, warnings, examples: [reference
 
 ## Defaults at a glance
 
-50 MiB per file, 500 MiB total, 100x compression ratio, 10,000 files, depth 32. Symlinks, hardlinks, absolute paths, world-writable files, and solid 7z are rejected. setuid/setgid are always stripped on Unix. Decoder-memory and 7z header limits have no CLI flag; see [references/security-model.md](references/security-model.md).
+50 MiB per file, 500 MiB total, 100x compression ratio, 10,000 files, depth 32. Symlinks, hardlinks, absolute paths, world-writable files, and solid 7z are rejected. setuid/setgid/sticky are always stripped on Unix. Decoder-memory and 7z header limits have no CLI flag; see [references/security-model.md](references/security-model.md).
 
 ## References
 

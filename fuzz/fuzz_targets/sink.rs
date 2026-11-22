@@ -110,7 +110,7 @@ fn check_invariants(sink: &MemorySink, model: PathModel) {
     for (key, path) in &keys {
         for end in 1..key.len() {
             assert!(
-                !symlinks.contains_key(&key[..end].to_vec()),
+                !symlinks.contains_key(&key[..end]),
                 "invariant 1: {path:?} is stored below a stored symlink",
             );
         }

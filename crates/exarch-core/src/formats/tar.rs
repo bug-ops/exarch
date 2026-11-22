@@ -41,7 +41,7 @@
 //! - Symlink escape detection (symlinks must point within extraction directory)
 //! - Hardlink escape detection (hardlink targets must be within extraction
 //!   directory)
-//! - Permission sanitization (strips setuid/setgid bits)
+//! - Permission sanitization (strips setuid/setgid/sticky bits)
 //! - Device file rejection (char, block devices not supported)
 //! - FIFO rejection (named pipes not supported)
 //!
@@ -242,11 +242,6 @@ impl<R: Read> TarArchive<R> {
         target: &mut T,
         tally: &mut Tally<'_>,
     ) -> Result<EntryOutcome<T::Parent>> {
-        // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
-        if TarEntryAdapter::is_metadata_entry(entry) {
-            return Ok(EntryOutcome::Done);
-        }
-
         let path = entry
             .path()
             .map_err(|e| {
@@ -324,6 +319,9 @@ impl<R: Read> TarArchive<R> {
         tally: &mut Tally<'_>,
         skip_limits: &SkipLimits,
     ) -> Result<EntryOutcome<T::Parent>> {
+        if entry.is_skippable_metadata() {
+            return Ok(EntryOutcome::Done);
+        }
         let outcome = Self::process_entry(entry, faults, target, tally)?;
         if matches!(outcome, EntryOutcome::Skipped) {
             entry.drain_skipped(skip_limits)?;
@@ -495,7 +493,6 @@ enum EntryOutcome<P: ParentCheck> {
     Hardlink(HardlinkInfo<P>),
 }
 
-#[allow(dead_code, reason = "fields used only on unix")]
 struct HardlinkInfo<P: ParentCheck> {
     link_path: SafePath<P>,
     target_path: HardlinkTarget,
@@ -506,17 +503,6 @@ struct HardlinkInfo<P: ParentCheck> {
 struct TarEntryAdapter;
 
 impl TarEntryAdapter {
-    /// Returns `true` for TAR metadata entries that should be skipped.
-    ///
-    /// PAX extended headers and GNU long name/link entries are format-internal
-    /// records, not user files. The `tar` crate consumes `XHeader`,
-    /// `GNULongName`, and `GNULongLink` internally in `next_entry()`, so
-    /// they normally never reach our iterator. `XGlobalHeader` does reach
-    /// us. All four are checked here as defense-in-depth.
-    fn is_metadata_entry<R: Read>(tar_entry: &tar::Entry<'_, R>) -> bool {
-        is_metadata_type(tar_entry.header().entry_type())
-    }
-
     /// Converts `tar::EntryType` to our `EntryType` enum.
     fn to_entry_type<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<EntryType> {
         match tar_node(effective_entry_type(tar_entry)?)? {
@@ -571,24 +557,6 @@ pub(crate) enum TarNode {
     Directory,
     Symlink,
     Hardlink,
-}
-
-/// Returns `true` for TAR metadata records that are skipped, not extracted.
-///
-/// The `tar` crate consumes `XHeader`, `GNULongName` and `GNULongLink`
-/// internally, so normally only `XGlobalHeader` reaches the entry loop; all
-/// four are checked as defense-in-depth. A GNU volume label (`V`) is a
-/// metadata record too, which is safe only for an entry that passed the header
-/// check (`CheckedTarEntry`): that check refuses a label that carries data or
-/// follows an extension header, so every caller must hold a checked entry.
-pub(crate) fn is_metadata_type(kind: tar::EntryType) -> bool {
-    matches!(
-        kind,
-        tar::EntryType::XHeader
-            | tar::EntryType::XGlobalHeader
-            | tar::EntryType::GNULongName
-            | tar::EntryType::GNULongLink
-    ) || kind.as_byte() == b'V'
 }
 
 fn special_entry(kind: SpecialFile) -> ArchiveError {
@@ -1900,8 +1868,8 @@ mod tests {
     }
 
     /// The copy of a pre-existing target never gets wider permissions than the
-    /// target, and never setuid, setgid or (unless allowed) world-writable
-    /// bits.
+    /// target, and never setuid, setgid, sticky or (unless allowed)
+    /// world-writable bits.
     #[test]
     #[cfg(unix)]
     fn test_hardlink_copy_sanitizes_the_mode_of_a_preexisting_target() {
@@ -1916,6 +1884,7 @@ mod tests {
         for (target_mode, config, expected) in [
             (0o4755, hardlink_config(), 0o755),
             (0o2755, hardlink_config(), 0o755),
+            (0o1755, hardlink_config(), 0o755),
             (0o777, hardlink_config(), 0o775),
             (0o777, allow_world_writable, 0o777),
             (0o600, hardlink_config(), 0o600),

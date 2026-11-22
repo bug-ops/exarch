@@ -1,0 +1,104 @@
+//! A regular file never gets the sticky bit on extraction, whatever the format
+//! stored: TAR and ZIP end with the same mode as 7z for the same stored bits
+//! (#1305). The ZIP case is a parity check: ZIP already dropped the bit.
+
+#![cfg(unix)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
+
+use exarch_core::ExtractRequest;
+use exarch_core::SecurityConfig;
+use std::io::Cursor;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use tempfile::TempDir;
+
+const STORED: [u32; 3] = [0o7777, 0o1755, 0o1644];
+const EXPECTED: [u32; 3] = [0o775, 0o755, 0o644];
+
+fn tar_archive(dir: &TempDir) -> PathBuf {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (index, mode) in STORED.iter().enumerate() {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(*mode);
+        builder
+            .append_data(&mut header, format!("f{index}"), &b"hi"[..])
+            .unwrap();
+    }
+    let path = dir.path().join("a.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+fn zip_archive(dir: &TempDir) -> PathBuf {
+    let mut writer = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
+    for (index, mode) in STORED.iter().enumerate() {
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(*mode);
+        writer.start_file(format!("f{index}"), options).unwrap();
+        writer.write_all(b"hi").unwrap();
+    }
+    let path = dir.path().join("a.zip");
+    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+    path
+}
+
+fn assert_sticky_stripped(make: fn(&TempDir) -> PathBuf) {
+    let work = TempDir::new().unwrap();
+    let archive = make(&work);
+    let out = TempDir::new().unwrap();
+
+    ExtractRequest::new(&SecurityConfig::default())
+        .extract(&archive, out.path())
+        .unwrap();
+
+    for (index, expected) in EXPECTED.iter().enumerate() {
+        let mode = std::fs::metadata(out.path().join(format!("f{index}")))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, *expected, "f{index}");
+    }
+}
+
+#[test]
+fn tar_regular_file_loses_the_sticky_bit() {
+    assert_sticky_stripped(tar_archive);
+}
+
+#[test]
+fn zip_regular_file_loses_the_sticky_bit() {
+    assert_sticky_stripped(zip_archive);
+}
+
+#[test]
+fn directory_modes_are_not_restored_so_sticky_never_appears() {
+    let work = TempDir::new().unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, mode) in [("sticky/", 0o1755), ("plain/", 0o700)] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(mode);
+        builder.append_data(&mut header, name, &b""[..]).unwrap();
+    }
+    let archive = work.path().join("d.tar");
+    std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+    let out = TempDir::new().unwrap();
+
+    ExtractRequest::new(&SecurityConfig::default())
+        .extract(&archive, out.path())
+        .unwrap();
+
+    let mode_of = |name: &str| {
+        std::fs::metadata(out.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode_of("sticky"), mode_of("plain"));
+    assert_eq!(mode_of("sticky") & 0o1000, 0);
+}

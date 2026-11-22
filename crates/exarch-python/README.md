@@ -406,7 +406,7 @@ The library provides built-in protection against:
 | Hardlink attacks | Validates hardlink targets |
 | Zip bombs | Detects high compression ratios |
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads |
-| Permission sanitization | Strips setuid/setgid bits |
+| Permission sanitization | Strips setuid/setgid/sticky bits |
 | Size limits | Enforces file and total size limits |
 
 **Caution:** Unlike Python's standard `tarfile` module, exarch applies security validation by default.

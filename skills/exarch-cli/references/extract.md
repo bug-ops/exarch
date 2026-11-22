@@ -24,7 +24,7 @@ Notes on the ratio:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--preserve-permissions` | off | setuid/setgid stripped regardless. |
+| `--preserve-permissions` | off | setuid/setgid/sticky stripped regardless. |
 | `--allow-symlinks` | off | Accept symlinks that resolve inside the destination. Link targets with unresolvable `..` are always rejected. `extract` never writes through a symlink already below the destination: by default `path component is a symlink: <path>` (`SecurityViolation`, `relaxable_by` `symlinks`); with the flag a pre-existing link is accepted only if it resolves to a directory inside the destination. One that leaves the destination fails `SymlinkEscape`; a dangling, looping, or file-pointing one fails `refusing to create <entry> under the existing symlink at <parent>` (not relaxable). A symlinked destination root is accepted. |
 | `--allow-hardlinks` | off | Hardlinks resolving inside the destination. |
 | `--allow-absolute-paths` | off | For ZIP the leading root and any drive/UNC/verbatim/device prefix is stripped (`/tmp/x` lands at `<dest>/tmp/x`). |

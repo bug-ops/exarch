@@ -558,11 +558,11 @@ impl ExtractTarget for HostTarget<'_> {
     /// instead of writing past the reservation.
     ///
     /// The link is created with the target's permission bits sanitized like an
-    /// archive mode (no setuid, setgid or, unless allowed, world-write bits)
-    /// and set on the open descriptor before any byte is written, so a target
-    /// in the destination that was never extracted by this run cannot hand a
-    /// wider mode to its copy, and a private target is never readable through
-    /// the copy while it is being written.
+    /// archive mode (no setuid, setgid, sticky or, unless allowed, world-write
+    /// bits) and set on the open descriptor before any byte is written, so a
+    /// target in the destination that was never extracted by this run cannot
+    /// hand a wider mode to its copy, and a private target is never readable
+    /// through the copy while it is being written.
     ///
     /// A symlink at the target is not automatically rejected: a hardlink may
     /// legitimately point at a symlink created earlier in the same extraction.
@@ -585,8 +585,8 @@ impl ExtractTarget for HostTarget<'_> {
             mode: target_mode,
         } = self.open_hardlink_target(link, target)?;
         // The target may be a pre-existing file of the destination, so its mode
-        // is sanitized like an archive mode: never setuid, setgid or (unless
-        // allowed) world-writable, and never wider than the target.
+        // is sanitized like an archive mode: never setuid, setgid, sticky or
+        // (unless allowed) world-writable, and never wider than the target.
         let link_mode =
             target_mode.map(|mode| sanitize_permissions(RawMode::new(mode), self.config));
 

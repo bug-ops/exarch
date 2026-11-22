@@ -101,13 +101,9 @@ impl CopyBuffer {
     /// Returns the buffer size in bytes.
     #[inline]
     #[must_use]
-    #[allow(
-        dead_code,
-        clippy::unused_self,
-        reason = "only tests read the buffer size"
-    )]
+    #[cfg(test)]
     pub(crate) fn size(&self) -> usize {
-        COPY_BUFFER_SIZE
+        self.buf.len()
     }
 }
 

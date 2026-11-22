@@ -1199,8 +1199,8 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 ///
 /// Permissions are not copied here: the caller creates `to` with the
 /// sanitized mode of the target before any byte is written (a pre-existing
-/// target in the destination can carry setuid, setgid or world-write bits that
-/// extraction never sanitized).
+/// target in the destination can carry setuid, setgid, sticky or world-write
+/// bits that extraction never sanitized).
 ///
 /// # Errors
 ///

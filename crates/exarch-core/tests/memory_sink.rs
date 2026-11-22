@@ -334,7 +334,7 @@ fn a_stored_file_keeps_no_spare_capacity() {
 }
 
 #[test]
-fn setuid_and_setgid_are_stripped_from_the_stored_mode() {
+fn setuid_setgid_and_sticky_are_stripped_from_the_stored_mode() {
     for preserve in [true, false] {
         let mut sink = MemorySink::default();
         let config = SecurityConfig::default().with_preserve_permissions(preserve);
@@ -344,7 +344,7 @@ fn setuid_and_setgid_are_stripped_from_the_stored_mode() {
                 tar::EntryType::Regular,
                 b"x",
                 None,
-                0o6755,
+                0o7755,
             )],
             &mut sink,
             &config,
@@ -355,7 +355,7 @@ fn setuid_and_setgid_are_stripped_from_the_stored_mode() {
             Some(MemoryEntry::File { mode, .. }) => {
                 let bits = mode.map(exarch_core::SanitizedMode::as_u32);
                 assert!(
-                    bits.is_none_or(|bits| bits & 0o6000 == 0),
+                    bits.is_none_or(|bits| bits & 0o7000 == 0),
                     "preserve={preserve}: {bits:?}"
                 );
                 if preserve {

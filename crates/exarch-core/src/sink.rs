@@ -476,8 +476,8 @@ pub trait EntrySink {
     /// Starts a file of exactly `size` bytes, the size the quota tracker
     /// admitted for it.
     ///
-    /// `mode` is the permission bits after setuid and setgid are stripped, if
-    /// the archive carries any.
+    /// `mode` is the permission bits after setuid, setgid and sticky are
+    /// stripped, if the archive carries any.
     ///
     /// # Errors
     ///

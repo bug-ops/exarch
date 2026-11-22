@@ -144,9 +144,9 @@ fn verify_with_progress_core(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
 ///   7z (AES-256) archive. A string is refused because it cannot be wiped; an
-///   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
-///   the archive is read. exarch wipes its own copy; wipe yours with
-///   `buf.fill(0)`
+///   empty or over-long (more than `Password::MAX_LEN` bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -201,9 +201,9 @@ pub fn list_archive_bytes<'env>(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchive`: the password of a password-protected ZIP (`WinZip` AES) or
 ///   7z (AES-256) archive. A string is refused because it cannot be wiped; an
-///   empty or over-long (more than 1024 bytes) password is `InvalidArg`, before
-///   the archive is read. exarch wipes its own copy; wipe yours with
-///   `buf.fill(0)`
+///   empty or over-long (more than `Password::MAX_LEN` bytes) password is
+///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
+///   yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -249,9 +249,9 @@ pub fn list_archive_bytes_sync(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -304,9 +304,9 @@ pub fn verify_archive_bytes<'env>(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -357,9 +357,9 @@ pub fn verify_archive_bytes_sync(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -438,9 +438,9 @@ pub fn list_archive_bytes_with_progress<'env>(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -519,9 +519,9 @@ pub fn verify_archive_bytes_with_progress<'env>(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///
@@ -586,9 +586,9 @@ pub fn list_archive_bytes_with_progress_sync(
 /// * `password` - Optional `Uint8Array` (a `Buffer` works), as in
 ///   `listArchiveBytes`: the password of a password-protected ZIP (`WinZip`
 ///   AES) or 7z (AES-256) archive. A string is refused because it cannot be
-///   wiped; an empty or over-long (more than 1024 bytes) password is
-///   `InvalidArg`, before the archive is read. exarch wipes its own copy; wipe
-///   yours with `buf.fill(0)`
+///   wiped; an empty or over-long (more than `Password::MAX_LEN` bytes)
+///   password is `InvalidArg`, before the archive is read. exarch wipes its own
+///   copy; wipe yours with `buf.fill(0)`
 ///
 /// # Returns
 ///

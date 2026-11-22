@@ -53,7 +53,6 @@ use crate::formats::source_fault::ReadFaults;
 use crate::formats::source_fault::TapSource;
 use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
-use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar::tar_node;
 use crate::formats::tar_metadata_limit::CheckedTarEntry;
@@ -457,7 +456,7 @@ fn list_tar_entries<R: std::io::Read>(
 
         entry.settle(|entry| -> Result<()> {
             // Skip TAR metadata entries (PAX headers, GNU long names/links)
-            if is_metadata_type(entry.header().entry_type()) {
+            if entry.is_skippable_metadata() {
                 return Ok(());
             }
 

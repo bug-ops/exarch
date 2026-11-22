@@ -12,8 +12,10 @@
 //!    two plaintexts of the original archive. An empty file is accepted only
 //!    when the listing of the same bytes reports that path as unencrypted
 //!    (entry names are not authenticated, so a renamed directory entry is an
-//!    empty file). A flipped ciphertext, a truncated entry, a forged length or
-//!    an empty file for an encrypted entry fails the run.
+//!    empty file) and never for a path the listing also reports as encrypted;
+//!    when the listing fails, empty files are not judged. A flipped ciphertext,
+//!    a truncated entry, a forged length or an empty file for an encrypted
+//!    entry fails the run.
 //!
 //! The password of the fixtures is `correct-horse`.
 
@@ -47,10 +49,11 @@ fn password() -> Arc<Password> {
 /// Applies the edits `data` spells (two offset bytes and one xor byte each).
 fn edited_fixture(data: &[u8]) -> Vec<u8> {
     let mut bytes = AES_ZIP.to_vec();
-    for edit in data.chunks_exact(3) {
-        let offset = usize::from(u16::from_le_bytes([edit[0], edit[1]])) % bytes.len();
+    let (edits, _) = data.as_chunks::<3>();
+    for &[low, high, xor] in edits {
+        let offset = usize::from(u16::from_le_bytes([low, high])) % bytes.len();
         if let Some(byte) = bytes.get_mut(offset) {
-            *byte ^= edit[2];
+            *byte ^= xor;
         }
     }
     bytes
@@ -82,21 +85,22 @@ fn read_all(data: &[u8], archive_type: ArchiveType) {
 
 fn assert_only_authentic_content(bytes: Vec<u8>) {
     let config = common::config_ignoring_zip_structure();
-    let plain_paths: HashSet<PathBuf> = ListRequest::new(config)
+    // A failed listing leaves the empty-file check unjudged: extraction can
+    // release entries before it fails on a later one that the listing rejects.
+    let listed: Option<HashSet<(PathBuf, EntryEncryption)>> = ListRequest::new(config)
         .with_password(Some(password()))
         .list_reader(ArchiveReader::of_type(
             Cursor::new(bytes.clone()),
             ArchiveType::Zip,
         ))
+        .ok()
         .map(|manifest| {
             manifest
                 .entries()
                 .iter()
-                .filter(|entry| entry.encryption == EntryEncryption::Plain)
-                .map(|entry| entry.path.clone())
+                .map(|entry| (entry.path.clone(), entry.encryption))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let reader = ArchiveReader::of_type(Cursor::new(bytes), ArchiveType::Zip);
     let mut sink = MemorySink::new(MemoryLimit::from_config(config));
     let _ = SinkExtractRequest::new(config)
@@ -104,9 +108,12 @@ fn assert_only_authentic_content(bytes: Vec<u8>) {
         .extract(reader, &mut sink);
     for (path, entry) in sink.iter() {
         if let MemoryEntry::File { data, .. } = entry {
+            let empty_file_allowed = listed.as_ref().is_none_or(|listed| {
+                listed.contains(&(path.to_path_buf(), EntryEncryption::Plain))
+                    && !listed.contains(&(path.to_path_buf(), EntryEncryption::Encrypted))
+            });
             assert!(
-                PLAINTEXTS.contains(&data.as_slice())
-                    || (data.is_empty() && plain_paths.contains(path)),
+                PLAINTEXTS.contains(&data.as_slice()) || (data.is_empty() && empty_file_allowed),
                 "unauthenticated content released for {path:?}: {} bytes",
                 data.len()
             );

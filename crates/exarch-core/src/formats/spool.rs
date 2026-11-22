@@ -12,15 +12,15 @@
 //! - FreeBSD and macOS: `fstatfs` filesystem type name and mounted-from source;
 //!   `tmpfs` and `/dev/md<digits>` are RAM.
 //! - macOS RAM disks made with `hdiutil attach ram://` appear as an ordinary
-//!   `/dev/disk<N>` device and are classified as [`SpoolBacking::Disk`].
-//!   Telling them apart needs `IOKit`, i.e. another `unsafe` FFI surface; the
-//!   crate keeps `unsafe` to a few scoped, audited modules and does not add one
-//!   for this. A temporary directory on such a disk therefore holds the spool
-//!   in memory outside the decoder budget, bounded only by the reuse limit. The
+//!   `/dev/disk<N>` device and are classified as `SpoolBacking::Disk`. Telling
+//!   them apart needs `IOKit`, i.e. another `unsafe` FFI surface; the crate
+//!   keeps `unsafe` to a few scoped, audited modules and does not add one for
+//!   this. A temporary directory on such a disk therefore holds the spool in
+//!   memory outside the decoder budget, bounded only by the reuse limit. The
 //!   reverse error (a disk reported as memory, as for a vnode-backed FreeBSD
 //!   `md` disk) only lowers the spool's capacity, which is why the classifiers
 //!   lean towards [`SpoolBacking::Ram`].
-//! - Every other target, and a failed `fstatfs`, report [`SpoolBacking::Disk`].
+//! - Every other target, and a failed `fstatfs`, report `SpoolBacking::Disk`.
 //! - WASI has no temporary directory, so [`open_spool`] returns `None`.
 
 use std::fs::File;
@@ -39,7 +39,7 @@ impl SpoolBacking {
     /// Classifies the filesystem `file` lives on.
     ///
     /// Linux, Android, FreeBSD and Apple targets are classified; a failed
-    /// `fstatfs` and every other target report [`Self::Disk`].
+    /// `fstatfs` and every other target report `Self::Disk`.
     #[cfg(not(target_os = "wasi"))]
     fn of(file: &File) -> Self {
         cfg_select! {

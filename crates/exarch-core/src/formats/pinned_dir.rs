@@ -28,7 +28,7 @@
 //! `EACCES` where path-based code worked. None of them is a shipped target for
 //! the bindings or the CLI release builds. FreeBSD, NetBSD and illumos open
 //! with `O_SEARCH` only where a directory's attributes are read or changed
-//! ([`DirHandle`]). On illumos (`OmniOS` VM, CI run of 2026-11-10) an
+//! (`DirHandle`). On illumos (`OmniOS` VM, CI run of 2026-11-10) an
 //! unprivileged user got that search-only handle for a `0311` directory and
 //! could chmod through it. On NetBSD (10.2 VM, same run) the open failed with
 //! `EACCES` and so did the read fallback, so a `0311` directory has no usable

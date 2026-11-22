@@ -643,7 +643,7 @@ impl StagingDir {
     /// is only what it extracted; an entry planted meanwhile fails the run.
     ///
     /// On macOS the proof also lets a rollback strip the deny entries the
-    /// run's own children inherited (see [`OwnContents`]).
+    /// run's own children inherited (see `OwnContents`).
     #[cfg(unix)]
     #[cfg_attr(
         not(target_os = "macos"),

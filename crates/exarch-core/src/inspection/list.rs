@@ -523,9 +523,7 @@ fn list_tar_entries<R: std::io::Read>(
 
             let entry_type = convert_tar_entry_type(tar_type)?;
             let mode = crate::formats::tar::tar_permission_bits(entry.header());
-            let modified = entry.header().mtime().ok().and_then(|t| {
-                SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t))
-            });
+            let modified = entry.modified();
 
             let target = tar_link_target(entry, list_mode)?;
 
@@ -797,7 +795,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             let mut sym_entry = open_entry(archive, i, &credentials).map_err(|e| {
                 encryption_refusal(&e, &credentials).unwrap_or_else(|| {
                     ArchiveError::from(Malformation::ZipEntryRereadFailed {
-                        index: i,
+                        index: crate::ZipEntryIndex::new(i),
                         detail: e.to_string().into(),
                     })
                 })

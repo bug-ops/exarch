@@ -86,7 +86,7 @@ impl SanitizedMode {
 /// The [`SanitizedMode`] return type is the only way to obtain a sanitized
 /// mode in this crate, so a caller cannot accidentally pass a raw,
 /// unsanitized mode to internal permission-setting code such as
-/// `VettedDir::create_new`.
+/// `VettedDir::create_new_deferred`.
 ///
 /// # Performance
 ///

@@ -9,18 +9,22 @@
 //! 2. Authenticated content cannot be forged. The input is read as a list of
 //!    byte edits (offset, xor) applied to a real AES-256 ZIP; whatever the
 //!    extraction then delivers to the sink as file content must be one of the
-//!    two plaintexts of the original archive, or empty (entry names are not
-//!    authenticated, so a renamed directory entry is an empty file). A flipped
-//!    ciphertext, a truncated entry or a forged length that releases anything
-//!    else fails the run.
+//!    two plaintexts of the original archive. An empty file is accepted only
+//!    when the listing of the same bytes reports that path as unencrypted
+//!    (entry names are not authenticated, so a renamed directory entry is an
+//!    empty file). A flipped ciphertext, a truncated entry, a forged length or
+//!    an empty file for an encrypted entry fails the run.
 //!
 //! The password of the fixtures is `correct-horse`.
 
+use std::collections::HashSet;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use exarch_core::ArchiveReader;
 use exarch_core::ArchiveType;
+use exarch_core::EntryEncryption;
 use exarch_core::ListRequest;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryLimit;
@@ -78,6 +82,21 @@ fn read_all(data: &[u8], archive_type: ArchiveType) {
 
 fn assert_only_authentic_content(bytes: Vec<u8>) {
     let config = common::config_ignoring_zip_structure();
+    let plain_paths: HashSet<PathBuf> = ListRequest::new(config)
+        .with_password(Some(password()))
+        .list_reader(ArchiveReader::of_type(
+            Cursor::new(bytes.clone()),
+            ArchiveType::Zip,
+        ))
+        .map(|manifest| {
+            manifest
+                .entries()
+                .iter()
+                .filter(|entry| entry.encryption == EntryEncryption::Plain)
+                .map(|entry| entry.path.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let reader = ArchiveReader::of_type(Cursor::new(bytes), ArchiveType::Zip);
     let mut sink = MemorySink::new(MemoryLimit::from_config(config));
     let _ = SinkExtractRequest::new(config)
@@ -86,7 +105,8 @@ fn assert_only_authentic_content(bytes: Vec<u8>) {
     for (path, entry) in sink.iter() {
         if let MemoryEntry::File { data, .. } = entry {
             assert!(
-                data.is_empty() || PLAINTEXTS.contains(&data.as_slice()),
+                PLAINTEXTS.contains(&data.as_slice())
+                    || (data.is_empty() && plain_paths.contains(path)),
                 "unauthenticated content released for {path:?}: {} bytes",
                 data.len()
             );

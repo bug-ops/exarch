@@ -7,6 +7,7 @@
     clippy::unwrap_used,
     reason = "integration test helpers"
 )]
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;

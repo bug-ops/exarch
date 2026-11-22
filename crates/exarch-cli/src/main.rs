@@ -1,6 +1,11 @@
 //! Exarch CLI - Command-line utility for secure archive extraction and
 //! creation.
 
+#![cfg_attr(
+    test,
+    expect(clippy::disallowed_methods, reason = "test fixture setup")
+)]
+
 mod cli;
 mod commands;
 mod error;

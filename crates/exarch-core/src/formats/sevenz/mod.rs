@@ -13,6 +13,9 @@
 //! - Memory exhaustion protection for solid blocks
 //! - Windows symlink detection (via reparse point attributes)
 //! - Unix symlink targets validated through the symlink policy
+//! - Unix permission bits of regular files restored through the same sanitizer
+//!   as TAR and ZIP: setuid, setgid and sticky never apply and the world-write
+//!   policy holds; an entry without a Unix mode keeps the default
 //!
 //! # Supported Compression Methods
 //!

@@ -1,0 +1,29 @@
+msrv = "1.100"
+cognitive-complexity-threshold = 15
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Path-based mutators: CLI stage and spool writes go through a directory handle;
+# deliberate by-name uses carry #[expect] with a reason.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "writes by path; the CLI writes through a directory handle" },
+    { path = "std::fs::create_dir", reason = "creates by path; the CLI creates through a directory handle" },
+    { path = "std::fs::create_dir_all", reason = "creates by path; the CLI creates through a directory handle" },
+    { path = "std::fs::remove_file", reason = "removes by path; the CLI removes through a directory handle" },
+    { path = "std::fs::remove_dir", reason = "removes by path; the CLI removes through a directory handle" },
+    { path = "std::fs::remove_dir_all", reason = "removes by path; the CLI removes through a directory handle" },
+    { path = "std::fs::rename", reason = "renames by path; the CLI renames through a directory handle" },
+    { path = "std::fs::hard_link", reason = "links by path; the CLI links through a directory handle" },
+    { path = "std::fs::copy", reason = "copies by path; the CLI copies through a directory handle" },
+    { path = "std::fs::set_permissions", reason = "changes a mode by path; the CLI uses the open descriptor" },
+    { path = "std::fs::File::create", reason = "creates by path; the CLI creates through a directory handle" },
+    { path = "std::fs::OpenOptions::open", reason = "opens by path; the CLI opens through a directory handle" },
+    { path = "std::fs::File::create_new", reason = "creates by path; the CLI creates through a directory handle" },
+    { path = "std::fs::DirBuilder::create", reason = "creates by path; the CLI creates through a directory handle" },
+    { path = "std::fs::soft_link", reason = "creates a link by path; the CLI links through a directory handle" },
+    { path = "std::os::unix::fs::symlink", reason = "creates a link by path; the CLI links through a directory handle", allow-invalid = true },
+    { path = "std::os::unix::fs::lchown", reason = "changes an owner by path; the CLI uses the open descriptor", allow-invalid = true },
+    { path = "std::os::unix::fs::chown", reason = "changes an owner by path; the CLI uses the open descriptor", allow-invalid = true },
+    { path = "std::os::windows::fs::symlink_file", reason = "creates a link by path; the CLI links through a directory handle", allow-invalid = true },
+    { path = "std::os::windows::fs::symlink_dir", reason = "creates a link by path; the CLI links through a directory handle", allow-invalid = true },
+]

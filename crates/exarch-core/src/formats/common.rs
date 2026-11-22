@@ -335,7 +335,7 @@ pub(crate) fn check_entry_name_limits(
 /// reopening a TOCTOU window between file creation and permission
 /// enforcement (issue #460). This ensures the exact sanitized mode from
 /// `SecurityConfig` is applied, regardless of the caller's umask. See
-/// [`VettedDir::create_new`] for the full contract.
+/// [`VettedDir::create_new_deferred`] for the full contract.
 ///
 /// # Security - Pinned Parent Directory (issue #818)
 ///
@@ -486,37 +486,6 @@ pub(crate) fn record_file_written(
 /// directory resolves on the first or second attempt.
 pub(crate) const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
-/// Creates a new file in `dir` under the first free name drawn from
-/// `next_candidate`, retrying on `AlreadyExists` up to
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
-///
-/// Each attempt uses [`VettedDir::create_new`] (`O_EXCL`), so a planted entry
-/// at a predicted name is never followed or reused. `entry` names the file the
-/// temp file stands in for, for the error text only. The permit proves the
-/// policy allows replacing `entry`, which the temp file exists to do.
-///
-/// # Errors
-///
-/// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
-/// every attempt collided.
-pub(crate) fn create_temp_sibling(
-    dir: &VettedDir,
-    entry: Leaf<'_>,
-    mode: Option<SanitizedMode>,
-    replace: &ReplacePermit,
-    next_candidate: impl FnMut() -> TempLeaf,
-) -> std::io::Result<(TempLeaf, File)> {
-    create_temp_sibling_with(
-        dir,
-        entry,
-        mode,
-        ModeTiming::AtCreate,
-        replace,
-        next_candidate,
-    )
-    .map(|(temp, file, _)| (temp, file))
-}
-
 /// When a created file is given its mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModeTiming {
@@ -527,14 +496,22 @@ pub(crate) enum ModeTiming {
     AfterMark,
 }
 
-/// [`create_temp_sibling`] that can leave the mode to the caller.
+/// Creates a new file in `dir` under the first free name drawn from
+/// `next_candidate`, retrying on `AlreadyExists` up to
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
+///
+/// Each attempt uses [`create_file`] (`O_EXCL`), so a planted entry at a
+/// predicted name is never followed or reused. `entry` names the file the temp
+/// file stands in for, for the error text only. The permit proves the policy
+/// allows replacing `entry`, which the temp file exists to do.
 ///
 /// With [`ModeTiming::AfterMark`] the returned [`PendingMode`] is still to be
 /// applied; with [`ModeTiming::AtCreate`] it is already spent.
 ///
 /// # Errors
 ///
-/// See [`create_temp_sibling`].
+/// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
+/// every attempt collided.
 pub(crate) fn create_temp_sibling_with(
     dir: &VettedDir,
     entry: Leaf<'_>,
@@ -1051,7 +1028,7 @@ fn name_occupant_on_open_error(
 /// The occupant of `leaf` whose presence explains `err`, if any.
 ///
 /// A symlink refusal is identified by `ELOOP` on Unix and by the
-/// `AlreadyExists` that `VettedDir::create_new` returns elsewhere.
+/// `AlreadyExists` that `VettedDir::create_new_deferred` returns elsewhere.
 fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Option<KeptOccupant> {
     use std::io::ErrorKind;
 
@@ -1210,10 +1187,10 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 ///
 /// Unlike `std::fs::copy(from, to)`, both `from` and `to` are already-open
 /// [`File`] handles rather than paths. Callers obtain `to` from
-/// [`VettedDir::create_new`] (refusing to create through a pre-existing
-/// destination name, symlink or not) and `from` from [`VettedDir::open_read`]
-/// (refusing to follow a symlink), and reserve quota from `from`'s `fstat`
-/// size, which the `permit` then carries.
+/// [`VettedDir::create_new_deferred`] (refusing to create through a
+/// pre-existing destination name, symlink or not) and `from` from
+/// [`VettedDir::open_read`] (refusing to follow a symlink), and reserve quota
+/// from `from`'s `fstat` size, which the `permit` then carries.
 ///
 /// The permit's byte count is a hard ceiling and an exact length: the quota was
 /// charged for that many bytes, so a target that grew after the `fstat` fails

@@ -43,16 +43,19 @@ closed_enum! {
         Symlink => "symlink",
         /// A hard link entry (`1`).
         Hardlink => "hardlink",
+        /// A GNU volume label entry (`V`).
+        VolumeLabel => "volume label",
     }
 }
 
 impl TarNonRegularKind {
     /// The kind of `entry_type`, or `None` for a type that may carry data.
-    pub(crate) const fn of(entry_type: tar::EntryType) -> Option<Self> {
+    pub(crate) fn of(entry_type: tar::EntryType) -> Option<Self> {
         match entry_type {
             tar::EntryType::Directory => Some(Self::Directory),
             tar::EntryType::Symlink => Some(Self::Symlink),
             tar::EntryType::Link => Some(Self::Hardlink),
+            other if other.as_byte() == b'V' => Some(Self::VolumeLabel),
             _ => None,
         }
     }
@@ -278,8 +281,9 @@ pub enum TarAmbiguity {
         kind: TarExtensionKind,
     },
 
-    /// A directory, symbolic link or hard link entry declares a payload, which
-    /// some readers skip as data and others parse as further headers.
+    /// A directory, symbolic link, hard link or volume label entry declares a
+    /// payload, which some readers skip as data and others parse as further
+    /// headers.
     NonRegularPayload {
         /// The entry type.
         kind: TarNonRegularKind,
@@ -296,6 +300,14 @@ pub enum TarAmbiguity {
         size: u64,
         /// Lossy entry path; for display only.
         path: String,
+    },
+
+    /// A local extension header precedes a GNU volume label. The `tar` crate
+    /// merges it into the label, while `bsdtar` applies it to the next member,
+    /// so the two read a different name for that member.
+    ExtensionBeforeLabel {
+        /// The kind of extension header.
+        kind: TarExtensionKind,
     },
 }
 
@@ -370,6 +382,9 @@ impl std::fmt::Display for TarAmbiguity {
                     "file entry with a directory name carries {size} bytes: {path}"
                 )
             }
+            Self::ExtensionBeforeLabel { kind } => {
+                write!(f, "a {kind} header precedes a volume label")
+            }
         }
     }
 }
@@ -416,7 +431,10 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert_eq!(spellings, ["directory", "symlink", "hardlink"]);
+        assert_eq!(
+            spellings,
+            ["directory", "symlink", "hardlink", "volume label"]
+        );
         for kind in TarNonRegularKind::ALL {
             assert_eq!(kind.as_str(), kind.to_string());
             assert_eq!(kind.to_string(), kind.to_string().to_lowercase());
@@ -425,6 +443,49 @@ mod tests {
             TarNonRegularKind::Directory.to_string(),
             ZipNonRegularKind::Directory.to_string()
         );
+    }
+
+    #[test]
+    fn volume_label_messages_are_pinned() {
+        let payload = TarAmbiguity::NonRegularPayload {
+            kind: TarNonRegularKind::VolumeLabel,
+            size: 1024,
+            path: "label".into(),
+        };
+        assert_eq!(
+            payload.to_string(),
+            "volume label entry declares a 1024 byte payload: label"
+        );
+        let cases = [
+            (
+                TarExtensionKind::Pax,
+                "a PAX header precedes a volume label",
+            ),
+            (
+                TarExtensionKind::LongName,
+                "a GNU long name header precedes a volume label",
+            ),
+            (
+                TarExtensionKind::LongLink,
+                "a GNU long link header precedes a volume label",
+            ),
+        ];
+        for (kind, text) in cases {
+            assert_eq!(
+                TarAmbiguity::ExtensionBeforeLabel { kind }.to_string(),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_label_typeflag_maps_to_the_volume_label_kind() {
+        assert_eq!(
+            TarNonRegularKind::of(tar::EntryType::new(b'V')),
+            Some(TarNonRegularKind::VolumeLabel)
+        );
+        assert_eq!(TarNonRegularKind::of(tar::EntryType::new(b'D')), None);
+        assert_eq!(TarNonRegularKind::of(tar::EntryType::Regular), None);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use crate::ArchiveError;
 use crate::IoContext;
+use crate::Limit;
 use crate::Result;
 use crate::Skip;
 use crate::SkipKind;
@@ -20,6 +21,7 @@ use crate::creation::staged::ExcludedOutput;
 use crate::pattern::PatternList;
 use std::collections::HashMap;
 use std::fs::Metadata;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::path::Component;
 use std::path::Path;
@@ -127,67 +129,87 @@ impl<'a> FilteredWalker<'a> {
         match ArchiveEntryName::from_relative(&relative) {
             Some(name) => filters::skip_reason(&name, self.config, &self.exclude_patterns)
                 .map_or_else(
-                    || self.build_filtered_entry(entry, relative),
+                    || self.build_filtered_entry(entry, &relative),
                     |kind| Ok(Some(WalkItem::Skipped(Skip::new(kind, name.to_path_buf())))),
                 ),
             // No name left: the walk root, or an entry `strip_prefix` emptied.
             None if !self.config.include_hidden && filters::is_hidden(entry.path()) => Ok(None),
-            None => self.build_filtered_entry(entry, relative),
+            None => self.build_filtered_entry(entry, &relative),
         }
     }
 
     /// Builds a `WalkItem` from a `walkdir::DirEntry` that passed the filter
-    /// rules.
-    ///
-    /// Returns `Ok(None)` for an entry with no name left, and a skip for a
-    /// file over the size limit.
+    /// rules, through the same [`classify`] a named source goes through.
     fn build_filtered_entry(
         &self,
         entry: &walkdir::DirEntry,
-        relative: PathBuf,
+        relative: &Path,
     ) -> Result<Option<WalkItem>> {
-        let path = entry.path().to_path_buf();
-        let metadata = entry.metadata().map_err(|e| walk_error(e, &path))?;
-
-        if is_special_file(&metadata) {
-            let shown = if relative.is_empty() { path } else { relative };
-            return Ok(Some(WalkItem::Skipped(Skip::new(
-                SkipKind::SpecialFile,
-                shown,
-            ))));
-        }
-
-        let size = get_file_size(&metadata);
-        let is_content = !metadata.is_symlink() && !metadata.is_dir();
-        if is_content && !self.config.max_file_size.admits(size) {
-            let shown = if relative.is_empty() { path } else { relative };
-            return Ok(Some(WalkItem::Skipped(Skip::new(
-                SkipKind::OverMaxFileSize,
-                shown,
-            ))));
-        }
-
-        let Some(archive_path) = entry_name(&path, &relative, metadata.is_dir())? else {
-            return Ok(None);
-        };
-
-        let entry_type = if metadata.is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|e| source_error(&path, e))?;
-            EntryType::Symlink { target }
-        } else if metadata.is_dir() {
-            EntryType::Directory {
-                metadata: Box::new(metadata),
-            }
-        } else {
-            content_of(&path, &metadata, self.config)?
-        };
-
-        Ok(Some(WalkItem::Entry(FilteredEntry {
-            path,
-            archive_path,
-            entry_type,
-        })))
+        let metadata = entry.metadata().map_err(|e| walk_error(e, entry.path()))?;
+        classify(entry.path(), relative, &metadata, self.config)
     }
+}
+
+/// The one decision creation takes about a filesystem object, whether the
+/// caller named it or a walk found it.
+///
+/// `seen` is what the caller judged: `stat` of the target for a followed link,
+/// `lstat` otherwise. The rules apply in a fixed order, so a flag never changes
+/// the outcome of another: the archive name first (a nameless directory is
+/// dropped, a nameless file or link is refused), then special files, then the
+/// size limit, then a link kept as a link, a directory, or content. Every skip
+/// carries the archive name, never the source path.
+///
+/// # Errors
+///
+/// [`ArchiveError::InvalidConfiguration`] when `strip_prefix` leaves a file or
+/// link without a name; a source error when a link target or an identity
+/// cannot be read.
+fn classify(
+    path: &Path,
+    relative: &Path,
+    seen: &Metadata,
+    config: &CreationConfig,
+) -> Result<Option<WalkItem>> {
+    let Some(archive_path) = entry_name(path, relative, seen.is_dir())? else {
+        return Ok(None);
+    };
+    if is_special_file(seen) {
+        return Ok(Some(WalkItem::Skipped(Skip::new(
+            SkipKind::SpecialFile,
+            archive_path.to_path_buf(),
+        ))));
+    }
+    let entry_type = if seen.is_symlink() {
+        let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
+        EntryType::Symlink { target }
+    } else if seen.is_dir() {
+        EntryType::Directory {
+            metadata: Box::new(seen.clone()),
+        }
+    } else if let Some(skip) = over_limit(config.max_file_size, get_file_size(seen), &archive_path)
+    {
+        return Ok(Some(WalkItem::Skipped(skip)));
+    } else {
+        content_of(path, seen, config)?
+    };
+    Ok(Some(WalkItem::Entry(FilteredEntry {
+        path: path.to_path_buf(),
+        archive_path,
+        entry_type,
+    })))
+}
+
+/// The skip for a regular file of `size` bytes that `limit` does not admit.
+///
+/// The one place the per-file size rule is written: the walk applies it to the
+/// size it saw, the writers to the size of the handle they opened.
+pub(crate) fn over_limit(
+    limit: Limit<NonZeroU64>,
+    size: u64,
+    name: &ArchiveEntryName,
+) -> Option<Skip> {
+    (!limit.admits(size)).then(|| Skip::new(SkipKind::OverMaxFileSize, name.to_path_buf()))
 }
 
 /// What the walker decided about one walked entry.
@@ -419,36 +441,16 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
                     .into()
             };
 
-            if is_special_file(seen) {
-                if !excluded.excludes(path) {
-                    collected
-                        .skipped
-                        .record(Skip::new(SkipKind::SpecialFile, relative))?;
-                }
+            if excluded.excludes(path) {
                 continue;
             }
-
-            if !excluded.excludes(path)
-                && let Some(archive_path) = entry_name(path, &relative, false)?
-            {
-                let entry_type = if metadata.is_symlink() && !config.follow_symlinks {
-                    let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
-                    EntryType::Symlink { target }
-                } else if !config.max_file_size.admits(get_file_size(seen)) {
-                    collected
-                        .skipped
-                        .record(Skip::new(SkipKind::OverMaxFileSize, relative))?;
-                    continue;
-                } else {
-                    content_of(path, seen, config)?
-                };
-                let entry = FilteredEntry {
-                    path: path.to_path_buf(),
-                    archive_path,
-                    entry_type,
-                };
-                names.claim(&entry)?;
-                collected.entries.push(entry);
+            match classify(path, &relative, seen, config)? {
+                Some(WalkItem::Entry(entry)) => {
+                    names.claim(&entry)?;
+                    collected.entries.push(entry);
+                }
+                Some(WalkItem::Skipped(skip)) => collected.skipped.record(skip)?,
+                None => {}
             }
         }
     }
@@ -1179,5 +1181,119 @@ mod tests {
         assert!(paths.iter().any(|p| p.contains("keep.txt")));
         assert!(!paths.iter().any(|p| p.contains("skip.tmp")));
         assert!(!paths.iter().any(|p| p.contains(".hidden")));
+    }
+
+    /// One object, named or walked, as the observable outcome of creation:
+    /// the entries, the skips, or the refusal.
+    fn outcome(sources: &[&Path], config: &CreationConfig) -> Vec<String> {
+        match collect_entries(sources, config, &ExcludedOutput::none()) {
+            Err(ArchiveError::InvalidConfiguration {
+                setting,
+                problem: crate::ConfigProblem::RemovesWholeName { .. },
+            }) => vec![format!("refused:{setting:?}:removes_whole_name")],
+            Err(other) => vec![format!("error:{other}")],
+            Ok(collected) => {
+                let entries = collected.entries.iter().map(|entry| {
+                    let kind = match entry.entry_type {
+                        EntryType::Content { .. } => "content",
+                        EntryType::Directory { .. } => "directory",
+                        EntryType::Symlink { .. } => "symlink",
+                    };
+                    format!("entry:{kind}:{}", entry.archive_path.display())
+                });
+                let skips = collected
+                    .skipped
+                    .sample()
+                    .iter()
+                    .map(|skip| format!("skip:{:?}:{}", skip.kind, skip.path.display()));
+                entries.chain(skips).collect()
+            }
+        }
+    }
+
+    /// #1292: every rule gives the same outcome for a file named directly and
+    /// for the same file found by walking its directory.
+    #[test]
+    #[cfg(unix)]
+    fn test_named_and_walked_source_get_one_decision() {
+        type Make = fn(&Path);
+        let big: Make = |path| fs::write(path, vec![0u8; 4096]).unwrap();
+        let small: Make = |path| fs::write(path, b"hi").unwrap();
+        let fifo: Make = crate::test_utils::make_fifo;
+        let link_to_big: Make = |path| {
+            let target = path.parent().unwrap().parent().unwrap().join("target.bin");
+            fs::write(&target, vec![0u8; 4096]).unwrap();
+            std::os::unix::fs::symlink(fs::canonicalize(&target).unwrap(), path).unwrap();
+        };
+        let limited = || CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let stripped = |config: CreationConfig| config.with_strip_prefix(Some("f".into()));
+
+        let cases: Vec<(&str, Make, CreationConfig)> = vec![
+            ("regular", small, CreationConfig::default()),
+            ("regular over the limit", big, limited()),
+            ("oversize, name stripped", big, stripped(limited())),
+            (
+                "regular, name stripped",
+                small,
+                stripped(CreationConfig::default()),
+            ),
+            ("fifo", fifo, CreationConfig::default()),
+            (
+                "fifo, name stripped",
+                fifo,
+                stripped(CreationConfig::default()),
+            ),
+            ("symlink, follow off", link_to_big, limited()),
+            (
+                "symlink to oversize, follow on",
+                link_to_big,
+                limited().with_follow_symlinks(true),
+            ),
+        ];
+
+        for (label, make, config) in &cases {
+            let temp = TempDir::new().unwrap();
+            let named_dir = temp.path().join("named");
+            let walked_dir = temp.path().join("walked").join("d");
+            fs::create_dir_all(&named_dir).unwrap();
+            fs::create_dir_all(&walked_dir).unwrap();
+            make(&named_dir.join("f"));
+            make(&walked_dir.join("f"));
+
+            let named = outcome(&[named_dir.join("f").as_path()], config);
+            let walked = outcome(&[walked_dir.as_path()], config);
+            assert_eq!(named, walked, "{label}");
+        }
+    }
+
+    /// #1292: the run of the issue, a source named and walked under one set of
+    /// flags, ends the same way and never shows a source path in a skip.
+    #[test]
+    fn test_oversize_file_with_stripped_name_is_decided_once() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("big.bin"), vec![0u8; 4096]).unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        fs::write(temp.path().join("d").join("big.bin"), vec![0u8; 4096]).unwrap();
+        let config = CreationConfig::default()
+            .with_max_file_size(crate::non_zero!(100))
+            .with_strip_prefix(Some("big.bin".into()));
+
+        let named = outcome(&[temp.path().join("big.bin").as_path()], &config);
+        let walked = outcome(&[temp.path().join("d").as_path()], &config);
+
+        assert_eq!(named, ["refused:StripPrefix:removes_whole_name"]);
+        assert_eq!(walked, named);
+    }
+
+    #[test]
+    fn test_walked_skip_names_the_archive_path() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        fs::write(temp.path().join("d").join("big.bin"), vec![0u8; 4096]).unwrap();
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+
+        let walked = outcome(&[temp.path().join("d").as_path()], &config);
+
+        assert_eq!(walked, ["skip:OverMaxFileSize:big.bin"]);
     }
 }

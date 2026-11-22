@@ -86,6 +86,48 @@ impl fmt::Display for PortableHazard {
     }
 }
 
+/// The typeflag byte of a TAR header, independent of the `tar` crate's entry
+/// type enumeration.
+///
+/// Displays as `'D' (0x44)` for a graphic ASCII byte and as `0x00` for any
+/// other, so a refusal names the flag the archive holds.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::TarTypeflag;
+///
+/// assert_eq!(TarTypeflag::new(b'D').to_string(), "'D' (0x44)");
+/// assert_eq!(TarTypeflag::new(0).to_string(), "0x00");
+/// assert_eq!(TarTypeflag::new(b'V').get(), b'V');
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TarTypeflag(u8);
+
+impl TarTypeflag {
+    /// Wraps a typeflag byte.
+    #[must_use]
+    pub const fn new(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    /// The raw typeflag byte.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for TarTypeflag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_ascii_graphic() {
+            write!(f, "'{}' (0x{:02X})", char::from(self.0), self.0)
+        } else {
+            write!(f, "0x{:02X}", self.0)
+        }
+    }
+}
+
 /// What a 7z header itself says an entry is: a directory has no stream and is
 /// not flagged as an empty file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,8 +391,8 @@ pub enum Violation {
     },
     /// A TAR typeflag that is not a file, directory or link.
     UnsupportedTarType {
-        /// The typeflag, rendered.
-        kind: Box<str>,
+        /// The typeflag the header holds.
+        typeflag: TarTypeflag,
     },
     /// A 7z Unix mode whose type bits name no defined file type.
     UndefinedUnixType {
@@ -685,7 +727,9 @@ impl fmt::Display for Violation {
                 kind,
                 name: Some(name),
             } => write!(f, "{} entries not supported: {name}", kind.noun()),
-            Self::UnsupportedTarType { kind } => write!(f, "unsupported entry type: {kind}"),
+            Self::UnsupportedTarType { typeflag } => {
+                write!(f, "unsupported entry type: {typeflag}")
+            }
             Self::UndefinedUnixType { bits, name } => write!(
                 f,
                 "7z entry has an undefined Unix file type ({bits:#x}): {name}"
@@ -891,7 +935,9 @@ mod tests {
                 None,
             ),
             (
-                Violation::UnsupportedTarType { kind: text("k") },
+                Violation::UnsupportedTarType {
+                    typeflag: TarTypeflag::new(b'k'),
+                },
                 C::EntryType,
                 None,
             ),
@@ -1068,7 +1114,7 @@ mod tests {
         "refusing to create e under the existing symlink at p",
         "refusing to replace the existing symlink at r",
         "FIFO entries not supported",
-        "unsupported entry type: k",
+        "unsupported entry type: 'k' (0x6B)",
         "7z entry has an undefined Unix file type (0x1): n",
         "7z entry is a file but its Unix mode says directory: n",
         "archive root entry '.' must be a directory",
@@ -1100,6 +1146,29 @@ mod tests {
         for ((kind, ..), expected) in kinds.iter().zip(EXPECTED_TEXT) {
             assert_eq!(kind.to_string(), expected, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn test_typeflag_renders_the_character_and_the_hex_byte() {
+        for (byte, expected) in [
+            (b'D', "'D' (0x44)"),
+            (b'Z', "'Z' (0x5A)"),
+            (b'V', "'V' (0x56)"),
+            (0x00, "0x00"),
+            (0x1F, "0x1F"),
+            (0x20, "0x20"),
+            (0xFF, "0xFF"),
+        ] {
+            assert_eq!(TarTypeflag::new(byte).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_unsupported_tar_type_names_the_typeflag() {
+        let violation = Violation::UnsupportedTarType {
+            typeflag: TarTypeflag::new(b'D'),
+        };
+        assert_eq!(violation.to_string(), "unsupported entry type: 'D' (0x44)");
     }
 
     #[test]

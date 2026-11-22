@@ -440,6 +440,19 @@ pub(super) enum BlockCipher {
 }
 
 impl BlockCipher {
+    /// Whether `error`, raised outside the per-entry callback, is a verdict on
+    /// the key of this block: the non-I/O errors [`DecodeFailure::from_sevenz`]
+    /// maps to a checksum or malformed stream, which [`Self::classify`] reports
+    /// as the encryption refusal. An I/O error is left to the source-fault
+    /// classification.
+    pub(super) const fn refuses_key(self, error: &sevenz_rust2::Error) -> bool {
+        matches!(self, Self::Aes)
+            && matches!(
+                error,
+                sevenz_rust2::Error::ChecksumVerificationFailed | sevenz_rust2::Error::Other(_)
+            )
+    }
+
     /// `failure` as this block reports it: in an encrypted block a wrong
     /// password or tampered data fails as a checksum, a truncation or a
     /// malformed stream, which is the encryption refusal extraction raises.

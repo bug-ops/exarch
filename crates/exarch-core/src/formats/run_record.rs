@@ -1,9 +1,9 @@
 //! Which landings the current run created itself.
 //!
-//! Under [`ExistingFiles::Refuse`](crate::ExistingFiles::Refuse) an occupied
+//! Under [`ExistingFiles::Refuse`] an occupied
 //! landing is refused, except when the run made the occupant and it is a file
 //! or a symlink: a second archive entry for the same path is a duplicate and is
-//! skipped, as under [`ExistingFiles::Skip`](crate::ExistingFiles::Skip). A
+//! skipped, as under [`ExistingFiles::Skip`]. A
 //! directory the run made is never a duplicate, but the record keeps it too, so
 //! a refusal can say that the archive itself made the occupant. The record
 //! tells an entry the run made from one it did not. It is kept per run, by the

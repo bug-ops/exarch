@@ -477,6 +477,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(13),
             marking: None,
+            mode: None,
             progress: &mut NoopProgress,
         },
         || {
@@ -541,6 +542,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(13),
             marking: None,
+            mode: None,
             progress: &mut NoopProgress,
         },
         || {
@@ -585,6 +587,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(50),
             marking: None,
+            mode: None,
             progress: &mut NoopProgress,
         },
     );
@@ -636,6 +639,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
             copy_buffer: &mut copy_buffer,
             permit: test_permit(50),
             marking: None,
+            mode: None,
             progress: &mut NoopProgress,
         },
     );
@@ -2053,7 +2057,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 /// `write_file_with_permit`'s temp-file + `rename` replaces whatever
 /// sits at `dest_path`, symlink or not, without following it, and
 /// nothing upstream of that rename rejected a symlink destination the
-/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new` does.
+/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new_deferred` does.
 /// The host target now checks `lstat_dest` before reserving quota
 /// or removing anything, and fails with the same `EXISTING_SYMLINK` refusal
 /// TAR/ZIP produce instead of silently replacing the symlink.
@@ -2877,4 +2881,67 @@ fn an_encrypted_block_reports_a_decode_verdict_as_the_encryption_refusal() {
         BlockCipher::Plain.classify(DecodeFailure::Checksum),
         DecodeFailure::Checksum
     );
+}
+
+/// `refuses_key` decides the extract path from the `sevenz-rust2` error alone
+/// and must stay in step with what `classify` makes of the same error in
+/// `verify`. Every `Other(_)` of an AES block counts, including key-independent
+/// header-property errors, because `verify` already maps them to the key
+/// verdict (`from_sevenz` -> `Malformed` -> `classify`). An I/O error is left
+/// to the source-fault classification, which tells a faulting source from a
+/// decoder verdict.
+#[test]
+fn refuses_key_agrees_with_the_verify_classification_of_every_error_shape() {
+    use crate::ArchiveError;
+    use crate::EncryptionRefusal;
+    use crate::Violation;
+    use crate::inspection::integrity::DecodeFailure;
+    use sevenz_rust2::Error;
+
+    let shapes = || {
+        [
+            Error::ChecksumVerificationFailed,
+            Error::NextHeaderCrcMismatch,
+            Error::Other("Could not initialize the range decoder".into()),
+            Error::Other("Wrong PPMd parameter".into()),
+            Error::UnsupportedCompressionMethod("x".into()),
+            Error::MaxMemLimited {
+                max_kb: 1,
+                actaul_kb: 2,
+            },
+            Error::PasswordRequired,
+            Error::Unsupported("x".into()),
+            Error::MaybeBadPassword(io::Error::other("bad")),
+            Error::FileNotFound,
+        ]
+    };
+
+    let is_refusal = |error: &ArchiveError| {
+        matches!(
+            error,
+            ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted {
+                    reason: EncryptionRefusal::WrongPasswordOrCorrupt,
+                    ..
+                },
+            }
+        )
+    };
+    for (error, again, third) in shapes()
+        .into_iter()
+        .zip(shapes())
+        .zip(shapes())
+        .map(|((a, b), c)| (a, b, c))
+    {
+        let verify_refuses = matches!(
+            BlockCipher::Aes.classify(DecodeFailure::from_sevenz(again)),
+            DecodeFailure::NotDecodable(ref refusal) if is_refusal(refusal)
+        );
+        let extract_refuses =
+            BlockCipher::Aes.refuses_key(&error) || is_refusal(&ArchiveError::from(third));
+        assert_eq!(extract_refuses, verify_refuses, "{error:?}");
+        assert!(!BlockCipher::Plain.refuses_key(&error), "{error:?}");
+    }
+    let io_error = Error::Io(io::Error::other("read"), "context".into());
+    assert!(!BlockCipher::Aes.refuses_key(&io_error));
 }

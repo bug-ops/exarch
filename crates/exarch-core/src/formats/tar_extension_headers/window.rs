@@ -16,14 +16,12 @@
 use std::ops::Range;
 
 use super::CHECKSUM_FIELD;
-use super::PAX_SIZE;
+use super::ParsedPax;
 use super::PrecedingEntry;
 use super::SIZE_FIELD;
 use super::check_header_block;
-use super::check_record_framing;
 use super::is_plain_base256;
 use super::is_plain_octal;
-use super::parse_records;
 use crate::Result;
 use crate::TarAmbiguity;
 use crate::TarExtensionKind;
@@ -122,6 +120,20 @@ fn first_header_offset(window_start: u64) -> Result<usize> {
         .ok_or_else(|| TarAmbiguity::WindowMismatch.into())
 }
 
+/// What a window walk found, next to its verdict.
+///
+/// `pax` and `extensions` hold what was read before the walk stopped, so the
+/// caller can still parse a local PAX body when a later check fails and decide
+/// which refusal wins.
+pub(super) struct WindowWalk<'w> {
+    /// The framed local PAX body, once it passed the framing check.
+    pub(super) pax: Option<ParsedPax<'w>>,
+    /// The local extension headers walked, in window order.
+    pub(super) extensions: Vec<TarExtensionKind>,
+    /// Whether every block in the window passed.
+    pub(super) outcome: Result<()>,
+}
+
 /// Verifies the bytes `tar` read to reach an entry.
 ///
 /// After a global PAX header the padding up to the first block boundary must
@@ -138,38 +150,52 @@ fn first_header_offset(window_start: u64) -> Result<usize> {
 /// header repeats, or the blocks do not end exactly at the entry the `tar`
 /// crate yielded.
 ///
-/// `pax_body` receives the framed body of the local PAX header as soon as it
-/// passes the framing check, even when a later check fails, so the caller can
-/// parse its records by their declared length.
+/// The result carries the parsed local PAX body as soon as it passes the
+/// framing check, even when a later check fails, so the caller can report a
+/// record error before a window error.
 pub(super) fn walk_window<'w>(
     window: &MetadataWindow<'w>,
     preceding: PrecedingEntry,
     header_pos: u64,
     file_pos: u64,
-    pax_body: &mut Option<&'w [u8]>,
+) -> WindowWalk<'w> {
+    let mut walk = WindowWalk {
+        pax: None,
+        extensions: Vec::new(),
+        outcome: Ok(()),
+    };
+    walk.outcome = walk_blocks(window, preceding, header_pos, file_pos, &mut walk);
+    walk
+}
+
+fn walk_blocks<'w>(
+    window: &MetadataWindow<'w>,
+    preceding: PrecedingEntry,
+    header_pos: u64,
+    file_pos: u64,
+    walk: &mut WindowWalk<'w>,
 ) -> Result<()> {
     let bytes = window.bytes();
     let mut offset = first_header_offset(window.start())?;
     if preceding == PrecedingEntry::GlobalPax {
         check_zero_padding(bytes.get(..offset))?;
     }
-    let mut seen: Vec<TarExtensionKind> = Vec::new();
     let mut pax_has_size = false;
     loop {
         let block = block_at(bytes, offset).ok_or(TarAmbiguity::WindowMismatch)?;
         verify_checksum(block)?;
         let size = declared_size(block)?;
         let Some(kind) = extension_kind_of(block) else {
-            let has_long = seen.iter().any(|k| *k != TarExtensionKind::Pax);
+            let has_long = walk.extensions.iter().any(|k| *k != TarExtensionKind::Pax);
             if pax_has_size && has_long {
                 return Err(TarAmbiguity::StackedSizeRecord.into());
             }
             return check_final_header(window, block, offset, header_pos, file_pos);
         };
-        if seen.contains(&kind) {
+        if walk.extensions.contains(&kind) {
             return Err(TarAmbiguity::DuplicateExtensionHeader { kind }.into());
         }
-        seen.push(kind);
+        walk.extensions.push(kind);
 
         let body_start = offset
             .checked_add(BLOCK)
@@ -182,9 +208,9 @@ pub(super) fn walk_window<'w>(
             .get(body_start..body_end)
             .ok_or(TarAmbiguity::WindowMismatch)?;
         if kind == TarExtensionKind::Pax {
-            check_record_framing(body)?;
-            pax_has_size = pax_declares_size(body)?;
-            *pax_body = Some(body);
+            let pax = ParsedPax::parse(body)?;
+            pax_has_size = pax.declares_size;
+            walk.pax = Some(pax);
         } else {
             check_long_record(kind, body)?;
         }
@@ -193,14 +219,6 @@ pub(super) fn walk_window<'w>(
             .ok_or(TarAmbiguity::WindowMismatch)?;
         check_zero_padding(bytes.get(body_end..offset))?;
     }
-}
-
-/// Whether a framed PAX body declares a `size` record, whether or not the
-/// `tar` crate can read it.
-fn pax_declares_size(body: &[u8]) -> Result<bool> {
-    Ok(parse_records(body)?
-        .iter()
-        .any(|record| record.key == PAX_SIZE))
 }
 
 /// Checks the padding after a trailing global PAX header, in the window the
@@ -261,7 +279,7 @@ mod tests {
         header_pos: u64,
         file_pos: u64,
     ) -> Result<()> {
-        walk_window(window, preceding, header_pos, file_pos, &mut None)
+        walk_window(window, preceding, header_pos, file_pos).outcome
     }
 
     fn header_block(typeflag: u8, size: usize) -> Vec<u8> {

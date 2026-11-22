@@ -9,16 +9,16 @@
 | `-f, --force` | off | Replace `OUTPUT`. The archive is written to a temp file in `OUTPUT`'s directory (must be writable) and renamed when complete, so a failed run leaves the previous archive untouched; a replaced file keeps its permission bits. Without it an existing `OUTPUT` fails `OutputExists` (exit `1`). A directory, FIFO, or device as `OUTPUT` is refused even with `--force` (`InvalidConfiguration`, setting `output_path`). The output is never archived into itself. |
 | `-l, --compression-level <1-9>` | 6 | Outside 1-9 (negative or beyond 64 bits included) is `InvalidCompressionLevel`, exit `1`, message `Invalid compression level: must be 1-9, got -1` (`got an out-of-range integer` beyond 64 bits); text that is not a whole number is a usage error (exit `2`). |
 | `-x, --exclude <PATTERN>` | `.git`, `.DS_Store`, `*.tmp` | Repeatable; grammar below. Counted in `skipped_by_kind.excluded`. |
-| `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. |
+| `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. A file whose whole name the prefix removes fails `InvalidConfiguration` (setting `strip_prefix`, exit `1`, no archive), whether the file is named or found by the walk, also when it is over `--max-file-size` or special. |
 | `--include-hidden` | off | Include dotfiles. Otherwise hidden files are skipped and a hidden directory below a source directory is skipped whole (counted once in `skipped_by_kind.hidden`). A hidden directory given as a source, and a source file given directly, are archived regardless. With `--follow-symlinks` a link is judged by its own name. |
 | `--follow-symlinks` | off | Store target contents, not the link. |
-| `--max-file-size <BYTES>` | none | Skip larger source files; `0` refused (`InvalidConfiguration`). |
+| `--max-file-size <BYTES>` | none | Skip larger source files, including a file that grew past the limit after the walk (`over_max_file_size`, TAR and ZIP); `0` refused (`InvalidConfiguration`). |
 | `--preserve-permissions[=true\|false]` | true | `=false` gives a portable archive. |
 | `--threads <N>` | 1 | ZIP only, other formats ignore it. Compresses entries on up to `N` worker threads, capped at the number of available cores; `0` or a non-number is a usage error (exit `2`). The archive is byte-identical for every `N`. Files over 8 MiB are streamed on the main thread. |
 
 Missing or unreadable sources fail with `SourceNotFound` / `SourceNotAccessible` (message names the path and OS error); no archive is left behind.
 
-FIFOs, sockets and devices in a source are not archived and not opened: each is counted in `skipped_by_kind.special_file` (with `--follow-symlinks`, also a link to one). A source that stops matching what the walk saw (replaced by a link or another file type, or grown or shrunk while copied) fails the run with `SourceChanged`; no archive is left behind. A link is never followed to open a source unless `--follow-symlinks` is set.
+FIFOs, sockets and devices in a source are not archived and not opened: each is counted in `skipped_by_kind.special_file`; `skipped_sample` paths name the archive entry (after `--strip-prefix`), not the source path (with `--follow-symlinks`, also a link to one). A source that stops matching what the walk saw (replaced by a link or another file type, or grown or shrunk while copied) fails the run with `SourceChanged`; no archive is left behind. A link is never followed to open a source unless `--follow-symlinks` is set.
 
 ## Exclude grammar
 

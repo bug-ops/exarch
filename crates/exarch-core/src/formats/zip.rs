@@ -144,6 +144,7 @@ use crate::VerificationIssue;
 use crate::VerificationOptions;
 use crate::Violation;
 use crate::ZipConsistencyPolicy;
+use crate::ZipEntryIndex;
 use crate::ZipInconsistency;
 use crate::encryption::Credentials;
 use crate::security::Compressed;
@@ -928,7 +929,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     ) -> Result<PathBuf> {
         let raw_name = zip_file.name().map_err(|e| {
             ArchiveError::from(Malformation::EntryNameUnreadable {
-                index: Some(index),
+                index: Some(ZipEntryIndex::new(index)),
                 detail: e.to_string().into(),
             })
         })?;
@@ -1059,7 +1060,7 @@ fn open_failure(
 ) -> ArchiveError {
     encryption_refusal(error, credentials).unwrap_or_else(|| {
         ArchiveError::from(Malformation::ZipEntryOpenFailed {
-            index,
+            index: ZipEntryIndex::new(index),
             detail: error.to_string().into(),
         })
     })
@@ -1169,7 +1170,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 Ok(name) => PathBuf::from(name.as_ref()),
                 Err(e) => {
                     let err = ArchiveError::from(Malformation::EntryNameUnreadable {
-                        index: Some(i),
+                        index: Some(ZipEntryIndex::new(i)),
                         detail: e.to_string().into(),
                     });
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));

@@ -18,8 +18,12 @@
 
 mod window;
 
+use window::WindowWalk;
+
 use std::collections::HashSet;
 use std::io::Read;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use tar::Entry;
 use tar::EntryType;
@@ -32,12 +36,14 @@ use crate::Result;
 use crate::TarAmbiguity;
 use crate::TarExtensionKind;
 use crate::TarHeaderField;
+use crate::TarNonRegularKind;
 use crate::TarPathKey;
 use crate::formats::tar_metadata_limit::MetadataWindow;
 
 const PAX_PATH: &[u8] = b"path";
 const PAX_LINKPATH: &[u8] = b"linkpath";
 const PAX_SIZE: &[u8] = b"size";
+const PAX_MTIME: &[u8] = b"mtime";
 const PAX_SPARSE_PREFIX: &[u8] = b"GNU.sparse.";
 const PAX_REALSIZE: &[u8] = b"SCHILY.realsize";
 const PAX_HOLESDATA: &[u8] = b"SUN.holesdata";
@@ -71,12 +77,62 @@ pub(crate) enum PrecedingEntry {
     GlobalPax,
 }
 
-/// Path overrides a local PAX header carries, owned so the entry can be
-/// queried again afterwards.
+/// What a local PAX header overrides, owned so the entry can be queried again
+/// afterwards.
 #[derive(Default)]
-struct PathOverrides {
+struct LocalOverrides {
     path: Option<Vec<u8>>,
     linkpath: Option<Vec<u8>>,
+    mtime: Option<SystemTime>,
+}
+
+/// What [`check_entry_headers`] learned about an entry besides refusing it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CheckedHeaders {
+    /// The kind of this entry, to pass as `preceding` for the next one.
+    pub(crate) preceding: PrecedingEntry,
+    /// The modification time a local PAX `mtime` record declares, when it
+    /// parses.
+    pub(crate) mtime: Option<SystemTime>,
+}
+
+/// Reads a PAX `mtime` value, `-?digits(.digits)?`, as a time. The fraction is
+/// cut to nanoseconds; a value that does not fit or does not parse is ignored,
+/// so the header mtime stays in effect.
+fn parse_pax_mtime(value: &[u8]) -> Option<SystemTime> {
+    let (negative, unsigned) = value
+        .strip_prefix(b"-")
+        .map_or((false, value), |rest| (true, rest));
+    let (whole, fraction) = match unsigned.iter().position(|&b| b == b'.') {
+        Some(dot) => {
+            let (whole, rest) = unsigned.split_at(dot);
+            (whole, Some(rest.get(1..)?))
+        }
+        None => (unsigned, None),
+    };
+    let digits_only = |part: &[u8]| !part.is_empty() && part.iter().all(u8::is_ascii_digit);
+    if !digits_only(whole) || fraction.is_some_and(|f| !digits_only(f)) {
+        return None;
+    }
+    let seconds: u64 = std::str::from_utf8(whole).ok()?.parse().ok()?;
+    let nanos: u32 = match fraction {
+        Some(f) => {
+            let nine: Vec<u8> = f
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(b'0'))
+                .take(9)
+                .collect();
+            std::str::from_utf8(&nine).ok()?.parse().ok()?
+        }
+        None => 0,
+    };
+    let offset = Duration::new(seconds, nanos);
+    if negative {
+        SystemTime::UNIX_EPOCH.checked_sub(offset)
+    } else {
+        SystemTime::UNIX_EPOCH.checked_add(offset)
+    }
 }
 
 fn lossy(bytes: &[u8]) -> String {
@@ -115,6 +171,26 @@ const TAR_READ_KEYS: [&[u8]; 5] = [PAX_PATH, PAX_LINKPATH, PAX_SIZE, b"uid", b"g
 /// parse.
 const TAR_STOPPING_KEYS: [&[u8]; 3] = [PAX_SIZE, b"uid", b"gid"];
 
+/// A framed PAX body with its records, parsed once.
+struct ParsedPax<'w> {
+    body: &'w [u8],
+    records: Vec<PaxRecord<'w>>,
+    declares_size: bool,
+}
+
+impl<'w> ParsedPax<'w> {
+    /// Splits `body` into records by their declared length.
+    fn parse(body: &'w [u8]) -> Result<Self> {
+        let records = parse_records(body)?;
+        let declares_size = records.iter().any(|record| record.key == PAX_SIZE);
+        Ok(Self {
+            body,
+            records,
+            declares_size,
+        })
+    }
+}
+
 fn parse_records(body: &[u8]) -> Result<Vec<PaxRecord<'_>>> {
     split_records(body)?
         .into_iter()
@@ -150,25 +226,30 @@ struct CrateRecord {
     after_unparsed: bool,
 }
 
-fn offset_in(body: &[u8], part: &[u8]) -> usize {
-    part.as_ptr().addr().wrapping_sub(body.as_ptr().addr())
+/// Where `part` starts in `body`, or `None` when it is not a slice of it.
+fn offset_in(body: &[u8], part: &[u8]) -> Option<usize> {
+    body.subslice_range(part).map(|range| range.start)
 }
 
 /// Replays how the `tar` crate reads a body: it splits at every newline, skips
 /// a line it cannot parse and stops at an empty line.
-fn crate_records(body: &[u8]) -> Vec<CrateRecord> {
+///
+/// A record that is not a slice of `body` is refused, because every offset
+/// comparison below relies on the `tar` crate yielding slices of its input.
+fn crate_records(body: &[u8]) -> Result<Vec<CrateRecord>> {
     let mut after_unparsed = false;
     let mut yielded = Vec::new();
     for item in PaxExtensions::new(body) {
         match item {
             Ok(record) => yielded.push(CrateRecord {
-                key_offset: offset_in(body, record.key_bytes()),
+                key_offset: offset_in(body, record.key_bytes())
+                    .ok_or(TarAmbiguity::MalformedRecord)?,
                 after_unparsed,
             }),
             Err(_) => after_unparsed = true,
         }
     }
-    yielded
+    Ok(yielded)
 }
 
 /// Requires that what the `tar` crate reads from a body agrees with the
@@ -180,15 +261,12 @@ fn crate_records(body: &[u8]) -> Vec<CrateRecord> {
 /// unseen. A `size` record the crate cannot see is accepted when its canonical
 /// decimal value equals `header_size`, the size the crate uses, so every
 /// reader reads the same length.
-fn check_crate_view(
-    body: &[u8],
-    records: &[PaxRecord<'_>],
-    header_size: Option<u64>,
-) -> Result<()> {
-    let yielded = crate_records(body);
+fn check_crate_view(pax: &ParsedPax<'_>, header_size: Option<u64>) -> Result<()> {
+    let body = pax.body;
+    let yielded = crate_records(body)?;
     let mut seen = yielded.iter().peekable();
-    for record in records {
-        let key_offset = offset_in(body, record.key);
+    for record in &pax.records {
+        let key_offset = offset_in(body, record.key).ok_or(TarAmbiguity::MalformedRecord)?;
         let matched = seen.next_if(|y| y.key_offset == key_offset);
         if TAR_READ_KEYS.contains(&record.key) {
             let stops = TAR_STOPPING_KEYS.contains(&record.key);
@@ -209,12 +287,15 @@ fn check_crate_view(
     Ok(())
 }
 
-fn scan_records(body: &[u8], scope: PaxScope, header_size: Option<u64>) -> Result<PathOverrides> {
-    let records = parse_records(body)?;
-    check_crate_view(body, &records, header_size)?;
+fn scan_records(
+    pax: &ParsedPax<'_>,
+    scope: PaxScope,
+    header_size: Option<u64>,
+) -> Result<LocalOverrides> {
+    check_crate_view(pax, header_size)?;
     let mut seen: HashSet<&[u8]> = HashSet::new();
-    let mut overrides = PathOverrides::default();
-    for PaxRecord { key, value } in records {
+    let mut overrides = LocalOverrides::default();
+    for &PaxRecord { key, value } in &pax.records {
         if key.is_empty() {
             return Err(TarAmbiguity::EmptyKey.into());
         }
@@ -234,6 +315,7 @@ fn scan_records(body: &[u8], scope: PaxScope, header_size: Option<u64>) -> Resul
         match key {
             PAX_PATH => overrides.path = Some(value.to_vec()),
             PAX_LINKPATH => overrides.linkpath = Some(value.to_vec()),
+            PAX_MTIME => overrides.mtime = parse_pax_mtime(value),
             PAX_SIZE if !is_decimal(value) => {
                 return Err(TarAmbiguity::InvalidSize.into());
             }
@@ -253,6 +335,8 @@ fn canonical_u64(value: &[u8]) -> Option<u64> {
         .flatten()
 }
 
+/// Accepts leading zeros on purpose: the `tar` crate reads such a `size` the
+/// same as every other reader, unlike a record length, which must be canonical.
 fn is_decimal(value: &[u8]) -> bool {
     std::str::from_utf8(value)
         .is_ok_and(|text| text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u64>().is_ok())
@@ -272,12 +356,8 @@ fn split_records(body: &[u8]) -> Result<Vec<&[u8]>> {
         let (digits, _) = rest
             .split_at_checked(space)
             .ok_or(TarAmbiguity::MalformedRecord)?;
-        let canonical = !digits.is_empty()
-            && digits.iter().all(u8::is_ascii_digit)
-            && (digits.len() == 1 || digits.first() != Some(&b'0'));
-        let len = canonical
-            .then(|| std::str::from_utf8(digits).ok()?.parse::<usize>().ok())
-            .flatten()
+        let len = canonical_u64(digits)
+            .and_then(|len| usize::try_from(len).ok())
             .filter(|len| *len >= 1)
             .ok_or(TarAmbiguity::MalformedRecord)?;
         let (record, tail) = rest
@@ -290,10 +370,6 @@ fn split_records(body: &[u8]) -> Result<Vec<&[u8]>> {
         rest = tail;
     }
     Ok(records)
-}
-
-fn check_record_framing(body: &[u8]) -> Result<()> {
-    split_records(body).map(drop)
 }
 
 /// Whether `field` is digits `0`-`7` between optional leading spaces and
@@ -386,7 +462,8 @@ pub(crate) fn check_trailing_headers(
 /// header and after every extension header body must be zero, and a GNU long
 /// name or link body must be one NUL-terminated string.
 ///
-/// Returns the kind of this entry, to pass as `preceding` for the next one.
+/// Returns the kind of this entry, to pass as `preceding` for the next one,
+/// and the modification time of a local PAX `mtime` record.
 ///
 /// # Errors
 ///
@@ -397,38 +474,37 @@ pub(crate) fn check_entry_headers<R: Read>(
     window: &MetadataWindow<'_>,
     metadata_limit: u64,
     preceding: PrecedingEntry,
-) -> Result<PrecedingEntry> {
-    let mut pax_body = None;
-    let walked = window::walk_window(
+) -> Result<CheckedHeaders> {
+    let walk = window::walk_window(
         window,
         preceding,
         entry.raw_header_position(),
         entry.raw_file_position(),
-        &mut pax_body,
     );
-    check_parsed_headers(entry, metadata_limit, pax_body, walked.is_err())?;
-    walked?;
-    Ok(if entry.header().entry_type() == EntryType::XGlobalHeader {
+    let mtime = check_parsed_headers(entry, metadata_limit, &walk)?;
+    walk.outcome?;
+    let preceding = if entry.header().entry_type() == EntryType::XGlobalHeader {
         PrecedingEntry::GlobalPax
     } else {
         PrecedingEntry::Other
-    })
+    };
+    Ok(CheckedHeaders { preceding, mtime })
 }
 
 fn check_parsed_headers<R: Read>(
     entry: &mut Entry<'_, R>,
     metadata_limit: u64,
-    pax_body: Option<&[u8]>,
-    window_failed: bool,
-) -> Result<()> {
+    walk: &WindowWalk<'_>,
+) -> Result<Option<SystemTime>> {
     check_header_fields(entry.header())?;
     match entry.header().entry_type() {
         EntryType::XHeader => Err(unrecognized(TarExtensionKind::Pax)),
         EntryType::GNULongName => Err(unrecognized(TarExtensionKind::LongName)),
         EntryType::GNULongLink => Err(unrecognized(TarExtensionKind::LongLink)),
         EntryType::GNUSparse => Err(TarAmbiguity::SparseEntry.into()),
-        EntryType::XGlobalHeader => check_global_header(entry, metadata_limit),
-        _ => check_local_headers(entry, pax_body, window_failed),
+        EntryType::XGlobalHeader => check_global_header(entry, metadata_limit).map(|()| None),
+        kind if kind.as_byte() == b'V' => check_volume_label(entry, walk).map(|()| None),
+        _ => check_local_headers(entry, walk),
     }
 }
 
@@ -442,21 +518,50 @@ fn pax_header_unreadable(error: &std::io::Error) -> ArchiveError {
     })
 }
 
+/// Accepts a GNU volume label only when every reader skips it the same way.
+///
+/// The `tar` crate merges a preceding `x`, `L` or `K` header into the label,
+/// while `bsdtar` applies it to the next member, so any such header before a
+/// label is refused. A label with data is refused too: `bsdtar` reads its
+/// payload blocks as headers, other readers skip them.
+fn check_volume_label<R: Read>(entry: &Entry<'_, R>, walk: &WindowWalk<'_>) -> Result<()> {
+    if let Some(&kind) = walk.extensions.first() {
+        return Err(TarAmbiguity::ExtensionBeforeLabel { kind }.into());
+    }
+    // `entry.size()` differs from the raw field only through a merged PAX
+    // `size`, which needs a local header in the window, refused above (or by
+    // the walk).
+    let size = entry
+        .header()
+        .entry_size()
+        .map_err(|_| TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Size,
+        })?;
+    if size == 0 {
+        return Ok(());
+    }
+    Err(TarAmbiguity::NonRegularPayload {
+        kind: TarNonRegularKind::VolumeLabel,
+        size,
+        path: crate::bytes_text(&entry.path_bytes()),
+    }
+    .into())
+}
+
 fn check_local_headers<R: Read>(
     entry: &mut Entry<'_, R>,
-    pax_body: Option<&[u8]>,
-    window_failed: bool,
-) -> Result<()> {
+    walk: &WindowWalk<'_>,
+) -> Result<Option<SystemTime>> {
     let tar_sees_pax = entry
         .pax_extensions()
         .map_err(|e| pax_header_unreadable(&e))?
         .is_some();
-    let overrides = match (pax_body, tar_sees_pax) {
-        (Some(body), true) => scan_records(body, PaxScope::Local, entry.header().size().ok())?,
-        (None, false) => return Ok(()),
+    let overrides = match (walk.pax.as_ref(), tar_sees_pax) {
+        (Some(pax), true) => scan_records(pax, PaxScope::Local, entry.header().size().ok())?,
+        (None, false) => return Ok(None),
         // The window is stricter than the crate, so it can fail before it
         // yields the body; its error is returned by the caller.
-        (None, true) if window_failed => return Ok(()),
+        (None, true) if walk.outcome.is_err() => return Ok(None),
         // Defensive: the window and the crate use the same magic test, so no
         // archive reaches this arm; a disagreement is refused, never skipped.
         _ => return Err(TarAmbiguity::WindowMismatch.into()),
@@ -478,7 +583,7 @@ fn check_local_headers<R: Read>(
         }
         .into());
     }
-    Ok(())
+    Ok(overrides.mtime)
 }
 
 fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {
@@ -515,8 +620,7 @@ fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -
         return Err(TarAmbiguity::LongRecordBeforeGlobal.into());
     }
 
-    scan_records(&body, PaxScope::Global, None)?;
-    check_record_framing(&body)
+    scan_records(&ParsedPax::parse(&body)?, PaxScope::Global, None).map(drop)
 }
 
 #[cfg(test)]
@@ -528,12 +632,32 @@ mod tests {
     #[test]
     fn the_tar_crate_yields_slices_of_the_body() {
         let body = b"12 path=a.t\n14 mtime=1700\n";
-        let offsets: Vec<usize> = crate_records(body).iter().map(|r| r.key_offset).collect();
+        let offsets: Vec<usize> = crate_records(body)
+            .unwrap()
+            .iter()
+            .map(|r| r.key_offset)
+            .collect();
         assert_eq!(offsets, [3, 15]);
         for record in PaxExtensions::new(body).flatten() {
-            let value_start = offset_in(body, record.value_bytes());
+            let value_start = offset_in(body, record.value_bytes()).unwrap();
             let value_end = value_start + record.value_bytes().len();
             assert_eq!(body.get(value_start..value_end), Some(record.value_bytes()));
         }
+    }
+
+    #[test]
+    fn a_slice_outside_the_body_has_no_offset() {
+        let body = b"12 path=a.t\n";
+        let copy = body.to_vec();
+        assert_eq!(offset_in(body, &body[3..7]), Some(3));
+        assert_eq!(offset_in(body, &copy[3..7]), None);
+    }
+
+    #[test]
+    fn a_record_length_with_a_leading_zero_or_sign_is_refused() {
+        for body in [&b"012 path=a.t\n"[..], b"+12 path=a.t\n", b"0 path=a.t\n"] {
+            assert!(split_records(body).is_err(), "{body:?}");
+        }
+        assert_eq!(split_records(b"12 path=a.t\n").unwrap().len(), 1);
     }
 }

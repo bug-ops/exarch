@@ -49,9 +49,10 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Update zip to the newest 9.x release, beyond the ~9.4 requirement
+      - name: Update zip to the newest 9.x release, beyond the pinned requirement
         run: |
-          sed -i 's/^zip = { version = "~9.4"/zip = { version = "9"/' Cargo.toml
+          sed -i 's/^zip = { version = "~9\.[0-9]*"/zip = { version = "9"/' Cargo.toml
+          grep -q '^zip = { version = "9"' Cargo.toml
           cargo update -p zip
           cargo tree -p exarch-core --depth 1 --edges normal | grep -E 'zip v'
 

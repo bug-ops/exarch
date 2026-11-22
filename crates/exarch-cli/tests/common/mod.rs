@@ -19,6 +19,7 @@ pub enum Member<'a> {
     },
 }
 
+#[expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 pub fn write_tar(path: &Path, members: &[Member<'_>]) {
     let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create archive"));
     for member in members {

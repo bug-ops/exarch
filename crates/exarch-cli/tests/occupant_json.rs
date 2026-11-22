@@ -3,6 +3,8 @@
 //! `{path, occupant}` objects and `error.by` names who made the occupant
 //! (#1180, #1183).
 
+#![expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
+
 mod common;
 
 use common::Member;

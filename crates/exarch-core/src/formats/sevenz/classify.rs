@@ -9,6 +9,7 @@ use crate::SpecialFile;
 use crate::Violation;
 use crate::formats::common;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::security::RawMode;
 use crate::security::fs_view::LinkKind;
 use crate::security::validator::NodeKind;
 use crate::selection::EntryShape;
@@ -204,14 +205,28 @@ pub(super) fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bo
     entry.has_windows_attributes && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
-/// Reads the file type of the Unix mode p7zip keeps in the high 16 bits of the
-/// attributes, `None` when the entry carries no Unix mode or no type bits.
-pub(super) fn unix_file_type(entry: &sevenz_rust2::ArchiveEntry) -> Option<common::UnixFileType> {
+/// Reads the Unix mode p7zip keeps in the high 16 bits of the attributes,
+/// `None` when the entry carries no Unix mode.
+fn unix_mode(entry: &sevenz_rust2::ArchiveEntry) -> Option<u32> {
     const UNIX_EXTENSION: u32 = 0x8000;
 
     (entry.has_windows_attributes && entry.windows_attributes & UNIX_EXTENSION != 0)
-        .then(|| common::UnixFileType::from_mode(entry.windows_attributes >> 16))
-        .flatten()
+        .then_some(entry.windows_attributes >> 16)
+}
+
+/// Reads the file type of the Unix mode p7zip keeps in the high 16 bits of the
+/// attributes, `None` when the entry carries no Unix mode or no type bits.
+pub(super) fn unix_file_type(entry: &sevenz_rust2::ArchiveEntry) -> Option<common::UnixFileType> {
+    unix_mode(entry).and_then(common::UnixFileType::from_mode)
+}
+
+/// The permission bits the entry stores, `None` when it carries no Unix mode.
+///
+/// Only the low nine bits are kept: setuid, setgid and sticky never reach the
+/// sanitizer, which still strips setuid/setgid and the world-write bits by
+/// policy.
+pub(super) fn file_permissions(entry: &sevenz_rust2::ArchiveEntry) -> Option<RawMode> {
+    unix_mode(entry).map(|mode| RawMode::new(mode & 0o777))
 }
 
 /// Checks whether the Windows attributes claim a directory.

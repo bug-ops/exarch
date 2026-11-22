@@ -262,7 +262,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             write_mode,
             parent,
         } = admitted;
-        let (path, permit, _mode) = file.into_parts();
+        let (path, permit, mode) = file.into_parts();
         let (_, leaf) = Leaf::split(path.as_path())?;
         let (copy_buffer, marking) = self.inner.copy_buffer_and_marking();
         let written = match write_mode {
@@ -275,6 +275,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                     copy_buffer,
                     permit,
                     marking,
+                    mode,
                     progress: &mut *tally.progress,
                 },
             )?,
@@ -288,6 +289,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                     copy_buffer,
                     permit,
                     marking,
+                    mode,
                     progress: &mut *tally.progress,
                 },
             )?,

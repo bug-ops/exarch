@@ -69,6 +69,7 @@ pub use violation::KindSource;
 pub use violation::NativeKind;
 pub use violation::PortableHazard;
 pub use violation::SpecialFile;
+pub use violation::TarTypeflag;
 pub use violation::Violation;
 pub use zip_inconsistency::CentralRecordOrdinal;
 pub use zip_inconsistency::EndRecordKind;

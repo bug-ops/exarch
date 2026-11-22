@@ -9,15 +9,16 @@ use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_cancellable;
 use crate::formats::common;
+use crate::formats::common::ModeTiming;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
-use crate::formats::pinned_dir::PendingMode;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::mark::MarkRun;
 use crate::security::fs_view::FsView;
+use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -35,6 +36,7 @@ pub(super) struct FileWrite<'a> {
     pub(super) copy_buffer: &'a mut CopyBuffer,
     pub(super) permit: QuotaPermit,
     pub(super) marking: Option<&'a MarkRun>,
+    pub(super) mode: Option<SanitizedMode>,
     pub(super) progress: &'a mut dyn ProgressCallback,
 }
 
@@ -42,8 +44,9 @@ pub(super) struct FileWrite<'a> {
 /// rename), consuming the [`QuotaPermit`] that authorized the write.
 ///
 /// Used for the common case where nothing currently occupies `leaf`
-/// (issue #492): creates `leaf` itself via [`VettedDir::create_new`], giving
-/// the same `O_EXCL`+`O_NOFOLLOW` guarantee against a symlink race as
+/// (issue #492): creates `leaf` itself through [`common::create_file`]
+/// (`O_EXCL`+`O_NOFOLLOW` via [`VettedDir::create_new_deferred`]), giving the
+/// same guarantee against a symlink race as
 /// [`write_file_with_permit`]'s temp file and as TAR/ZIP's
 /// [`common::extract_file_with_permit`] — just without the two extra syscalls
 /// (create+rename of a temp file) that only matter when something needs to be
@@ -51,6 +54,10 @@ pub(super) struct FileWrite<'a> {
 /// pre-existing occupant (see [`DestOccupancy`](super::host)); when it does,
 /// use [`write_file_with_permit`] instead so a decode failure mid-stream
 /// cannot leave a truncated file where the original stood.
+///
+/// The entry's sanitized mode, when it has one, is applied through the open
+/// descriptor (`fchmod`) by [`common::finish_written`], after the
+/// download-origin mark when the run writes one.
 ///
 /// `parent` is the pinned directory handle the caller obtained from the
 /// directory walker; the create, the cleanup on failure and every later step
@@ -91,9 +98,10 @@ pub(super) fn write_file_direct(
         copy_buffer,
         permit,
         marking,
+        mode,
         progress,
     } = write;
-    let file = parent.create_new(leaf, None)?;
+    let (file, pending) = common::create_file(parent, leaf, mode, ModeTiming::of(marking))?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
     // since this branch only runs when nothing occupied `leaf` beforehand, it
@@ -117,7 +125,7 @@ pub(super) fn write_file_direct(
     )
     .map_err(|error| faults.classify(error))?;
     writer.flush()?;
-    common::finish_written(writer, PendingMode::applied(), marking)?;
+    common::finish_written(writer, pending, marking)?;
     guard.persist();
     Ok(bytes_written)
 }
@@ -146,8 +154,11 @@ pub(super) fn write_file_direct(
 /// monotonic counter, so a pre-planted symlink (dangling or not) at a
 /// predicted temp name used to be silently followed by `File::create`,
 /// writing archive content outside the extraction root. The temp file is
-/// now created via [`VettedDir::create_new`] (`O_EXCL | O_NOFOLLOW`), which
-/// refuses any pre-existing name instead of following it. On collision
+/// now created through [`common::create_temp_sibling_with`]
+/// (`O_EXCL | O_NOFOLLOW` via [`VettedDir::create_new_deferred`]), which
+/// refuses any pre-existing name instead of following it; the entry's
+/// sanitized mode is applied to the temp file through its descriptor before the
+/// rename. On collision
 /// (`ErrorKind::AlreadyExists`), a fresh counter value is drawn and creation
 /// is retried up to [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] times. The temp
 /// file, the rename and the cleanup are all relative to `parent` (issue #818).
@@ -212,10 +223,17 @@ pub(super) fn write_file_with_permit_using(
         copy_buffer,
         permit,
         marking,
+        mode,
         progress,
     } = write;
-    let (temp, temp_file) =
-        common::create_temp_sibling(parent, leaf, None, &replace, next_candidate)?;
+    let (temp, temp_file, pending) = common::create_temp_sibling_with(
+        parent,
+        leaf,
+        mode,
+        ModeTiming::of(marking),
+        &replace,
+        next_candidate,
+    )?;
 
     // Declared before `writer` takes ownership of `temp_file` below, for the
     // same reason as write_file_direct's `guard`: reverse-declaration-order
@@ -238,7 +256,7 @@ pub(super) fn write_file_with_permit_using(
     writer.flush()?;
     // Closed before the rename: renaming a still-open file is fine on Unix but
     // the handle should not outlive its purpose regardless.
-    common::finish_written(writer, PendingMode::applied(), marking)?;
+    common::finish_written(writer, pending, marking)?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 

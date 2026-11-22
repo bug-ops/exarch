@@ -541,7 +541,12 @@ mod probe {
         let Some(path) = std::env::var_os(VARIABLE) else {
             return;
         };
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "probe deliberately creates a path outside the destination to prove confinement"
+        )]
+        let created = OpenOptions::new().write(true).create_new(true).open(&path);
+        match created {
             Ok(_) => eprintln!("sandbox probe: created {}", path.to_string_lossy()),
             Err(error) => eprintln!("sandbox probe: {error}"),
         }

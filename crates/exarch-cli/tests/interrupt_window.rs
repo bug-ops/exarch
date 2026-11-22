@@ -59,6 +59,7 @@ fn a_sigint_before_start_is_buffered_and_cancels_the_run_when_it_starts() {
 }
 
 #[cfg(target_os = "linux")]
+#[expect(clippy::disallowed_methods, reason = "integration test fixture setup")]
 #[test]
 fn a_prepared_interrupt_dropped_unstarted_discards_the_buffered_signal() {
     let work = TempDir::new().unwrap();

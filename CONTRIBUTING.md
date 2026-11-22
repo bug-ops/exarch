@@ -290,11 +290,12 @@ cargo bench -p exarch-core --features testing
 Releases are managed by maintainers. The process:
 
 1. Update version in `Cargo.toml` (workspace)
-2. Update `CHANGELOG.md`
-3. Update `package.json` and `pyproject.toml`
-4. Create a git tag: `git tag -a v0.x.y -m "Release v0.x.y"`
-5. Push tag: `git push origin v0.x.y`
-6. CI automatically publishes to crates.io, PyPI, and npm
+2. Refresh the fuzz lockfile and commit it with the bump: `cargo update --manifest-path fuzz/Cargo.toml -p exarch-core`
+3. Update `CHANGELOG.md`
+4. Update `package.json` and `pyproject.toml`
+5. Create a git tag: `git tag -a v0.x.y -m "Release v0.x.y"`
+6. Push tag: `git push origin v0.x.y`
+7. CI automatically publishes to crates.io, PyPI, and npm
 
 ## Getting Help
 

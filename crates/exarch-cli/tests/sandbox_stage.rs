@@ -8,7 +8,7 @@
 //! stalled-run tests also need the `test-hooks` feature.
 
 #![cfg(target_os = "linux")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 #[cfg(feature = "test-hooks")]

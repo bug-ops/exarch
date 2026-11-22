@@ -1,6 +1,5 @@
 //! `MemorySink`: round trips, the capacity limit and how it is reported.
-
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

@@ -14,7 +14,15 @@
 //! pipeline produces exactly the same files and content a plain, unwrapped
 //! `tar::Archive` read would.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;

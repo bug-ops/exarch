@@ -2,8 +2,8 @@
 //! creation leaves the output path as it was, `CreateNew` never replaces and
 //! `Replace` swaps the previous archive atomically.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::fs;

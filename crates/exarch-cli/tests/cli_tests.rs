@@ -2,8 +2,11 @@
 //!
 //! Note: Tests use `unwrap`/`expect` which is acceptable in test code.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;

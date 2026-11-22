@@ -6,7 +6,7 @@
 //! instead of polling the filesystem.
 
 #![cfg(all(unix, feature = "test-hooks", debug_assertions))]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;

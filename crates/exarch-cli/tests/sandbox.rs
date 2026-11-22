@@ -6,7 +6,7 @@
 //! missing, unless `EXARCH_REQUIRE_LANDLOCK=1` makes that a failure (the CI
 //! runner probe). The EACCES probe needs the `test-hooks` feature.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

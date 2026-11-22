@@ -552,7 +552,6 @@ impl DirSecurity {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::formats::pinned_dir::dacl_probe;

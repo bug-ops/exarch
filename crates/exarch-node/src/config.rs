@@ -1928,12 +1928,11 @@ impl VerificationOptions {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::float_cmp,
     clippy::unreadable_literal,
     clippy::manual_string_new,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    reason = "tests assert exact floats and write literals verbatim"
 )]
 mod tests {
     use exarch_core::MAX_CONFIG_ENTRY_LENGTH;

@@ -800,7 +800,7 @@ fn not_found_as(err: ArchiveError, missing: impl FnOnce() -> ArchiveError) -> Ar
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use super::*;
     use crate::security::Uncompressed;

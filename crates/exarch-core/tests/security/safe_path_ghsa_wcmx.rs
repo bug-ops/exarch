@@ -14,8 +14,7 @@
 //! file (not just the test function) must be gated so its imports don't
 //! become unused-import errors under `-D warnings` on non-Unix targets.
 #![cfg(unix)]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 
 use exarch_core::ArchiveError;
 use exarch_core::DestDir;

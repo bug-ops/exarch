@@ -54,7 +54,13 @@ impl ParentCheck for Resolved {
 /// pinned root, so the path must be written through that walker.
 #[cfg(any(unix, target_os = "wasi"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub struct Walked;
 
 #[cfg(any(unix, target_os = "wasi"))]

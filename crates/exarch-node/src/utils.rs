@@ -56,11 +56,6 @@ pub fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str)
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests assert by panicking"
-)]
 mod tests {
     use super::*;
     use exarch_core::MAX_PATH_LENGTH;

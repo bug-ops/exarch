@@ -1,7 +1,7 @@
 //! Opt-in payload integrity check of `verify` (#623).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 

@@ -11,8 +11,9 @@
 //! cargo run --example dhat_creation --release -- zip
 //! ```
 
-#![allow(unsafe_code, clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![allow(unsafe_code, reason = "#[global_allocator] expands to unsafe code")]
+#![expect(clippy::disallowed_methods, reason = "example fixture setup")]
+#![expect(clippy::unwrap_used, reason = "example code")]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

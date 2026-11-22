@@ -1,6 +1,7 @@
 //! Shared fixtures and a recording sink for the sink integration tests.
 
-#![allow(dead_code, clippy::unwrap_used)]
+#![allow(dead_code, reason = "helpers are used by only some test binaries")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[path = "../../src/testkit/mod.rs"]
 pub mod testkit;

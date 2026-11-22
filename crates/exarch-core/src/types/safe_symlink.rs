@@ -494,7 +494,10 @@ fn canonical_within<V: FsView>(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::field_reassign_with_default)]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
+)]
 mod tests {
     use super::*;
     use std::assert_matches;
@@ -834,7 +837,6 @@ mod tests {
 
     // Test for circular symlink detection
     #[test]
-    #[allow(clippy::unwrap_used)]
     #[cfg(unix)]
     fn test_circular_symlink_chains() {
         let (temp, dest) = create_test_dest();
@@ -1033,7 +1035,6 @@ mod tests {
     /// escapes dest)
     #[test]
     #[cfg(unix)]
-    #[allow(clippy::unwrap_used)]
     fn test_safe_symlink_two_hop_chain_rejected() {
         use std::os::unix::fs;
 

@@ -24,6 +24,8 @@
 //! (`mark_symlink_seen`) the way a real archive extraction
 //! does.
 
+#![expect(clippy::expect_used, reason = "integration test helpers")]
+
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;

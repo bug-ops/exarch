@@ -11,13 +11,13 @@
 //! do not become a bottleneck during extraction.
 
 #![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::field_reassign_with_default,
     clippy::items_after_statements,
     clippy::too_many_lines,
-    missing_docs
+    missing_docs,
+    reason = "bench binaries have no public API; each benchmark builds its config field by field"
 )]
+#![expect(clippy::unwrap_used, reason = "benchmark setup")]
 
 use criterion::Criterion;
 use criterion::criterion_group;

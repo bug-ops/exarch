@@ -526,7 +526,13 @@ impl PinnedRoot {
 /// [`DirWalker`]: crate::formats::dir_walker::DirWalker
 #[cfg(any(unix, target_os = "wasi"))]
 #[derive(Debug)]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub struct WalkerBacked<'r>(
     #[expect(dead_code, reason = "ties the proof to its root")] &'r PinnedRoot,
 );
@@ -543,7 +549,10 @@ impl PinnedRoot {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)] // scoped unsafe: the ACL attribute of an open file
+#[allow(
+    unsafe_code,
+    reason = "scoped unsafe: the ACL attribute of an open file"
+)]
 pub(crate) mod darwin_acl;
 
 #[cfg(any(unix, target_os = "wasi"))]
@@ -1133,7 +1142,10 @@ mod imp {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
+#[allow(
+    unsafe_code,
+    reason = "the only unsafe code on Windows: NT directory-relative calls"
+)]
 pub(in crate::formats) mod nt;
 
 #[cfg(windows)]
@@ -1143,7 +1155,8 @@ mod dacl_walk;
 mod dir_info;
 
 #[cfg(all(test, windows))]
-#[allow(unsafe_code)] // test-only DACL reader
+#[allow(unsafe_code, reason = "test-only DACL reader")]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 pub(crate) mod dacl_probe;
 
 #[cfg(windows)]
@@ -1614,7 +1627,6 @@ impl<'d> TempFileGuard<'d> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) mod support {
     use std::ffi::OsStr;
     use std::path::Path;
@@ -1661,7 +1673,7 @@ pub(crate) mod support {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use super::support::leaf;
     use super::support::pinned;
@@ -1999,7 +2011,7 @@ mod tests {
 }
 
 #[cfg(all(test, windows))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod windows_tests {
     use super::support::junction;
     use super::support::leaf;

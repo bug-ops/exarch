@@ -123,6 +123,8 @@ cargo +nightly fmt --all
 
 # Run clippy
 cargo clippy --all-targets --all-features --workspace -- -D warnings
+# `.cargo/config.toml` sets `build.warnings = "deny"`, so WIP code with warnings fails
+# `cargo check`/`cargo test`; locally use `CARGO_BUILD_WARNINGS=warn` or `--config 'build.warnings="warn"'`
 
 # Check documentation
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace

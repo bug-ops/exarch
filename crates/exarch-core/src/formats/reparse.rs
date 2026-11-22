@@ -128,7 +128,6 @@ pub(crate) fn parse(buf: &[u8]) -> Result<ReparseTarget, ReparseError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

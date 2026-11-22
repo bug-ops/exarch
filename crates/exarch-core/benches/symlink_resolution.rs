@@ -7,8 +7,9 @@
 //!   last link; every file walks the whole chain.
 //! - `link_heavy`: 10000 link entries at depth 20, each validated against its
 //!   parents and a target that crosses a sibling directory.
-#![allow(clippy::disallowed_methods)]
-#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![expect(clippy::disallowed_methods, reason = "benchmark fixture setup")]
+#![allow(missing_docs, reason = "bench binaries have no public API")]
+#![expect(clippy::unwrap_used, reason = "benchmark setup")]
 
 use criterion::Criterion;
 use criterion::criterion_group;

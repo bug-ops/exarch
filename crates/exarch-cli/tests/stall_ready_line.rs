@@ -3,7 +3,6 @@
 //! test synchronizes on the line instead of polling and sleeping.
 
 #![cfg(all(unix, feature = "test-hooks", debug_assertions))]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 
 mod common;
 mod stall_support;

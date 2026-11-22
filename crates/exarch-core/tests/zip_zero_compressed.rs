@@ -1,8 +1,7 @@
 //! A ZIP entry claiming data from zero compressed bytes is a zip bomb with an
 //! unbounded ratio.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

@@ -253,7 +253,6 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use crate::ArchiveError;

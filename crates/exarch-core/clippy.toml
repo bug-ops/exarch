@@ -1,5 +1,7 @@
 msrv = "1.100"
 cognitive-complexity-threshold = 15
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
 
 # Path-based mutators of the destination: a path whose parent is vetted at
 # write time must be written through a directory handle, never by name.

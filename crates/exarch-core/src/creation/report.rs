@@ -340,7 +340,6 @@ impl CreationReport {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use crate::Skip;
@@ -377,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)]
+    #[allow(clippy::float_cmp, reason = "tests assert exact float values")]
     fn test_creation_report_compression_ratio() {
         let mut report = CreationReport::new();
 
@@ -413,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)]
+    #[allow(clippy::float_cmp, reason = "tests assert exact float values")]
     fn test_creation_report_compression_percentage() {
         let mut report = CreationReport::new();
 

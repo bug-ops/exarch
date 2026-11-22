@@ -14,7 +14,11 @@
 //! before `common::copy_file_content_with_permit` runs. The hardlink itself is
 //! counted against `max_file_count` in the first pass.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

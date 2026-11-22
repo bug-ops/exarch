@@ -711,7 +711,6 @@ impl JsonError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use exarch_core::ExtractionWarningKind;

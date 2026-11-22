@@ -21,8 +21,12 @@
 //! single `#[test]` function rather than relying on nextest's usual
 //! process-per-test isolation.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
-#![allow(clippy::disallowed_methods)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

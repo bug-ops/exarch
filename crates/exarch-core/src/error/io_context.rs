@@ -80,7 +80,6 @@ impl fmt::Display for IoContext {
 impl StdError for IoContext {}
 
 #[cfg(test)]
-#[allow(clippy::expect_used)] // Allow expect in tests for brevity
 mod tests {
     use super::IoContext;
     use std::io;

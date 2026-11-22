@@ -7,7 +7,8 @@
 //! e3060bda2a54631c37d088914a24dddac34e7360) in-test.
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

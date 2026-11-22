@@ -494,7 +494,7 @@ enum EntryOutcome<P: ParentCheck> {
     Hardlink(HardlinkInfo<P>),
 }
 
-#[allow(dead_code)] // Fields used only on Unix
+#[allow(dead_code, reason = "fields used only on unix")]
 struct HardlinkInfo<P: ParentCheck> {
     link_path: SafePath<P>,
     target_path: HardlinkTarget,
@@ -687,7 +687,6 @@ pub(crate) fn open_tar_stream(
 mod opaque_source_tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::NoopProgress;

@@ -24,7 +24,7 @@ mod replace;
 #[cfg(target_os = "macos")]
 mod sweep;
 #[cfg(all(test, target_os = "macos"))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod test_acl;
 
 use std::ffi::OsString;
@@ -688,11 +688,11 @@ fn publish_adopted(
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod parent_tests;
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests;
 #[cfg(all(test, windows))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod windows_tests;

@@ -771,7 +771,6 @@ pub(crate) fn normalized(path: &Path) -> Option<Cow<'_, [u8]>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use proptest::prelude::*;

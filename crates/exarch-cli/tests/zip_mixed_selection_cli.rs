@@ -4,7 +4,7 @@
 //! selection leaves out.
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;

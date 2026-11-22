@@ -2,8 +2,8 @@
 //! stripped like an entry name where absolute paths are allowed, and keeps its
 //! root, so the validator refuses it, where they are not.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

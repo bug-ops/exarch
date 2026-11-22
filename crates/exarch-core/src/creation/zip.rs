@@ -456,7 +456,6 @@ fn normalize_zip_path(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
     use crate::create_archive;

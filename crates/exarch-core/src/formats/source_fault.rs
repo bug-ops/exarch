@@ -505,7 +505,6 @@ impl TapSource {
 /// Real `zip` crate archives and read errors, for tests that pin how the
 /// crate's own failures are classified.
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) mod zip_fixtures {
     use std::io;
 
@@ -545,7 +544,6 @@ pub(crate) mod zip_fixtures {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

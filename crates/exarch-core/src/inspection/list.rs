@@ -1254,7 +1254,6 @@ fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

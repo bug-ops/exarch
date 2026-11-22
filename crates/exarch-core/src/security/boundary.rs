@@ -142,7 +142,6 @@ impl AsRef<Path> for BoundaryPath {
 pub const MAX_CONFIG_ENTRY_LENGTH: usize = 255;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

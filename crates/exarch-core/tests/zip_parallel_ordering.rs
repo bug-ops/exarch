@@ -1,7 +1,8 @@
 //! `Parallelism::Threads` keeps limits, progress, cancellation and the choice
 //! of the failing entry exactly as `Sequential` has them (#1027).
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::num::NonZeroU64;

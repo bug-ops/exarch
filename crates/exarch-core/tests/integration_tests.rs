@@ -1,12 +1,12 @@
 //! Integration tests for exarch-core.
 //!
 //! These tests verify end-to-end workflows with real filesystem operations.
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 #![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
 )]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 mod security;

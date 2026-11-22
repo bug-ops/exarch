@@ -4,7 +4,8 @@
 //! (#1031, #1060, #1063).
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;

@@ -4,7 +4,11 @@
 //! `ArchiveError::Io`, and the declared-size ceiling keeps its security
 //! verdict, in every container.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 mod sink_support;
 

@@ -1,7 +1,7 @@
 //! Example: Creating archives with exarch-core
 //!
 //! Run with: `cargo run --example create_archive`
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "example fixture setup")]
 
 use exarch_core::CompressionLevel;
 use exarch_core::CreateRequest;

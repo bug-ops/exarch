@@ -1,7 +1,8 @@
 //! A hidden directory below a source directory is left out whole unless hidden
 //! entries are included, so secrets under `.ssh`, `.aws` or `.gnupg` cannot
 //! reach an archive under a visible file name.
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::path::Path;
 use std::path::PathBuf;

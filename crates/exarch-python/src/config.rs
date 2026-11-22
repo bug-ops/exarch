@@ -1782,10 +1782,9 @@ impl PyVerificationOptions {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::uninlined_format_args,
-    clippy::float_cmp
+    clippy::float_cmp,
+    reason = "tests assert exact floats with positional format arguments"
 )]
 mod tests {
     use exarch_core::MAX_CONFIG_ENTRY_LENGTH;

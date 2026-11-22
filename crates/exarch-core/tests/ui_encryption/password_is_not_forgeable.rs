@@ -3,7 +3,7 @@
 
 use exarch_core::Password;
 
-#[allow(unreachable_code)]
+#[allow(unreachable_code, reason = "the compile-fail case is never run")]
 fn main() {
     let _password = Password(todo!());
 }

@@ -6,7 +6,7 @@
 //! case-insensitive bypass attempt), symlink and hardlink escapes, the
 //! disabled-by-default link policies, and zip-bomb ratio and quota ordering.
 
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 

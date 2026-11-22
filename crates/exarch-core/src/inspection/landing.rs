@@ -893,7 +893,6 @@ fn conflicting_placement(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::OccupiedBy;
     use std::assert_matches;

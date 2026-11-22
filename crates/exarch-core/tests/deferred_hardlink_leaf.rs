@@ -3,9 +3,9 @@
 //! other entry, so a symlink that a later entry puts at its path is a
 //! duplicate, never a path to resolve.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

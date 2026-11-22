@@ -2,8 +2,6 @@
 //! <keep-first|refuse>` on `extract`, `list` and `verify`; the default keeps
 //! the first copy.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
-
 mod common;
 
 use assert_cmd::cargo::cargo_bin_cmd;

@@ -8,8 +8,6 @@
 //! All functions in this module may panic on I/O errors since they are
 //! designed for test use only where panics are acceptable.
 
-#![allow(clippy::unwrap_used)]
-
 use std::io::Cursor;
 use std::io::Write;
 
@@ -526,7 +524,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod pax_record_tests {
     use crate::testkit::pax::record;
 

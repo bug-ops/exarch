@@ -1,7 +1,8 @@
 //! Helpers shared by the CLI integration tests that build tar archives and
 //! read `--json` output.
 
-#![allow(dead_code, clippy::expect_used, clippy::disallowed_methods)]
+#![allow(dead_code, reason = "helpers are used by only some test binaries")]
+#![expect(clippy::expect_used, reason = "integration test helpers")]
 
 use std::path::Path;
 

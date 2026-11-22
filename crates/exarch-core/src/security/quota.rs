@@ -97,7 +97,13 @@ pub struct EntryCount(PhantomData<()>);
 
 /// Tracks resource usage during extraction.
 #[derive(Debug, Default)]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub struct QuotaTracker {
     files_extracted: usize,
     bytes_written: u64,
@@ -116,7 +122,13 @@ fn check_file_size(size: u64, max: Limit<NonZeroU64>) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 impl QuotaTracker {
     /// Creates a new quota tracker.
     #[must_use]
@@ -310,7 +322,10 @@ impl QuotaTracker {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default, clippy::expect_used)]
+#[allow(
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
+)]
 mod tests {
     use super::*;
     use std::assert_matches;

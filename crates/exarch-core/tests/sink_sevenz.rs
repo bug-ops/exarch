@@ -1,8 +1,8 @@
 //! 7z into an `EntrySink`: progress parity with the path-based API, typed
 //! sink errors and the shapes unique to a sink.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 mod sink_support;

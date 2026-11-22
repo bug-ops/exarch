@@ -647,7 +647,6 @@ impl<'a> Bytes<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use sevenz_rust2::Archive;

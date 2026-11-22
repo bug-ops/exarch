@@ -851,7 +851,7 @@ impl Drop for StagingDir {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 

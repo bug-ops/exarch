@@ -488,7 +488,6 @@ pub(crate) fn resolve_output_format(output: &OutputFile) -> Result<CreatableForm
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::NoopProgress;

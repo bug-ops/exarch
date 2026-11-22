@@ -7,8 +7,11 @@
 //! copies the resolved target's bytes into an independent file and sets no
 //! attribute on the link path afterwards; these tests pin that.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![cfg_attr(
+    unix,
+    expect(clippy::disallowed_methods, reason = "test fixture setup")
+)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

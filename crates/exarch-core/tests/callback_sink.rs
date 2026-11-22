@@ -1,6 +1,5 @@
 //! `CallbackSink`: whole verified entries delivered to a closure.
-
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 mod sink_support;

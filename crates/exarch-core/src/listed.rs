@@ -730,7 +730,6 @@ impl<R: Read> Read for SpoolTee<R> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

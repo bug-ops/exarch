@@ -613,7 +613,6 @@ impl<R: Read> ChunkSource for Sequential<'_, R> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
     use std::io::Cursor;

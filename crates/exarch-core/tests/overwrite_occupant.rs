@@ -3,8 +3,8 @@
 //! directory occupant is `OUTPUT_EXISTS` with the entry in `conflicts`, a
 //! symlink occupant is `EXISTING_SYMLINK`.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[cfg(unix)]
 use std::assert_matches;

@@ -1,7 +1,7 @@
 //! `PathModel::Portable` against `MemorySink`: the strictest rules of every
 //! supported platform, applied on whichever host runs the test.
 
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

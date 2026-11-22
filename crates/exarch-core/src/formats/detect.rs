@@ -48,7 +48,13 @@ const MAGIC_SIGNATURES: &[(usize, &[u8], ArchiveType)] = &[
 /// for these formats. Extraction treats them as ZIP; creation is
 /// rejected separately in `api::reject_zip_family_creation`. Kept as a
 /// single source of truth so the two call sites don't drift.
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub const ZIP_FAMILY_ALIASES: &[&str] = &[
     "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix", "xpi",
     "epub",
@@ -585,7 +591,6 @@ pub(crate) fn match_signature(header: &[u8]) -> Option<ArchiveType> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

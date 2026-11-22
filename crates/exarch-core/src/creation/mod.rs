@@ -18,6 +18,11 @@ pub(crate) mod zip;
 pub(crate) mod zip_prepared;
 
 #[cfg(all(test, unix))]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests assert by panicking"
+)]
 mod source_tests;
 
 // Re-exports for public API

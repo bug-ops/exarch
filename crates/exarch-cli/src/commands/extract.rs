@@ -644,7 +644,6 @@ mod tests {
             .collect()
     }
 
-    #[allow(clippy::unwrap_used)]
     fn extension_names(raw: &[&str]) -> Vec<String> {
         parse_extensions(&tokens(raw))
             .unwrap()
@@ -682,7 +681,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn parse_extensions_refuses_an_inner_dot() {
         for raw in ["tar.gz", "A.TXT", "a/b"] {
             let err = parse_extensions(&tokens(&[raw])).unwrap_err();
@@ -715,7 +713,6 @@ mod tests {
         );
     }
 
-    #[allow(clippy::unwrap_used)]
     fn banned_names(raw: &[&str]) -> Option<Vec<String>> {
         banned_components(&tokens(raw))
             .unwrap()
@@ -741,7 +738,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn banned_components_refuse_a_separator() {
         for raw in ["a/b", ".."] {
             let err = banned_components(&tokens(&[raw])).unwrap_err();

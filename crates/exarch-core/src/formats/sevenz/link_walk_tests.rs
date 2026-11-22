@@ -1,8 +1,6 @@
 //! The link walk reads only the targets it was asked for, from admitted
 //! blocks, and degrades decode problems into per-link failures.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use super::admit::sevenz_entry_compression;
 use super::header::FileIndex;
 use super::header::HeaderLimit;

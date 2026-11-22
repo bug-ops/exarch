@@ -248,7 +248,6 @@ fn apply_xl(body: &[u8], host: &mut HostSystem, file_type: &mut Option<XlFileTyp
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::raw_zip::SYMLINK_MODE as LINK;

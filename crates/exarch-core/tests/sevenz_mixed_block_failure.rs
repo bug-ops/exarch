@@ -4,7 +4,7 @@
 //! `sealed.txt` (AES block 1, password `correct-horse`).
 
 #![cfg(feature = "encryption")]
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sevenz_patch;
 

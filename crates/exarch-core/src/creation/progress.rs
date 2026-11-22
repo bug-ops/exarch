@@ -174,7 +174,7 @@ impl<'a, R> ProgressReader<'a, R> {
     /// - `progress`: Mutable reference to the progress callback
     /// - `batch_threshold`: Number of bytes to accumulate before reporting
     #[must_use]
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "constructed only by tests")]
     pub(crate) fn with_batch_threshold(
         inner: R,
         progress: &'a mut dyn ProgressCallback,
@@ -242,7 +242,10 @@ pub(crate) fn check_cancelled(progress: &mut dyn ProgressCallback) -> crate::Res
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::unused_io_amount)]
+#[allow(
+    clippy::unused_io_amount,
+    reason = "tests assert on the data, not on the amount"
+)]
 mod tests {
     use super::*;
     use std::io::Cursor;

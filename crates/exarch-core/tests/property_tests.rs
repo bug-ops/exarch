@@ -2,12 +2,12 @@
 //!
 //! These tests use proptest to generate arbitrary inputs and verify
 //! security properties hold across a wide range of cases.
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 #![allow(
-    clippy::expect_used,
     clippy::field_reassign_with_default,
-    clippy::unwrap_used
+    reason = "tests adjust a default value field by field"
 )]
+#![expect(clippy::expect_used, reason = "integration test helpers")]
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -399,7 +399,7 @@ proptest! {
         use exarch_core::validate_compression_ratio;
 
         let config = SecurityConfig::default(); // max_compression_ratio = 1000.0
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, reason = "test sizes are small and non-negative")]
         let uncompressed = (compressed as f64 * ratio) as u64;
 
         let result = validate_compression_ratio(Compressed(compressed), Uncompressed(uncompressed), &config);

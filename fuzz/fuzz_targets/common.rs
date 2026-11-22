@@ -43,7 +43,7 @@ fn base_config() -> SecurityConfig {
 }
 
 /// The harness config every target reuses.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "helpers are used by only some fuzz targets")]
 pub fn config() -> &'static SecurityConfig {
     static CONFIG: OnceLock<SecurityConfig> = OnceLock::new();
     CONFIG.get_or_init(base_config)
@@ -51,7 +51,7 @@ pub fn config() -> &'static SecurityConfig {
 
 /// Like [`config`], but with the ZIP structure policy relaxed so the archives
 /// `Enforce` rejects early still reach listing and verification.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "helpers are used by only some fuzz targets")]
 pub fn config_ignoring_zip_structure() -> &'static SecurityConfig {
     static CONFIG: OnceLock<SecurityConfig> = OnceLock::new();
     CONFIG.get_or_init(|| base_config().with_zip_consistency(ZipConsistencyPolicy::Ignore))
@@ -59,7 +59,7 @@ pub fn config_ignoring_zip_structure() -> &'static SecurityConfig {
 
 /// `verify` options with the integrity pass enabled under a small budget, so
 /// the decode-to-EOF path is fuzzed without risking a libFuzzer timeout.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "helpers are used by only some fuzz targets")]
 pub fn verification_options() -> VerificationOptions {
     let budget = DecompressionBudget::new(NonZeroU64::MIN.saturating_add(4 * 1024 * 1024 - 1));
     VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(budget))

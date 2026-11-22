@@ -4,8 +4,12 @@
 //! limit; a refusal is `QuotaExceeded { DecoderMemory }` in extract, list and
 //! verify alike.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "integration test helpers"
+)]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

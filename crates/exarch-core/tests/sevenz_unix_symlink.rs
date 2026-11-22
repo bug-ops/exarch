@@ -6,9 +6,12 @@
 //! Entries are handed to the extractor in archive order, as for TAR, so a
 //! directory entry of the archive exists when a later link is validated.
 
-#![allow(clippy::unwrap_used)]
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
-#![allow(clippy::disallowed_methods)]
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, unused_imports, reason = "the unix-only tests use these")
+)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::assert_matches;
 use std::io::Cursor;

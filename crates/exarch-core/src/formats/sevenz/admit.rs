@@ -569,7 +569,6 @@ pub(crate) fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::SolidLimits;

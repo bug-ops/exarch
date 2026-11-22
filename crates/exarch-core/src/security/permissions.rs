@@ -124,7 +124,13 @@ impl SanitizedMode {
 /// # fn main() {}
 /// ```
 #[must_use]
-#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "testing"),
+    allow(
+        unreachable_pub,
+        reason = "reachable outside the crate only with the testing feature"
+    )
+)]
 pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig) -> SanitizedMode {
     let mut sanitized = mode.get();
 
@@ -143,7 +149,6 @@ pub fn sanitize_permissions(mode: RawMode, config: &SecurityConfig) -> Sanitized
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

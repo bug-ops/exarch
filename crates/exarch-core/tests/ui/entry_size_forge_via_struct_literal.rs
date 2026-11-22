@@ -4,7 +4,7 @@
 
 use exarch_core::EntrySize;
 
-#[allow(unreachable_code)]
+#[allow(unreachable_code, reason = "the compile-fail case is never run")]
 fn main() {
     let _size = EntrySize {
         uncompressed: todo!(),

@@ -1967,7 +1967,6 @@ fn upper_lower_upper(chars: impl Iterator<Item = char>) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::OccupiedBy;

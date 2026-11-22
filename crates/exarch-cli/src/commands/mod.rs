@@ -128,7 +128,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn repeated_paths_flag_maps_to_the_core_policy() {
         use exarch_core::RepeatedPaths;
         let config = |extra: &[&str]| {

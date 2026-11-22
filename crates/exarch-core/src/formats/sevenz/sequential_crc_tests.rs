@@ -2,8 +2,6 @@
 //! a mismatch does not end the block, the decoder's repeat of a mismatch the
 //! callback saw is swallowed, and every other error still propagates.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use super::decode::decode_block_entries;
 use super::header::BlockIndex;
 use super::header::HeaderLimit;

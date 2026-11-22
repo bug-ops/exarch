@@ -4,12 +4,12 @@
 //! `tests/fixtures/generate_zip_family_fixtures.sh`.
 //! Each format shares the ZIP container but has its own shape quirks - the
 //! tests below pick the bits that are actually load-bearing for extraction.
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 #![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
 )]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

@@ -677,7 +677,6 @@ fn target_not_extracted(link: &Path, target: &Path) -> ArchiveError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

@@ -16,8 +16,8 @@
 //! `test_process_entry_rejects_traversal_independently` in
 //! `crates/exarch-core/src/formats/sevenz/tests.rs`.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

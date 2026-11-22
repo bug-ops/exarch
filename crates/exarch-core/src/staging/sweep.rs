@@ -248,7 +248,6 @@ fn open_leaf(dir: &File, name: &OsStr) -> rustix::io::Result<File> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::formats::run_record::RecordBudget;
     use std::os::unix::fs::PermissionsExt;

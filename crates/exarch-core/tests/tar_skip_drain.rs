@@ -2,8 +2,8 @@
 //! allowlist is not decoded for free: refusal stops at the header, and a
 //! skipped entry is bounded by the input that produced it (issue #863).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

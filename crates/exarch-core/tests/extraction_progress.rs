@@ -1,7 +1,8 @@
 //! Progress events of TAR extraction: every start is closed, even for a
 //! skipped or refused entry.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod sink_support;
 

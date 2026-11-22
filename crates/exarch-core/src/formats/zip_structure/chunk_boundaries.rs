@@ -1,8 +1,6 @@
 //! The census finds the same things whatever the size of the chunks it reads:
 //! a signature that straddles a chunk end is judged exactly once.
 
-#![allow(clippy::unwrap_used)]
-
 use std::io::Cursor;
 
 use proptest::prelude::*;

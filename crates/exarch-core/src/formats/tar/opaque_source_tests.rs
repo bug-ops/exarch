@@ -2,8 +2,6 @@
 //! these paths differ from the file-based request API and are exercised
 //! directly.
 
-#![allow(clippy::unwrap_used)]
-
 use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;

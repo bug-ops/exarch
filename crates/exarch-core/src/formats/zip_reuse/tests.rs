@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::assert_matches;
 use std::io::Cursor;
 use std::io::Read;

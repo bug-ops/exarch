@@ -246,7 +246,6 @@ impl ArchiveError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;

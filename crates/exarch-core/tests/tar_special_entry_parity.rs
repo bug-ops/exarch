@@ -2,8 +2,8 @@
 //! unknown typeflag such as GNU `V`) is refused as a security violation by
 //! `extract`, `list` and `verify` alike.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use exarch_core::ErrorCode;
 use exarch_core::SecurityConfig;

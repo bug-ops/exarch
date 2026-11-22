@@ -654,7 +654,6 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

@@ -4,7 +4,7 @@
 //! blocks on stdin at the end of `prepare` and announces it on stderr.
 
 #![cfg(all(unix, feature = "test-hooks", debug_assertions))]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 mod common;
 mod stall_support;

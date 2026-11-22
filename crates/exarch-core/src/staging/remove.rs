@@ -351,7 +351,6 @@ fn close_level(walk: &mut Walk, top: usize) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::os::unix::fs::symlink;
 

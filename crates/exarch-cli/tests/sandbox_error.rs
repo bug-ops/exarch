@@ -1,8 +1,6 @@
 //! The `--sandbox` outcome rides on the `--json` error envelope too, and a
 //! failed `require` has its own error kind.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
-
 mod common;
 
 use assert_cmd::cargo::cargo_bin_cmd;

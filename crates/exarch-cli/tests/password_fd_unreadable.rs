@@ -5,7 +5,7 @@
 //! file opens there.
 
 #![cfg(target_os = "macos")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::fs::File;
 use std::path::Path;

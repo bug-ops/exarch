@@ -568,7 +568,6 @@ mod imp {
     }
 
     #[cfg(all(test, acl_copy))]
-    #[allow(clippy::unwrap_used)]
     mod post_rename_tests {
         use super::*;
         use crate::formats::pinned_dir::VettedDir;
@@ -609,7 +608,6 @@ mod imp {
     }
 
     #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
-    #[allow(clippy::unwrap_used)]
     mod copy_acl_tests {
         use super::*;
 
@@ -923,7 +921,8 @@ mod imp {
     #[allow(
         clippy::unused_self,
         clippy::unnecessary_wraps,
-        clippy::needless_pass_by_ref_mut
+        clippy::needless_pass_by_ref_mut,
+        reason = "keeps the call sites platform-neutral"
     )]
     impl StagingDir {
         pub(in crate::staging) fn probe_umask(&self) -> io::Result<Adoption> {

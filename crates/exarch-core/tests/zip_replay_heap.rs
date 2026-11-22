@@ -5,7 +5,8 @@
 //! The test binary is its own because `#[global_allocator]` is process-wide,
 //! and one test function owns the profiler.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

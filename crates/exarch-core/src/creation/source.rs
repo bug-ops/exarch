@@ -112,7 +112,6 @@ pub(crate) fn copy_outcome<T>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

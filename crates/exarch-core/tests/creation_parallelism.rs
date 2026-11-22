@@ -2,7 +2,8 @@
 //! format) do not depend on `Parallelism`, and a failure is the same error in
 //! every mode.
 
-#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use std::num::NonZeroUsize;
 use std::path::Path;

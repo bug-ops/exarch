@@ -2342,9 +2342,8 @@ impl ListOptions {
 
 #[cfg(test)]
 #[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default
+    clippy::field_reassign_with_default,
+    reason = "tests adjust a default value field by field"
 )]
 mod tests {
     use std::assert_matches;
@@ -2479,7 +2478,7 @@ mod tests {
             "10k file count limit"
         );
         assert_eq!(config.max_path_depth.get(), 32, "32 level depth limit");
-        #[allow(clippy::float_cmp)]
+        #[allow(clippy::float_cmp, reason = "tests assert exact float values")]
         {
             assert_eq!(
                 config.max_compression_ratio.get(),

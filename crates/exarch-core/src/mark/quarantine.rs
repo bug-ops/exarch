@@ -111,7 +111,6 @@ fn uuid_groups(uuid: u128) -> [u128; 5] {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
 

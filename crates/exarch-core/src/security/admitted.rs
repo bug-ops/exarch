@@ -143,7 +143,6 @@ pub(crate) struct ValidatedHardlink<P: ParentCheck = Resolved> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::assert_matches;
     use std::path::Path;

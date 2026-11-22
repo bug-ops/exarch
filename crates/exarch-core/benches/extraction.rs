@@ -9,14 +9,14 @@
 //! - TAR extraction: 500 MB/s
 //! - ZIP extraction: 300 MB/s
 //! - Path validation: < 1 us
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "benchmark fixture setup")]
 #![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::items_after_statements,
     clippy::similar_names,
-    missing_docs
+    missing_docs,
+    reason = "bench binaries have no public API; items sit next to their only use; paired names mirror each other"
 )]
+#![expect(clippy::unwrap_used, reason = "benchmark setup")]
 
 use criterion::BenchmarkGroup;
 use criterion::BenchmarkId;
@@ -691,7 +691,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
             zip.finish().unwrap().into_inner()
         };
 
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss, reason = "the values are non-negative")]
         let count_u64 = count as u64;
         group.throughput(Throughput::Elements(count_u64));
         group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {

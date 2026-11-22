@@ -5,7 +5,11 @@
 //! Each test constructs a minimal archive reproducing the attack vector and
 //! verifies that extraction fails with the expected security error.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test sizes are far below the target type's limit"
+)]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 use crate::sink_support::testkit::raw_zip::RawEntry;
 use crate::sink_support::testkit::raw_zip::RawZip;

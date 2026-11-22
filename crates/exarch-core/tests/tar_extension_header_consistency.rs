@@ -6,8 +6,8 @@
 //! stacked with GNU long records, and global PAX headers. `list`, `verify` and
 //! `extract` must all refuse them with a typed `InvalidArchive`.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods)]
+#![expect(clippy::disallowed_methods, reason = "test fixture setup")]
+#![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
 #[path = "../src/testkit/mod.rs"]
 mod testkit;

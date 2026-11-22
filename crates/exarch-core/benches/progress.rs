@@ -2,8 +2,8 @@
 //!
 //! Compares TAR and ZIP creation performance with and without progress
 //! callbacks to measure overhead.
-#![allow(clippy::disallowed_methods)]
-#![allow(clippy::unwrap_used)] // Allow unwrap in benchmarks for brevity
+#![expect(clippy::disallowed_methods, reason = "benchmark fixture setup")]
+#![expect(clippy::unwrap_used, reason = "benchmark setup")]
 
 use criterion::Criterion;
 use criterion::criterion_group;

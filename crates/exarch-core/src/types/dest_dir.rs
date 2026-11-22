@@ -156,7 +156,7 @@ impl DestDir {
             // SAFETY: access() is safe to call with a valid C string.
             // The pointer is valid for the duration of the call.
             // access() does not modify the string and returns immediately.
-            #[allow(unsafe_code)]
+            #[allow(unsafe_code, reason = "calls libc::access on a valid C string")]
             let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK | libc::X_OK) };
 
             if result != 0 {
@@ -291,7 +291,6 @@ impl ProbePath {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::assert_matches;

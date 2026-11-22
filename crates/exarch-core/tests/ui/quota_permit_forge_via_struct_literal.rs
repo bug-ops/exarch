@@ -5,7 +5,7 @@
 
 use exarch_core::QuotaPermit;
 
-#[allow(unreachable_code)]
+#[allow(unreachable_code, reason = "the compile-fail case is never run")]
 fn main() {
     let _permit = QuotaPermit { bytes: todo!() };
 }

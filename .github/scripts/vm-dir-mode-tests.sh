@@ -4,6 +4,9 @@
 # unprivileged user, because root ignores a directory's mode.
 set -eu
 
+# The BSD/illumos linker emits third-party warnings (rustix fstatvfs) that build.warnings=deny would fail.
+export CARGO_BUILD_WARNINGS=warn
+
 . "$HOME/.cargo/env"
 
 EXPECTED=5

@@ -157,6 +157,8 @@ use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use super::bounded_read::invalid_data;
 use super::bounded_read::read_prefix;
@@ -831,9 +833,9 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
         );
         self.budget.return_window(bytes);
         match checked {
-            Ok(kind) => {
-                self.budget.set_preceding(kind);
-                Ok(CheckedTarEntry(self))
+            Ok(headers) => {
+                self.budget.set_preceding(headers.preceding);
+                Ok(CheckedTarEntry(self, headers.mtime))
             }
             Err(e) => {
                 self.abandon();
@@ -886,9 +888,23 @@ impl SkipLimits {
 ///
 /// Constructible only by `check`, so holding a `tar::Entry` through this type
 /// proves the checks ran. Dropping it drains the entry like the guard does.
-pub(crate) struct CheckedTarEntry<'a, 's, R: Read>(TarEntryGuard<'a, 's, R>);
+pub(crate) struct CheckedTarEntry<'a, 's, R: Read>(TarEntryGuard<'a, 's, R>, Option<SystemTime>);
 
 impl<R: Read> CheckedTarEntry<'_, '_, R> {
+    /// The entry's modification time: the local PAX `mtime` record when it
+    /// parses, else the header field, as `bsdtar` and Python `tarfile` read it.
+    ///
+    /// Other PAX metadata readers apply is ignored on purpose: a global `g`
+    /// header's `uid`, `gid` and `mtime` (`bsdtar` ignores them too), the
+    /// `uname`, `gname`, `uid` and `gid` records (exarch reports and restores
+    /// no owner) and `SCHILY.fflags` (no file flags are restored).
+    pub(crate) fn modified(&self) -> Option<SystemTime> {
+        self.1.or_else(|| {
+            let seconds = self.0.entry.header().mtime().ok()?;
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+        })
+    }
+
     /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
     pub(crate) fn abandon(&mut self) {
         self.0.abandon();

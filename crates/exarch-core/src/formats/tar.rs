@@ -90,6 +90,7 @@ use crate::SinkOptions;
 use crate::SpecialFile;
 use crate::TarAmbiguity;
 use crate::TarNonRegularKind;
+use crate::TarTypeflag;
 #[cfg(test)]
 use crate::VerificationOptions;
 use crate::Violation;
@@ -576,15 +577,18 @@ pub(crate) enum TarNode {
 ///
 /// The `tar` crate consumes `XHeader`, `GNULongName` and `GNULongLink`
 /// internally, so normally only `XGlobalHeader` reaches the entry loop; all
-/// four are checked as defense-in-depth.
-pub(crate) const fn is_metadata_type(kind: tar::EntryType) -> bool {
+/// four are checked as defense-in-depth. A GNU volume label (`V`) is a
+/// metadata record too, which is safe only for an entry that passed the header
+/// check (`CheckedTarEntry`): that check refuses a label that carries data or
+/// follows an extension header, so every caller must hold a checked entry.
+pub(crate) fn is_metadata_type(kind: tar::EntryType) -> bool {
     matches!(
         kind,
         tar::EntryType::XHeader
             | tar::EntryType::XGlobalHeader
             | tar::EntryType::GNULongName
             | tar::EntryType::GNULongLink
-    )
+    ) || kind.as_byte() == b'V'
 }
 
 fn special_entry(kind: SpecialFile) -> ArchiveError {
@@ -609,7 +613,7 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
         TarType::Block => Err(special_entry(SpecialFile::BlockDevice)),
         TarType::Fifo => Err(special_entry(SpecialFile::Fifo)),
         _ => Err(ArchiveError::from(Violation::UnsupportedTarType {
-            kind: format!("{kind:?}").into(),
+            typeflag: TarTypeflag::new(kind.as_byte()),
         })),
     }
 }

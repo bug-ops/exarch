@@ -153,6 +153,7 @@ pub use error::TarHeaderField;
 pub use error::TarNonRegularKind;
 pub use error::TarPathKey;
 pub use error::TarTrailerRefusal;
+pub use error::TarTypeflag;
 pub use error::TrailerCorruption;
 pub use error::Unclassified;
 pub use error::Violation;

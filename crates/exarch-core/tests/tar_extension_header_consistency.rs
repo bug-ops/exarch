@@ -1247,6 +1247,17 @@ fn local_pax_header_with_records_in_the_padding_is_refused() {
 }
 
 #[test]
+fn a_record_error_wins_over_a_window_error_in_the_same_pax_header() {
+    let body = pax_body(&[("path", "a.txt"), ("path", "b.txt")]);
+    let record = pax_record("mtime", "1700000000");
+    let bytes = tar_of(&[
+        with_padding_bytes(PAX_LOCAL, &body, record.as_bytes()),
+        entry("a.txt", REGULAR, b"a"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::DuplicateRecord { key: "path".into() });
+}
+
+#[test]
 fn local_pax_header_with_a_path_record_in_the_padding_is_refused() {
     let body = pax_body(&[("mtime", "1700000000")]);
     let path_record = pax_record("path", "other.txt");
@@ -1854,4 +1865,85 @@ fn hidden_size_equal_to_a_base256_header_size_is_accepted() {
         pad([header, b"x\n".to_vec()].concat()),
     ]);
     assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+fn listed_mtime(bytes: &[u8]) -> Option<std::time::SystemTime> {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    verify_archive(&archive, &config()).unwrap();
+    manifest.entries()[0].modified
+}
+
+fn epoch_plus(seconds: u64, nanos: u32) -> Option<std::time::SystemTime> {
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+}
+
+fn with_header_mtime(seconds: u64) -> Vec<u8> {
+    let mut block = header("file.txt", REGULAR, 1, "");
+    block[136..148].copy_from_slice(format!("{seconds:011o}\0").as_bytes());
+    refresh_checksum(&mut block);
+    pad([block, b"x".to_vec()].concat())
+}
+
+#[test]
+fn list_reports_the_local_pax_mtime_over_the_header_mtime() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"mtime", b"1700000000.5")]),
+        with_header_mtime(1_000),
+    ]);
+    assert_eq!(listed_mtime(&bytes), epoch_plus(1_700_000_000, 500_000_000));
+}
+
+#[test]
+fn list_truncates_a_pax_mtime_fraction_to_nanoseconds() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"mtime", b"5.1234567899999")]),
+        with_header_mtime(1_000),
+    ]);
+    assert_eq!(listed_mtime(&bytes), epoch_plus(5, 123_456_789));
+}
+
+#[test]
+fn list_reports_a_negative_pax_mtime_before_the_epoch() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"mtime", b"-10.25")]),
+        with_header_mtime(1_000),
+    ]);
+    let expected = std::time::UNIX_EPOCH.checked_sub(std::time::Duration::new(10, 250_000_000));
+    assert_eq!(listed_mtime(&bytes), expected);
+}
+
+#[test]
+fn list_keeps_the_header_mtime_for_an_unparseable_pax_mtime() {
+    for value in [
+        &b""[..],
+        b"abc",
+        b"1e9",
+        b"+5",
+        b"1.",
+        b".5",
+        b"1.2.3",
+        b"-",
+        b"99999999999999999999999",
+    ] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"mtime", value)]),
+            with_header_mtime(1_000),
+        ]);
+        assert_eq!(listed_mtime(&bytes), epoch_plus(1_000, 0), "{value:?}");
+    }
+}
+
+#[test]
+fn list_ignores_the_mtime_of_a_global_pax_header() {
+    let global = raw_extension(PAX_GLOBAL, &testkit::pax::record(b"mtime", b"1700000000"));
+    let bytes = tar_of(&[global, with_header_mtime(1_000)]);
+    assert_eq!(listed_mtime(&bytes), epoch_plus(1_000, 0));
+}
+
+#[test]
+fn list_reports_the_header_mtime_without_a_pax_header() {
+    let bytes = tar_of(&[with_header_mtime(1_000)]);
+    assert_eq!(listed_mtime(&bytes), epoch_plus(1_000, 0));
 }

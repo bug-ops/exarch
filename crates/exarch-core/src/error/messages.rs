@@ -1647,10 +1647,16 @@ mod tests {
                 size: 1,
                 path: "d".into(),
             },
+            A::NonRegularPayload {
+                kind: NonRegular::VolumeLabel,
+                size: 1,
+                path: "label".into(),
+            },
             A::DirectoryNamedPayload {
                 size: 1,
                 path: "d/".into(),
             },
+            A::ExtensionBeforeLabel { kind: Ext::Pax },
         ]
     }
 

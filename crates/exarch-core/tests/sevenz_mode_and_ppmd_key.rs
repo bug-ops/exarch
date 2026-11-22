@@ -6,6 +6,7 @@
 #![expect(clippy::disallowed_methods, reason = "test fixture setup")]
 #![expect(clippy::unwrap_used, reason = "integration test helpers")]
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -275,13 +276,13 @@ fn an_all_ones_attribute_word_is_refused_for_its_undefined_type() {
         extract_reader_to_memory(reader, &MemoryExtractRequest::default(), &mut NoopProgress)
             .unwrap_err();
 
-    assert!(matches!(
+    assert_matches!(
         error,
         exarch_core::ArchiveError::SecurityViolation {
             kind: exarch_core::Violation::UndefinedUnixType { .. },
             ..
         }
-    ));
+    );
 }
 
 #[cfg(unix)]

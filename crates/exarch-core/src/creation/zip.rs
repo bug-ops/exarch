@@ -507,7 +507,9 @@ mod tests {
             u64::from(u32::MAX) * 1000,
             u64::from(u32::MAX) * 100_000,
         ] {
-            let at = UNIX_EPOCH + Duration::from_secs(secs);
+            let Some(at) = UNIX_EPOCH.checked_add(Duration::from_secs(secs)) else {
+                continue;
+            };
             assert_eq!(dos_time(at), last, "secs={secs}");
         }
     }
@@ -534,10 +536,10 @@ mod tests {
         use std::time::UNIX_EPOCH;
 
         assert_eq!(dos_time(UNIX_EPOCH), zip::DateTime::default());
-        assert_eq!(
-            dos_time(UNIX_EPOCH - Duration::from_secs(1 << 40)),
-            zip::DateTime::default()
-        );
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1 << 33))
+            .expect("an instant 272 years before the epoch is representable on every platform");
+        assert_eq!(dos_time(before_epoch), zip::DateTime::default());
     }
 
     #[test]

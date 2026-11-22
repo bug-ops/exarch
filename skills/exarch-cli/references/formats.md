@@ -16,7 +16,7 @@ A TAR holding constructs that readers (`bsdtar`, Python `tarfile`) parse differe
 - a GNU sparse (`S`) entry;
 - a size or checksum field that is not plain octal (sign or control character) or is base-256, including in `x`, `L`, `K` headers;
 - a `prefix` field in a header without ustar magic;
-- a PAX header with duplicate records, an empty key, a record over 999999 bytes, a non-numeric `size`, a non-canonical record length, or any `SCHILY.realsize` / `GNU.sparse.*` record;
+- a PAX header with duplicate records, an empty key, a record over 999999 bytes, a non-numeric `size`, a non-canonical record length, or any `SCHILY.realsize` / `SUN.holesdata` / `GNU.sparse.*` record;
 - a PAX `path`/`linkpath` stacked with a GNU long-name record;
 - a global PAX header (`g`) carrying `path`, `linkpath`, or `size`, malformed framing, or following a local PAX header or GNU long record;
 - an extension-header typeflag without ustar/GNU magic;

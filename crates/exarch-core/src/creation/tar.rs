@@ -257,6 +257,7 @@ mod tests {
     use super::*;
     use crate::ArchiveError;
     use crate::SecurityConfig;
+    use crate::SkipKind;
     use crate::api::create_archive;
     use crate::api::extract_archive;
     use crate::creation::CompressionLevel;
@@ -287,6 +288,40 @@ mod tests {
         assert_eq!(report.files_added, 1);
         assert!(report.bytes_written > 0);
         assert!(output.exists());
+    }
+
+    #[test]
+    fn test_create_tar_named_file_over_max_file_size_is_skipped() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.tar");
+        let big = temp.path().join("big.bin");
+        fs::write(&big, vec![0u8; 4096]).unwrap();
+
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let report = create_archive(&output, &[big.as_path()], &config).unwrap();
+
+        assert_eq!(report.files_added, 0);
+        assert_eq!(report.files_skipped(), 1);
+        assert_eq!(report.skipped.count(SkipKind::OverMaxFileSize), 1);
+    }
+
+    #[test]
+    fn test_create_tar_named_file_at_max_file_size_boundary() {
+        let temp = TempDir::new().unwrap();
+        let exact = temp.path().join("exact.bin");
+        let over = temp.path().join("over.bin");
+        fs::write(&exact, vec![0u8; 100]).unwrap();
+        fs::write(&over, vec![0u8; 101]).unwrap();
+
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let kept = create_archive(temp.path().join("a.tar"), &[exact.as_path()], &config).unwrap();
+        let skipped =
+            create_archive(temp.path().join("b.tar"), &[over.as_path()], &config).unwrap();
+
+        assert_eq!(kept.files_added, 1);
+        assert_eq!(kept.files_skipped(), 0);
+        assert_eq!(skipped.files_added, 0);
+        assert_eq!(skipped.skipped.count(SkipKind::OverMaxFileSize), 1);
     }
 
     #[test]

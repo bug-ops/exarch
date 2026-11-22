@@ -6,9 +6,9 @@
 //! destination's ACL is carried over where it can be, see [`super::acl`].
 //!
 //! Adoption is split around the publishing rename. [`StagingDir::adopt`] does
-//! everything that may still fail the run and returns an [`AdoptedRoot`];
+//! everything that may still fail the run and returns an `AdoptedRoot`;
 //! the ACL, which may deny deleting the very directory being renamed, is
-//! written by [`AdoptedRoot::finish`], which takes the [`Published`] proof the
+//! written by `AdoptedRoot::finish`, which takes the [`Published`] proof the
 //! rename returns.
 
 use super::dir::Published;
@@ -355,10 +355,11 @@ mod imp {
         ///
         /// The root also stays `0700`, with no ACL, when its children could
         /// not inherit from the destination being adopted, or were seeded from
-        /// one that is gone (see [`Inherited::withholds`]): they would
-        /// otherwise sit under a root that grants more than what they were
-        /// made under. The destination's owner is still claimed, so the
-        /// owner keeps access, unless the destination is another directory.
+        /// one that is gone (see
+        /// [`Inherited::withholds`](super::super::dir::Inherited::withholds)):
+        /// they would otherwise sit under a root that grants more than what
+        /// they were made under. The destination's owner is still claimed, so
+        /// the owner keeps access, unless the destination is another directory.
         ///
         /// Returns every way the root ended up with less access than the
         /// destination had, and what is left to do after the rename.

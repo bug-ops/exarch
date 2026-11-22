@@ -434,6 +434,11 @@ pub(crate) fn collect_entries<P: AsRef<Path>>(
                 let entry_type = if metadata.is_symlink() && !config.follow_symlinks {
                     let target = std::fs::read_link(path).map_err(|e| source_error(path, e))?;
                     EntryType::Symlink { target }
+                } else if !config.max_file_size.admits(get_file_size(seen)) {
+                    collected
+                        .skipped
+                        .record(Skip::new(SkipKind::OverMaxFileSize, relative))?;
+                    continue;
                 } else {
                     content_of(path, seen, config)?
                 };
@@ -573,6 +578,27 @@ mod tests {
             sample,
             [".secret", "big.bin", "skip.tmp"].map(PathBuf::from)
         );
+    }
+
+    #[test]
+    fn test_collect_entries_skips_a_named_file_over_max_file_size() {
+        let temp = TempDir::new().unwrap();
+        let big = temp.path().join("big.bin");
+        let small = temp.path().join("small.txt");
+        fs::write(&big, "a".repeat(1000)).unwrap();
+        fs::write(&small, "tiny").unwrap();
+
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let collected = collect_entries(
+            &[big.as_path(), small.as_path()],
+            &config,
+            &ExcludedOutput::none(),
+        )
+        .unwrap();
+
+        assert_eq!(collected.entries.len(), 1);
+        assert_eq!(collected.skipped.count(SkipKind::OverMaxFileSize), 1);
+        assert_eq!(collected.skipped.sample()[0].path, PathBuf::from("big.bin"));
     }
 
     #[test]

@@ -16,12 +16,14 @@
 use std::ops::Range;
 
 use super::CHECKSUM_FIELD;
+use super::PAX_SIZE;
 use super::PrecedingEntry;
 use super::SIZE_FIELD;
 use super::check_header_block;
 use super::check_record_framing;
 use super::is_plain_base256;
 use super::is_plain_octal;
+use super::parse_records;
 use crate::Result;
 use crate::TarAmbiguity;
 use crate::TarExtensionKind;
@@ -135,11 +137,16 @@ fn first_header_offset(window_start: u64) -> Result<usize> {
 /// size is not canonical, a local PAX body is not canonical, an extension
 /// header repeats, or the blocks do not end exactly at the entry the `tar`
 /// crate yielded.
-pub(super) fn check_window(
-    window: &MetadataWindow<'_>,
+///
+/// `pax_body` receives the framed body of the local PAX header as soon as it
+/// passes the framing check, even when a later check fails, so the caller can
+/// parse its records by their declared length.
+pub(super) fn walk_window<'w>(
+    window: &MetadataWindow<'w>,
     preceding: PrecedingEntry,
     header_pos: u64,
     file_pos: u64,
+    pax_body: &mut Option<&'w [u8]>,
 ) -> Result<()> {
     let bytes = window.bytes();
     let mut offset = first_header_offset(window.start())?;
@@ -176,7 +183,8 @@ pub(super) fn check_window(
             .ok_or(TarAmbiguity::WindowMismatch)?;
         if kind == TarExtensionKind::Pax {
             check_record_framing(body)?;
-            pax_has_size = pax_declares_size(body);
+            pax_has_size = pax_declares_size(body)?;
+            *pax_body = Some(body);
         } else {
             check_long_record(kind, body)?;
         }
@@ -187,11 +195,12 @@ pub(super) fn check_window(
     }
 }
 
-/// Whether a framed PAX body holds a `size` record.
-fn pax_declares_size(body: &[u8]) -> bool {
-    tar::PaxExtensions::new(body)
-        .flatten()
-        .any(|record| record.key_bytes() == b"size")
+/// Whether a framed PAX body declares a `size` record, whether or not the
+/// `tar` crate can read it.
+fn pax_declares_size(body: &[u8]) -> Result<bool> {
+    Ok(parse_records(body)?
+        .iter()
+        .any(|record| record.key == PAX_SIZE))
 }
 
 /// Checks the padding after a trailing global PAX header, in the window the
@@ -245,6 +254,15 @@ mod tests {
 
     use super::*;
     use crate::ArchiveError;
+
+    fn check_window(
+        window: &MetadataWindow<'_>,
+        preceding: PrecedingEntry,
+        header_pos: u64,
+        file_pos: u64,
+    ) -> Result<()> {
+        walk_window(window, preceding, header_pos, file_pos, &mut None)
+    }
 
     fn header_block(typeflag: u8, size: usize) -> Vec<u8> {
         let mut header = Header::new_gnu();

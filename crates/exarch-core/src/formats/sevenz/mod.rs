@@ -199,10 +199,10 @@ const SIGNATURE_HEADER_SIZE: u64 = SIGNATURE_HEADER_LEN as u64;
 pub(crate) struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
-    /// Header already parsed by [`Self::new`], borrowed by extraction, `list`
-    /// and `verify` instead of re-parsing the archive (issues #492, #742), so a
-    /// second call on the same instance still has a real parsed archive to
-    /// work with.
+    /// Header parsed when the archive was opened, borrowed by extraction,
+    /// `list` and `verify` instead of re-parsing the archive (issues #492,
+    /// #742), so a second call on the same instance still has a real parsed
+    /// archive to work with.
     header: SevenZHeader,
     /// The policy every operation of the handle enforces.
     config: Arc<SecurityConfig>,
@@ -233,8 +233,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ///
     /// # Errors
     ///
-    /// As [`Self::new`], plus the typed refusals of an encrypted header:
-    /// no password, a key derivation over `max_kdf_work`, a wrong password.
+    /// Returns error if the archive header is invalid, the format is not
+    /// recognized, or `config` refuses the archive, plus the
+    /// typed refusals of an encrypted header: no password, a key derivation
+    /// over `max_kdf_work`, a wrong password.
     pub(crate) fn open(
         mut source: R,
         config: &SecurityConfig,

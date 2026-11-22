@@ -442,14 +442,21 @@ pub(super) enum BlockCipher {
 impl BlockCipher {
     /// `failure` as this block reports it: in an encrypted block a wrong
     /// password or tampered data fails as a checksum, a truncation or a
-    /// malformed stream, which is the encryption refusal extraction raises. A
-    /// resource limit and a source fault are not verdicts on the bytes.
+    /// malformed stream, which is the encryption refusal extraction raises.
+    /// Every other failure (a size overrun, a method that is not decodable, a
+    /// resource limit, a source fault) is not a verdict on the key and keeps
+    /// its own report.
     pub(super) fn classify(self, failure: DecodeFailure) -> DecodeFailure {
-        let verdict = !matches!(
-            failure,
-            DecodeFailure::ResourceLimit(_) | DecodeFailure::Io(_)
-        );
-        if self == Self::Aes && verdict {
+        let key_verdict = match failure {
+            DecodeFailure::Checksum
+            | DecodeFailure::Malformed(_)
+            | DecodeFailure::Truncated { .. } => true,
+            DecodeFailure::DeclaredSizeOverrun { .. }
+            | DecodeFailure::ResourceLimit(_)
+            | DecodeFailure::NotDecodable(_)
+            | DecodeFailure::Io(_) => false,
+        };
+        if self == Self::Aes && key_verdict {
             DecodeFailure::NotDecodable(
                 Violation::Encrypted {
                     reason: EncryptionRefusal::WrongPasswordOrCorrupt,

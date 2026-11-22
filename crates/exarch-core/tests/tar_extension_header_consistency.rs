@@ -1420,3 +1420,438 @@ fn trailing_global_pax_header_with_zero_padding_is_accepted() {
     let out = TempDir::new().unwrap();
     extract_archive(&archive, out.path(), &config()).unwrap();
 }
+
+fn local_pax_bytes(records: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let body: Vec<u8> = records
+        .iter()
+        .flat_map(|(key, value)| testkit::pax::record(key, value))
+        .collect();
+    raw_extension(PAX_LOCAL, &body)
+}
+
+fn assert_lists_and_extracts(bytes: &[u8], name: &str, content: &[u8]) {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    assert_eq!(manifest.entries()[0].path, Path::new(name));
+    verify_archive(&archive, &config()).unwrap();
+    let root = TempDir::new().unwrap();
+    let out = root.path().join("out");
+    extract_archive(&archive, &out, &config()).unwrap();
+    assert_eq!(std::fs::read(out.join(name)).unwrap(), content);
+}
+
+#[test]
+fn local_pax_value_with_a_newline_is_accepted() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"a\nb")]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+#[test]
+fn schily_xattr_with_a_binary_newline_value_is_accepted() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[
+            (b"path", b"file.txt"),
+            (b"SCHILY.xattr.com.apple.metadata", b"\x00\x0a\xff\n\x01"),
+            (b"SCHILY.xattr.second", b"v\n"),
+        ]),
+        entry("placeholder.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+#[test]
+fn global_pax_value_with_a_newline_is_accepted() {
+    let bytes = tar_of(&[
+        raw_extension(PAX_GLOBAL, &testkit::pax::record(b"comment", b"a\nb")),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+#[test]
+fn newline_value_cannot_hide_a_record_from_the_tar_crate() {
+    let hidden = testkit::pax::record(b"path", b"evil.txt");
+    let mut value = b"x\n".to_vec();
+    value.extend_from_slice(&hidden[..hidden.len() - 1]);
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", &value)]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn newline_inside_a_value_the_tar_crate_reads_is_refused() {
+    for key in [&b"path"[..], b"linkpath", b"size", b"uid", b"gid"] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(key, b"1\n2")]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn size_behind_a_newline_value_is_refused() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"a\nb"), (b"size", b"1024")]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn hidden_size_equal_to_the_header_size_is_accepted() {
+    for comment in [&b"a\n"[..], b"a\nb"] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", comment), (b"size", b"2")]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+    }
+}
+
+#[test]
+fn hidden_size_that_differs_from_the_header_size_is_refused() {
+    for size in [&b"1"[..], b"3", b"0", b"1024"] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", b"a\n"), (b"size", size)]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn hidden_size_in_a_non_canonical_form_is_refused() {
+    for size in [
+        &b"02"[..],
+        b"+2",
+        b"2x",
+        b" 2",
+        b"99999999999999999999",
+        b"",
+    ] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", b"a\n"), (b"size", size)]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn size_equal_to_the_header_size_inside_a_value_is_refused() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"x\n10 size=2"), (b"size", b"2")]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn global_size_is_still_refused_after_a_newline_value() {
+    let body = [
+        testkit::pax::record(b"comment", b"a\n"),
+        testkit::pax::record(b"size", b"2"),
+    ]
+    .concat();
+    let bytes = tar_of(&[
+        raw_extension(PAX_GLOBAL, &body),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn ambiguous_pax_framing_is_still_refused_with_newline_values() {
+    let good = testkit::pax::record(b"comment", b"a\nb");
+    let truncated = good[..good.len() - 1].to_vec();
+    let mut short_len = good.clone();
+    short_len.splice(..2, *b"9 ");
+    let mut no_equals = b"7 abcd\n".to_vec();
+    no_equals.extend_from_slice(&good);
+    let mut trailing = good.clone();
+    trailing.extend_from_slice(b"junk");
+    let bodies = [
+        truncated,
+        short_len,
+        no_equals,
+        trailing,
+        b"99999999999999999999 comment=a\nb\n".to_vec(),
+    ];
+    for body in bodies {
+        let bytes = tar_of(&[
+            raw_extension(PAX_LOCAL, &body),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn duplicate_keys_are_still_refused_with_newline_values() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"a\nb"), (b"comment", b"c")]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::DuplicateRecord {
+            key: "comment".into(),
+        },
+    );
+}
+
+#[test]
+fn newline_inside_a_key_is_refused() {
+    let hidden = entry("hidden.txt", REGULAR, b"payload\n");
+    let size = hidden.len().to_string();
+    let archives = [
+        tar_of(&[
+            local_pax_bytes(&[(b"comment\n17 path", b"other.txt")]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]),
+        tar_of(&[
+            local_pax_bytes(&[(b"comment\nx", b"y"), (b"size", size.as_bytes())]),
+            entry("file.txt", REGULAR, b""),
+            hidden,
+        ]),
+        tar_of(&[
+            local_pax_bytes(&[(b"comment\n19 linkpath", b"/other")]),
+            link("lnk", SYMLINK, "safe"),
+        ]),
+        tar_of(&[
+            local_pax_bytes(&[(b"vendor.key\nb", b"v")]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]),
+        tar_of(&[
+            raw_extension(PAX_GLOBAL, &testkit::pax::record(b"vendor\nkey", b"v")),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]),
+    ];
+    for bytes in archives {
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn size_after_a_newline_value_is_refused_when_the_header_size_differs() {
+    let hidden = entry("hidden.txt", REGULAR, b"payload\n");
+    let size = hidden.len().to_string();
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"x\ny"), (b"size", size.as_bytes())]),
+        entry("file.txt", REGULAR, b""),
+        hidden,
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn empty_line_inside_a_value_cannot_cut_off_a_record_the_crate_acts_on() {
+    for key in [&b"path"[..], b"linkpath", b"size", b"uid", b"gid"] {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", b"a\n\nb"), (key, b"1")]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn records_after_a_value_ending_in_a_newline_are_accepted() {
+    let shapes: [&[(&[u8], &[u8])]; 3] = [
+        &[
+            (b"SCHILY.xattr.user.a", b"v\n"),
+            (b"SCHILY.xattr.user.b", b"w"),
+        ],
+        &[(b"comment", b"a\n\nb"), (b"SCHILY.xattr.user.b", b"w")],
+        &[(b"comment", b"a\n\nb"), (b"mtime", b"0")],
+    ];
+    for records in shapes {
+        let bytes = tar_of(&[local_pax_bytes(records), entry("file.txt", REGULAR, b"x\n")]);
+        assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+    }
+}
+
+#[test]
+fn path_after_a_newline_ended_value_is_refused() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"comment", b"a\n"), (b"path", b"file.txt")]),
+        entry("placeholder.txt", REGULAR, b"x\n"),
+    ]);
+    assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+}
+
+#[test]
+fn newline_value_followed_by_unrelated_records_is_accepted() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[
+            (b"comment", b"a\nb"),
+            (b"path", b"file.txt"),
+            (b"mtime", b"0"),
+        ]),
+        entry("placeholder.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+#[test]
+fn every_stopping_key_after_a_newline_value_is_refused() {
+    for key in [&b"size"[..], b"uid", b"gid"] {
+        let value: &[u8] = if key == b"size" { b"1024" } else { b"1000" };
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", b"x\ny"), (key, value)]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn every_stopping_key_after_a_newline_key_is_refused() {
+    for key in [&b"size"[..], b"uid", b"gid"] {
+        let value: &[u8] = if key == b"size" { b"1024" } else { b"1000" };
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"q\nr", b"1"), (key, value)]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn global_pax_header_with_a_hidden_record_or_a_newline_path_is_refused() {
+    let hidden = testkit::pax::record(b"mtime", b"0");
+    let mut value = b"x\n".to_vec();
+    value.extend_from_slice(&hidden[..hidden.len() - 1]);
+    let bodies = [
+        testkit::pax::record(b"comment", &value),
+        testkit::pax::record(b"path", b"a\nb"),
+    ];
+    for body in bodies {
+        let bytes = tar_of(&[
+            raw_extension(PAX_GLOBAL, &body),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn a_copy_of_a_later_record_inside_a_value_is_refused() {
+    let copies: [(&[u8], &[u8], &[u8]); 2] = [
+        (b"size", b"1024", b"x\n13 size=1024"),
+        (b"uid", b"1000", b"x\n12 uid=1000"),
+    ];
+    for (key, value, carrier) in copies {
+        let bytes = tar_of(&[
+            local_pax_bytes(&[(b"comment", carrier), (key, value)]),
+            entry("file.txt", REGULAR, b"x\n"),
+        ]);
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+    }
+}
+
+#[test]
+fn xattr_value_ending_in_a_newline_then_a_size_record_first_is_accepted() {
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"size", b"2"), (b"SCHILY.xattr.user.a", b"v\n")]),
+        entry("file.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}
+
+#[test]
+fn a_sparse_map_record_is_refused_in_every_scope_and_position() {
+    let record = testkit::pax::record(b"SUN.holesdata", b"0 4 100 4");
+    let after_multiline = [testkit::pax::record(b"comment", b"a\nb"), record.clone()].concat();
+    let key = TarAmbiguity::UnsupportedRecord {
+        key: "SUN.holesdata".into(),
+    };
+    for (typeflag, body) in [
+        (PAX_LOCAL, record.clone()),
+        (PAX_GLOBAL, record),
+        (PAX_LOCAL, after_multiline),
+    ] {
+        let bytes = tar_of(&[
+            raw_extension(typeflag, &body),
+            entry("file.txt", REGULAR, b"AAAABBBB"),
+        ]);
+        assert_refused_everywhere(&bytes, key.clone());
+    }
+}
+
+#[test]
+fn hidden_size_stacked_with_a_gnu_long_record_is_refused_in_either_order() {
+    let hidden = local_pax_bytes(&[(b"SCHILY.xattr.k", b"a\n"), (b"size", b"2")]);
+    let visible = local_pax_bytes(&[(b"size", b"2")]);
+    for kind in [GNU_LONG_NAME, GNU_LONG_LINK] {
+        let long = gnu_long(kind, "long.txt");
+        for pax in [&hidden, &visible] {
+            for headers in [[pax.clone(), long.clone()], [long.clone(), pax.clone()]] {
+                let bytes = tar_of(&[headers.concat(), entry("short.txt", REGULAR, b"x\n")]);
+                assert_refused_everywhere(&bytes, TarAmbiguity::StackedSizeRecord);
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_path_or_linkpath_next_to_a_gnu_long_record_is_refused() {
+    for (key, kind) in [
+        (&b"path"[..], GNU_LONG_NAME),
+        (&b"linkpath"[..], GNU_LONG_LINK),
+    ] {
+        let pax = local_pax_bytes(&[(b"SCHILY.xattr.k", b"a\n"), (key, b"other.txt")]);
+        let long = gnu_long(kind, "long.txt");
+        for headers in [[pax.clone(), long.clone()], [long, pax]] {
+            let bytes = tar_of(&[headers.concat(), entry("short.txt", REGULAR, b"x\n")]);
+            assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
+        }
+    }
+}
+
+#[test]
+fn pax_without_size_stacked_with_a_gnu_long_record_after_a_newline_value_is_accepted() {
+    let pax = local_pax_bytes(&[(b"SCHILY.xattr.k", b"a\n"), (b"mtime", b"1")]);
+    let long = gnu_long(GNU_LONG_NAME, "long.txt");
+    let bytes = tar_of(&[
+        [pax, long].concat(),
+        entry("placeholder.txt", REGULAR, b"x\n"),
+    ]);
+    assert_lists_and_extracts(&bytes, "long.txt", b"x\n");
+}
+
+#[test]
+fn hidden_size_equal_to_the_header_size_is_refused_next_to_a_gnu_long_record() {
+    let data = vec![b'a'; 1024];
+    let pax = local_pax_bytes(&[(b"SCHILY.xattr.k", b"a\n"), (b"size", b"1024")]);
+    for kind in [GNU_LONG_NAME, GNU_LONG_LINK] {
+        let long = gnu_long(kind, "long.txt");
+        for headers in [[pax.clone(), long.clone()], [long, pax.clone()]] {
+            let bytes = tar_of(&[headers.concat(), entry("benign", REGULAR, &data)]);
+            assert_refused_everywhere(&bytes, TarAmbiguity::StackedSizeRecord);
+        }
+    }
+}
+
+#[test]
+fn hidden_size_equal_to_a_base256_header_size_is_accepted() {
+    let mut field = [0u8; 12];
+    field[0] = 0x80;
+    field[11] = 2;
+    let header = patched(
+        header("file.txt", REGULAR, 2, ""),
+        &[(SIZE_FIELD.start, &field)],
+    );
+    let bytes = tar_of(&[
+        local_pax_bytes(&[(b"SCHILY.xattr.k", b"a\n"), (b"size", b"2")]),
+        pad([header, b"x\n".to_vec()].concat()),
+    ]);
+    assert_lists_and_extracts(&bytes, "file.txt", b"x\n");
+}

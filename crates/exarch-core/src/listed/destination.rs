@@ -8,8 +8,9 @@
 //! error it is, never as a symlink refusal. A landing that holds a symlink is
 //! refused with the error the write phase gives ([`replaces_symlink`]), and one
 //! that holds a directory is a `DestinationOccupied` conflict, the class
-//! [`kept_occupant_refusal`] gives it there. A file at a directory landing is
-//! the one occupant the write phase still reports as an untyped I/O error.
+//! [`kept_occupant_refusal`](crate::formats::occupant::kept_occupant_refusal)
+//! gives it there. A file at a directory landing is the one occupant the write
+//! phase still reports as an untyped I/O error.
 
 use std::path::Path;
 use std::path::PathBuf;

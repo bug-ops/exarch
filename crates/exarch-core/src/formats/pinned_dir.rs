@@ -977,24 +977,15 @@ mod imp {
 
         /// Creates `name` exclusively, never following a symlink at it.
         ///
-        /// With `mode`, the file is created owner-only and then set to exactly
-        /// `mode` through the open descriptor (`fchmod`), so the umask cannot
-        /// reduce it and no path is resolved again.
-        #[cfg(test)]
-        pub(crate) fn create_new(
-            &self,
-            name: Leaf<'_>,
-            mode: Option<SanitizedMode>,
-        ) -> io::Result<File> {
-            let (file, pending) = self.create_new_deferred(name, mode)?;
-            pending.apply(&file)?;
-            Ok(file)
-        }
-
-        /// Creates `name` like [`create_new`](Self::create_new) but leaves the
-        /// file owner-only when `mode` is given: the caller applies the mode
-        /// through the returned [`PendingMode`] once it has written whatever
-        /// must precede a restrictive mode (the download-origin mark).
+        /// With `mode`, the file is created owner-only and the caller gives it
+        /// exactly `mode` through the open descriptor (`fchmod`) via the
+        /// returned [`PendingMode`], so the umask cannot reduce it and no path
+        /// is resolved again. The caller applies the mode once it has written
+        /// whatever must precede a restrictive mode (the download-origin mark).
+        ///
+        /// The file is left owner-only when `mode` is given: the caller applies
+        /// the mode through the returned [`PendingMode`] once it has written
+        /// whatever must precede a restrictive mode (the download-origin mark).
         pub(crate) fn create_new_deferred(
             &self,
             name: Leaf<'_>,
@@ -1481,17 +1472,8 @@ mod imp {
             nt::rename_with(self.0.as_handle(), from, to, nt::Replace::Never)
         }
 
-        /// Creates the file `name` exclusively, never following a link at it.
-        pub(crate) fn create_new(
-            &self,
-            name: Leaf<'_>,
-            mode: Option<SanitizedMode>,
-        ) -> io::Result<File> {
-            self.create_new_deferred(name, mode).map(|(file, _)| file)
-        }
-
-        /// Creates the file `name` like [`create_new`](Self::create_new); there
-        /// is no Unix mode to defer, so the [`PendingMode`] does nothing.
+        /// Creates the file `name` exclusively, never following a link at it;
+        /// there is no Unix mode to defer, so the [`PendingMode`] does nothing.
         pub(crate) fn create_new_deferred(
             &self,
             name: Leaf<'_>,
@@ -1546,6 +1528,21 @@ mod imp {
 
 #[cfg(not(any(unix, target_os = "wasi", windows)))]
 compile_error!("exarch-core has no directory-handle backend for this target");
+
+#[cfg(test)]
+impl VettedDir {
+    /// Creates `name` exclusively and gives it `mode` at once, for tests that
+    /// need no mark between the create and the mode.
+    pub(crate) fn create_new(
+        &self,
+        name: Leaf<'_>,
+        mode: Option<crate::security::permissions::SanitizedMode>,
+    ) -> std::io::Result<std::fs::File> {
+        let (file, pending) = self.create_new_deferred(name, mode)?;
+        pending.apply(&file)?;
+        Ok(file)
+    }
+}
 
 /// The mode a file created by [`VettedDir::create_new_deferred`] still has to
 /// be given.

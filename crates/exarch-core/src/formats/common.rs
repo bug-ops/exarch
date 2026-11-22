@@ -335,7 +335,7 @@ pub(crate) fn check_entry_name_limits(
 /// reopening a TOCTOU window between file creation and permission
 /// enforcement (issue #460). This ensures the exact sanitized mode from
 /// `SecurityConfig` is applied, regardless of the caller's umask. See
-/// [`VettedDir::create_new`] for the full contract.
+/// [`VettedDir::create_new_deferred`] for the full contract.
 ///
 /// # Security - Pinned Parent Directory (issue #818)
 ///
@@ -1028,7 +1028,7 @@ fn name_occupant_on_open_error(
 /// The occupant of `leaf` whose presence explains `err`, if any.
 ///
 /// A symlink refusal is identified by `ELOOP` on Unix and by the
-/// `AlreadyExists` that `VettedDir::create_new` returns elsewhere.
+/// `AlreadyExists` that `VettedDir::create_new_deferred` returns elsewhere.
 fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Option<KeptOccupant> {
     use std::io::ErrorKind;
 
@@ -1187,10 +1187,10 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 ///
 /// Unlike `std::fs::copy(from, to)`, both `from` and `to` are already-open
 /// [`File`] handles rather than paths. Callers obtain `to` from
-/// [`VettedDir::create_new`] (refusing to create through a pre-existing
-/// destination name, symlink or not) and `from` from [`VettedDir::open_read`]
-/// (refusing to follow a symlink), and reserve quota from `from`'s `fstat`
-/// size, which the `permit` then carries.
+/// [`VettedDir::create_new_deferred`] (refusing to create through a
+/// pre-existing destination name, symlink or not) and `from` from
+/// [`VettedDir::open_read`] (refusing to follow a symlink), and reserve quota
+/// from `from`'s `fstat` size, which the `permit` then carries.
 ///
 /// The permit's byte count is a hard ceiling and an exact length: the quota was
 /// charged for that many bytes, so a target that grew after the `fstat` fails

@@ -21,6 +21,7 @@ use sevenz_rust2::SourceReader;
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
+#[cfg(unix)]
 const S_IFDIR: u32 = 0o040_000;
 
 /// An entry carrying `word` as its whole attribute word.
@@ -67,6 +68,7 @@ fn unix_files(names_modes: &[(&str, u32)]) -> Vec<u8> {
     )
 }
 
+#[cfg(unix)]
 fn extract_to_host(bytes: &[u8], config: &SecurityConfig) -> TempDir {
     let dest = TempDir::new().unwrap();
     let scratch = TempDir::new().unwrap();

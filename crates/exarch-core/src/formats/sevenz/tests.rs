@@ -2057,7 +2057,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 /// `write_file_with_permit`'s temp-file + `rename` replaces whatever
 /// sits at `dest_path`, symlink or not, without following it, and
 /// nothing upstream of that rename rejected a symlink destination the
-/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new` does.
+/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new_deferred` does.
 /// The host target now checks `lstat_dest` before reserving quota
 /// or removing anything, and fails with the same `EXISTING_SYMLINK` refusal
 /// TAR/ZIP produce instead of silently replacing the symlink.

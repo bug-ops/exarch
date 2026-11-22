@@ -918,7 +918,7 @@ fn open_reader<R: Read + Seek>(reader: R) -> Result<ZipReader<R>> {
 
 fn entry_unreadable(index: usize, error: &zip::result::ZipError) -> ArchiveError {
     ArchiveError::from(Malformation::ZipEntryUnreadable {
-        index,
+        index: ZipEntryIndex::new(index),
         detail: error.to_string().into(),
     })
 }

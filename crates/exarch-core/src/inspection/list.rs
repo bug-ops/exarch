@@ -797,7 +797,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             let mut sym_entry = open_entry(archive, i, &credentials).map_err(|e| {
                 encryption_refusal(&e, &credentials).unwrap_or_else(|| {
                     ArchiveError::from(Malformation::ZipEntryRereadFailed {
-                        index: i,
+                        index: crate::ZipEntryIndex::new(i),
                         detail: e.to_string().into(),
                     })
                 })

@@ -47,6 +47,7 @@ use crate::HiddenRegion;
 use crate::Malformation;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
+use crate::ZipEntryIndex;
 use crate::ZipInconsistency;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
@@ -132,7 +133,7 @@ impl DescriptorTail {
         }
         let raw = archive.by_index_raw(index).map_err(|e| {
             ArchiveError::from(Malformation::ZipEntryRereadFailed {
-                index,
+                index: ZipEntryIndex::new(index),
                 detail: e.to_string().into(),
             })
         })?;

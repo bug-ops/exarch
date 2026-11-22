@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::messages::InvalidArchiveSubCode;
+use super::zip_inconsistency::ZipEntryIndex;
 use crate::security::fs_view::LinkKind;
 
 /// A malformed-archive refusal that has no family of its own.
@@ -130,8 +131,8 @@ pub enum Malformation {
     },
     /// The name of a ZIP entry cannot be read.
     EntryNameUnreadable {
-        /// The central-directory index of the entry, when known.
-        index: Option<usize>,
+        /// The entry's index in the `zip` crate's entry map, when known.
+        index: Option<ZipEntryIndex>,
         /// The reader's description of the failure.
         detail: Box<str>,
     },
@@ -162,22 +163,22 @@ pub enum Malformation {
     },
     /// The `zip` crate cannot read an entry while the archive is checked.
     ZipEntryUnreadable {
-        /// The central-directory index of the entry.
-        index: usize,
+        /// The entry's index in the `zip` crate's entry map.
+        index: ZipEntryIndex,
         /// The reader's description of the failure.
         detail: Box<str>,
     },
     /// The `zip` crate cannot open an entry for extraction.
     ZipEntryOpenFailed {
-        /// The central-directory index of the entry.
-        index: usize,
+        /// The entry's index in the `zip` crate's entry map.
+        index: ZipEntryIndex,
         /// The reader's description of the failure.
         detail: Box<str>,
     },
     /// The `zip` crate cannot open an entry a second time.
     ZipEntryRereadFailed {
-        /// The central-directory index of the entry.
-        index: usize,
+        /// The entry's index in the `zip` crate's entry map.
+        index: ZipEntryIndex,
         /// The reader's description of the failure.
         detail: Box<str>,
     },
@@ -557,7 +558,7 @@ mod tests {
             ),
             (
                 Malformation::EntryNameUnreadable {
-                    index: Some(3),
+                    index: Some(ZipEntryIndex::new(3)),
                     detail: "bad".into(),
                 },
                 "invalid entry name at 3: bad",
@@ -613,7 +614,7 @@ mod tests {
             ),
             (
                 Malformation::ZipEntryUnreadable {
-                    index: 2,
+                    index: ZipEntryIndex::new(2),
                     detail: "bad".into(),
                 },
                 "failed to read entry 2: bad",
@@ -621,7 +622,7 @@ mod tests {
             ),
             (
                 Malformation::ZipEntryOpenFailed {
-                    index: 2,
+                    index: ZipEntryIndex::new(2),
                     detail: "bad".into(),
                 },
                 "failed to open zip entry 2: bad",
@@ -629,7 +630,7 @@ mod tests {
             ),
             (
                 Malformation::ZipEntryRereadFailed {
-                    index: 2,
+                    index: ZipEntryIndex::new(2),
                     detail: "bad".into(),
                 },
                 "failed to re-read ZIP entry 2: bad",

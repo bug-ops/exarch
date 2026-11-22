@@ -561,7 +561,7 @@ class SecurityConfig:
     def max_path_depth(self, value: int) -> None: ...
     @property
     def preserve_permissions(self) -> bool:
-        """Whether extracted files get the archive mode exactly instead of minus the umask (default: False)."""
+        """Whether files get the exact archive mode, not minus the umask (default: False)."""
         ...
 
     @preserve_permissions.setter

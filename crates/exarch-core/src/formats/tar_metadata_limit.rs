@@ -905,6 +905,25 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
         })
     }
 
+    /// Returns `true` for a metadata record that is skipped, not extracted.
+    ///
+    /// The `tar` crate consumes `XHeader`, `GNULongName` and `GNULongLink`
+    /// internally, so normally only `XGlobalHeader` reaches the entry loop; all
+    /// four are checked as defense-in-depth. A GNU volume label (`V`) is
+    /// skippable only here: the header check refuses a label that carries data
+    /// or follows an extension header, so an unchecked entry cannot be
+    /// classified as skippable.
+    pub(crate) fn is_skippable_metadata(&self) -> bool {
+        let kind = self.0.entry.header().entry_type();
+        matches!(
+            kind,
+            tar::EntryType::XHeader
+                | tar::EntryType::XGlobalHeader
+                | tar::EntryType::GNULongName
+                | tar::EntryType::GNULongLink
+        ) || kind.as_byte() == b'V'
+    }
+
     /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
     pub(crate) fn abandon(&mut self) {
         self.0.abandon();

@@ -265,7 +265,7 @@ closed_enum! {
         /// Use the default mode instead of the recorded one.
         Normalize => "normalize",
 
-        /// Keep the recorded mode. Setuid and setgid bits are still stripped,
+        /// Keep the recorded mode. Setuid, setgid and sticky bits are still stripped,
         /// and world-writable bits unless the configuration allows them.
         Preserve => "preserve",
     }

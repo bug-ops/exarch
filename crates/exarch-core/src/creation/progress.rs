@@ -174,7 +174,7 @@ impl<'a, R> ProgressReader<'a, R> {
     /// - `progress`: Mutable reference to the progress callback
     /// - `batch_threshold`: Number of bytes to accumulate before reporting
     #[must_use]
-    #[allow(dead_code, reason = "constructed only by tests")]
+    #[cfg(test)]
     pub(crate) fn with_batch_threshold(
         inner: R,
         progress: &'a mut dyn ProgressCallback,

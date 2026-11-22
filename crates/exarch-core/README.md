@@ -86,7 +86,7 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 | Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
-| Permission sanitization | Strips setuid/setgid bits | Enabled |
+| Permission sanitization | Strips setuid/setgid/sticky bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 500 MB |
 | Decoder memory | Bounds the xz dictionary and the zstd window (TAR and ZIP) by `max_decoder_memory` | Enabled (256 MiB) |
 | Compressed members | Bounds gzip members and bzip2 streams by `compressed_member_allowance` plus one per 16 KiB of output | Enabled (10,000) |

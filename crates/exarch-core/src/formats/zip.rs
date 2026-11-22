@@ -47,7 +47,7 @@
 //! - **Zip bomb detection** (per-entry and aggregate compression ratios)
 //! - **Symlink escape detection** (symlinks must point within extraction
 //!   directory)
-//! - **Permission sanitization** (strips setuid/setgid bits)
+//! - **Permission sanitization** (strips setuid/setgid/sticky bits)
 //! - **Encryption policy** (`WinZip` AES with a password; `ZipCrypto` refused)
 //! - **Structural consistency** (local headers, duplicate names, overlapping
 //!   entries, records and headers the central directory does not account for;
@@ -1404,12 +1404,9 @@ impl ZipEntryAdapter {
         let size = zip_file.size();
         common::check_symlink_target_size(size)?;
 
-        // SAFETY: size has already been validated to be <=
-        // MAX_STORED_SYMLINK_TARGET which is well within usize
-        // range on all platforms
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
-            reason = "test sizes are far below the target type's limit"
+            reason = "check_symlink_target_size bounds size by MAX_STORED_SYMLINK_TARGET"
         )]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file

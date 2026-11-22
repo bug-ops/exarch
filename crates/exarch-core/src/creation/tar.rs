@@ -842,28 +842,6 @@ mod tests {
         assert_eq!(&data[0..4], &[0x28, 0xB5, 0x2F, 0xFD]);
     }
 
-    /// Appends to the file when its entry starts, which is after the walk and
-    /// before the source is opened.
-    struct GrowOnStart(std::path::PathBuf);
-
-    impl crate::ProgressCallback for GrowOnStart {
-        fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
-            use std::io::Write;
-            fs::OpenOptions::new()
-                .append(true)
-                .open(&self.0)
-                .unwrap()
-                .write_all(&[0u8; 4096])
-                .unwrap();
-        }
-
-        fn on_bytes_written(&mut self, _bytes: u64) {}
-
-        fn on_entry_complete(&mut self, _path: &Path) {}
-
-        fn on_complete(&mut self) {}
-    }
-
     /// #1288
     #[test]
     fn test_create_tar_skips_a_file_that_grew_after_the_walk() {
@@ -871,7 +849,7 @@ mod tests {
         let file = temp.path().join("a.bin");
         fs::write(&file, [0u8; 10]).unwrap();
         let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
-        let mut grow = GrowOnStart(file.clone());
+        let mut grow = crate::test_utils::GrowOnStart(file.clone());
         let mut buf = Vec::new();
 
         let report = crate::CreateRequest::new(&config)

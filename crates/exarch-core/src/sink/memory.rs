@@ -122,8 +122,8 @@ pub enum MemoryEntry {
     File {
         /// The file's bytes.
         data: Vec<u8>,
-        /// The permission bits after setuid and setgid were stripped, if the
-        /// archive carries any.
+        /// The permission bits after setuid, setgid and sticky were stripped,
+        /// if the archive carries any.
         mode: Option<SanitizedMode>,
     },
     /// A directory the archive names explicitly.

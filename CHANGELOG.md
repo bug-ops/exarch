@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#1306).
 - Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
 - Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
+- Permissions: extraction clears the sticky bit of regular files in every format, so a TAR file with the sticky bit extracts like ZIP and 7z, and `verify` reports a stored sticky bit on a TAR regular file as `InvalidPermissions` like setuid and setgid (#TBD).
 
 ### Changed
 
@@ -22,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `exarch-cli` has a disallowed-methods clippy list so path-based filesystem calls are linted (#1306).
 - Docs: redundant explicit link targets in `exarch-core` are removed and CI gates `--document-private-items` rustdoc (#1306).
 - Lints: clippy exempts tests from `unwrap_used`/`expect_used` via `clippy.toml`, `disallowed_methods` exemptions became `#[expect]`, every `#[allow]` carries a reason, and `.cargo/config.toml` denies build warnings (#1286).
+- TAR: the GNU volume label skip lives on `CheckedTarEntry`, so an unchecked entry cannot be classified as skippable (#TBD).
+- Lints: test-only helpers are `#[cfg(test)]`, the zip symlink cast states its real bound, the CLI interrupt guard uses `DropGuard`, and binding docs refer to `Password::MAX_LEN` (#TBD).
+- Tests: the grow-after-walk creation fixture and the 7z encrypted-block predicate are written once (#TBD).
+- Fuzzing: the fuzz crate lints clean under clippy as a CI step, and the `encrypted` oracle keys its empty-file exemption by path and encryption state (#TBD).
 
 ### Fixed
 

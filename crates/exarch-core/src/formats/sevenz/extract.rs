@@ -309,18 +309,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let plain = ReadFaults::new(ReadFamily::SevenZ, Some(&tap));
         let sealed = plain.decrypting(crate::EncryptionRefusal::WrongPasswordOrCorrupt);
         let header = &self.header;
-        let faults_of = |block: Option<BlockIndex>| {
+        let faults_and_cipher = |block: Option<BlockIndex>| {
             if block.is_some_and(|block| header.is_block_encrypted(block)) {
-                sealed
+                (sealed, BlockCipher::Aes)
             } else {
-                plain
-            }
-        };
-        let block_cipher = |block: Option<BlockIndex>| {
-            if block.is_some_and(|block| header.is_block_encrypted(block)) {
-                BlockCipher::Aes
-            } else {
-                BlockCipher::Plain
+                (plain, BlockCipher::Plain)
             }
         };
         let mut file_position = 0_usize;
@@ -328,7 +321,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut each = |entry: &sevenz_rust2::ArchiveEntry,
                         reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
-            let faults = faults_of(header.file_block(file_position));
+            let (faults, _) = faults_and_cipher(header.file_block(file_position));
             file_position = file_position.saturating_add(1);
             let kind = match SevenZClass::of(entry).present(&entry.name) {
                 Ok(Some(kind)) => kind,
@@ -391,8 +384,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 Err(ArchiveError::partial_or(
                     report,
                     pending_error.take().unwrap_or_else(|| {
-                        let cipher = block_cipher(block);
-                        outside_callback(error, faults_of(block), cipher)
+                        let (faults, cipher) = faults_and_cipher(block);
+                        outside_callback(error, faults, cipher)
                     }),
                 ))
             }

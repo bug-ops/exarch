@@ -167,7 +167,7 @@ fn setuid_setgid_and_sticky_are_stripped_and_world_write_follows_policy() {
 #[cfg(unix)]
 #[test]
 fn the_bits_match_tar_for_the_same_stored_mode() {
-    let modes = [0o4755_u32, 0o2755, 0o6755, 0o777, 0o640];
+    let modes = [0o4755_u32, 0o2755, 0o6755, 0o1755, 0o777, 0o640];
     let mut builder = tar::Builder::new(Vec::new());
     for (index, mode) in modes.iter().enumerate() {
         let mut header = tar::Header::new_gnu();

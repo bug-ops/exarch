@@ -57,6 +57,27 @@ impl std::io::Read for OverReporting {
     }
 }
 
+/// Appends to the file when its entry starts, which is after the walk and
+/// before the source is opened.
+pub(crate) struct GrowOnStart(pub(crate) std::path::PathBuf);
+
+impl crate::ProgressCallback for GrowOnStart {
+    fn on_entry_start(&mut self, _path: &std::path::Path, _position: crate::EntryPosition) {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.0)
+            .unwrap()
+            .write_all(&[0u8; 4096])
+            .unwrap();
+    }
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_entry_complete(&mut self, _path: &std::path::Path) {}
+
+    fn on_complete(&mut self) {}
+}
+
 /// A relative path of exactly `len` bytes made of 100-byte components.
 #[must_use]
 pub(crate) fn path_of_len(len: usize) -> String {

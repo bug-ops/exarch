@@ -164,6 +164,10 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features ${{ matrix.package-filter }} -- -D warnings
 
+      - name: Run Clippy (fuzz crate)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+
   documentation:
     name: Documentation
     runs-on: ubuntu-latest

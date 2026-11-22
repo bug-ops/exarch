@@ -111,8 +111,8 @@ pub struct MemoryFileEntry {
     /// The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
     /// `Buffer`; input parameters accept both).
     pub data: Uint8Array,
-    /// Permission bits after setuid and setgid were stripped; absent when the
-    /// archive carries no mode.
+    /// Permission bits after setuid, setgid and sticky were stripped; absent
+    /// when the archive carries no mode.
     pub mode: Option<u32>,
 }
 

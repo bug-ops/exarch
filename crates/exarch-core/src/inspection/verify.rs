@@ -499,7 +499,7 @@ fn verify_entry(
     if let Some(mode) = entry.mode
         && !left_out
         && !entry.kind.is_link()
-        && let Err(e) = check_permissions(&entry.path, mode, config)
+        && let Err(e) = check_permissions(&entry.path, mode, &entry.kind, config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
@@ -823,9 +823,20 @@ fn unread_targets_issue(
     })
 }
 
-fn check_permissions(path: &Path, mode: RawMode, config: &SecurityConfig) -> Result<()> {
+/// Directory modes are never restored, so a sticky bit on one is not an issue;
+/// the sanitizer clears it only for regular files.
+fn check_permissions(
+    path: &Path,
+    mode: RawMode,
+    kind: &ManifestEntryKind,
+    config: &SecurityConfig,
+) -> Result<()> {
     let sanitized = sanitize_permissions(mode, config);
-    (sanitized.as_u32() == mode.get()).ok_or_else(|| ArchiveError::InvalidPermissions {
+    let expected = match kind {
+        ManifestEntryKind::Directory => sanitized.as_u32() | (mode.get() & 0o1000),
+        _ => sanitized.as_u32(),
+    };
+    (expected == mode.get()).ok_or_else(|| ArchiveError::InvalidPermissions {
         path: path.to_path_buf(),
         mode,
     })
@@ -1142,6 +1153,34 @@ mod tests {
                 .issues()
                 .iter()
                 .any(|i| i.category() == IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn sticky_regular_file_is_a_permission_finding() {
+        let manifest = manifest_with_mode("f", file(), 0o1755);
+        let report = verify_manifest(&manifest, &link_config(), None);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn sticky_directory_is_not_a_permission_finding() {
+        let manifest = manifest_with_mode("d", ManifestEntryKind::Directory, 0o1755);
+        let report = verify_manifest(&manifest, &link_config(), None);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
             "{:?}",
             report.issues()
         );
@@ -2091,6 +2130,53 @@ mod tests {
                 .iter()
                 .any(|i| i.category() == IssueCategory::InvalidPermissions),
             "Should have InvalidPermissions issue for setuid"
+        );
+    }
+
+    fn sticky_tar(entry_type: tar::EntryType, name: &str) -> NamedTempFile {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_entry_type(entry_type);
+        header.set_size(0);
+        header.set_mode(0o1755);
+        header.set_cksum();
+        builder.append(&header, &b""[..]).unwrap();
+        temp_file.write_all(&builder.into_inner().unwrap()).unwrap();
+        temp_file.flush().unwrap();
+        temp_file
+    }
+
+    #[test]
+    fn test_verify_archive_sticky_file_is_flagged() {
+        let tar = sticky_tar(tar::EntryType::Regular, "sticky.txt");
+
+        let report = verify_archive(tar.path(), &SecurityConfig::default()).unwrap();
+
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category() == IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn test_verify_archive_sticky_directory_is_not_flagged() {
+        let tar = sticky_tar(tar::EntryType::Directory, "tmpdir/");
+
+        let report = verify_archive(tar.path(), &SecurityConfig::default()).unwrap();
+
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category() != IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
         );
     }
 

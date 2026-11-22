@@ -44,8 +44,9 @@ pub(super) struct FileWrite<'a> {
 /// rename), consuming the [`QuotaPermit`] that authorized the write.
 ///
 /// Used for the common case where nothing currently occupies `leaf`
-/// (issue #492): creates `leaf` itself via [`VettedDir::create_new_deferred`],
-/// giving the same `O_EXCL`+`O_NOFOLLOW` guarantee against a symlink race as
+/// (issue #492): creates `leaf` itself through [`common::create_file`]
+/// (`O_EXCL`+`O_NOFOLLOW` via [`VettedDir::create_new_deferred`]), giving the
+/// same guarantee against a symlink race as
 /// [`write_file_with_permit`]'s temp file and as TAR/ZIP's
 /// [`common::extract_file_with_permit`] — just without the two extra syscalls
 /// (create+rename of a temp file) that only matter when something needs to be
@@ -53,6 +54,10 @@ pub(super) struct FileWrite<'a> {
 /// pre-existing occupant (see [`DestOccupancy`](super::host)); when it does,
 /// use [`write_file_with_permit`] instead so a decode failure mid-stream
 /// cannot leave a truncated file where the original stood.
+///
+/// The entry's sanitized mode, when it has one, is applied through the open
+/// descriptor (`fchmod`) by [`common::finish_written`], after the
+/// download-origin mark when the run writes one.
 ///
 /// `parent` is the pinned directory handle the caller obtained from the
 /// directory walker; the create, the cleanup on failure and every later step
@@ -149,8 +154,11 @@ pub(super) fn write_file_direct(
 /// monotonic counter, so a pre-planted symlink (dangling or not) at a
 /// predicted temp name used to be silently followed by `File::create`,
 /// writing archive content outside the extraction root. The temp file is
-/// now created via [`VettedDir::create_new_deferred`] (`O_EXCL | O_NOFOLLOW`),
-/// which refuses any pre-existing name instead of following it. On collision
+/// now created through [`common::create_temp_sibling_with`]
+/// (`O_EXCL | O_NOFOLLOW` via [`VettedDir::create_new_deferred`]), which
+/// refuses any pre-existing name instead of following it; the entry's
+/// sanitized mode is applied to the temp file through its descriptor before the
+/// rename. On collision
 /// (`ErrorKind::AlreadyExists`), a fresh counter value is drawn and creation
 /// is retried up to [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] times. The temp
 /// file, the rename and the cleanup are all relative to `parent` (issue #818).

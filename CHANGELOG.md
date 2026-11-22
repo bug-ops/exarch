@@ -9,26 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#PR).
-- Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#PR).
-- Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#PR).
+- Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#1306).
+- Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
+- Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
 
 ### Changed
 
-- Creation: a named source and a walked file are decided by one classifier, and TAR creation re-checks `max_file_size` on the opened file (#PR).
-- TAR: each PAX header body is parsed once per entry (#PR).
-- Dependencies: `zip` ~9.8, and the weekly zip-drift job tests the newest 9.x again (#PR).
-- Fuzzing: `fuzz/Cargo.lock` follows the workspace version and the release steps refresh it, and the `encrypted` target accepts an empty file only for an unencrypted entry (#PR).
-- CLI: `exarch-cli` has a disallowed-methods clippy list so path-based filesystem calls are linted (#PR).
-- Docs: redundant explicit link targets in `exarch-core` are removed and CI gates `--document-private-items` rustdoc (#PR).
+- Creation: a named source and a walked file are decided by one classifier, and TAR creation re-checks `max_file_size` on the opened file (#1306).
+- TAR: each PAX header body is parsed once per entry (#1306).
+- Dependencies: `zip` ~9.8, and the weekly zip-drift job tests the newest 9.x again (#1306).
+- Fuzzing: `fuzz/Cargo.lock` follows the workspace version and the release steps refresh it, and the `encrypted` target accepts an empty file only for an unencrypted entry (#1306).
+- CLI: `exarch-cli` has a disallowed-methods clippy list so path-based filesystem calls are linted (#1306).
+- Docs: redundant explicit link targets in `exarch-core` are removed and CI gates `--document-private-items` rustdoc (#1306).
 - Lints: clippy exempts tests from `unwrap_used`/`expect_used` via `clippy.toml`, `disallowed_methods` exemptions became `#[expect]`, every `#[allow]` carries a reason, and `.cargo/config.toml` denies build warnings (#1286).
 
 ### Fixed
 
-- 7z: extraction restores the stored Unix permission bits of regular files through the TAR/ZIP sanitizer (#PR).
-- 7z: `extract` reports a wrong password on an AES PPMd block as `wrong_password_or_corrupt`, like `verify` (#PR).
-- TAR: a GNU volume label (`V`) without data and without a local extension header before it is skipped by `extract`, `list` and `verify`; other labels are `TAR_AMBIGUITY` (#PR).
-- TAR: `list` reports the modification time of a local PAX `mtime` record (#PR).
+- 7z: extraction restores the stored Unix permission bits of regular files through the TAR/ZIP sanitizer (#1306).
+- 7z: `extract` reports a wrong password on an AES PPMd block as `wrong_password_or_corrupt`, like `verify` (#1306).
+- TAR: a GNU volume label (`V`) without data and without a local extension header before it is skipped by `extract`, `list` and `verify`; other labels are `TAR_AMBIGUITY` (#1306).
+- TAR: `list` reports the modification time of a local PAX `mtime` record (#1306).
 - TAR: a PAX record whose value contains a newline is accepted when its declared length frames it, so archives with binary `SCHILY.xattr.*` values extract again; ambiguous records stay refused (#1291).
 - TAR: the PAX sparse-map record `SUN.holesdata` is refused as an unsupported record, like `GNU.sparse.*` (#1291).
 - Creation: a single source file over `--max-file-size` is skipped as `over_max_file_size` in TAR as well as ZIP (#1291).

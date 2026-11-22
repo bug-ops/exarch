@@ -97,6 +97,8 @@ const PINNED: &[(&str, Outcome)] = &[
     ("F49-pax-record-empty-line", Ambiguous),
     ("F50-pax-size-underscore", Ambiguous),
     ("F51-number-size-plus", Ambiguous),
+    // Deliberately differs from the corpus verdict "reject": a zero-size label
+    // is skipped (#1297, spec 002 FR-079).
     ("F52-type-gnu-volume-label", Extracted),
     ("F53-type-gnu-old-long-name", Security),
     ("F54-format-pax-header-without-magic", Ambiguous),

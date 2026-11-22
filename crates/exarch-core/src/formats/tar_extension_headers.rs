@@ -528,13 +528,15 @@ fn check_volume_label<R: Read>(entry: &Entry<'_, R>, walk: &WindowWalk<'_>) -> R
     if let Some(&kind) = walk.extensions.first() {
         return Err(TarAmbiguity::ExtensionBeforeLabel { kind }.into());
     }
-    let raw_size = entry
+    // `entry.size()` differs from the raw field only through a merged PAX
+    // `size`, which needs a local header in the window, refused above (or by
+    // the walk).
+    let size = entry
         .header()
         .entry_size()
         .map_err(|_| TarAmbiguity::NonCanonicalNumber {
             field: TarHeaderField::Size,
         })?;
-    let size = raw_size.max(entry.size());
     if size == 0 {
         return Ok(());
     }

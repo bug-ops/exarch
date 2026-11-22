@@ -1073,7 +1073,10 @@ export declare class SecurityConfig {
    * if size is negative or zero, or while solid archives are not allowed.
    */
   withMaxSolidBlockMemory(size: number): this
-  /** Sets whether extracted files get the archive mode exactly instead of minus the umask. */
+  /**
+   * Sets whether extracted files get the archive mode exactly instead of
+   * minus the umask.
+   */
   withPreservePermissions(preserve: boolean): this
   /**
    * Adds an allowed file extension.
@@ -1230,7 +1233,10 @@ export declare class SecurityConfig {
   get maxFileCount(): number | null
   /** Maximum path depth. */
   get maxPathDepth(): number
-  /** Whether extracted files get the archive mode exactly instead of minus the umask. */
+  /**
+   * Whether extracted files get the archive mode exactly instead of minus
+   * the umask.
+   */
   get preservePermissions(): boolean
   /** Whether symlinks are allowed. */
   get allowSymlinks(): boolean

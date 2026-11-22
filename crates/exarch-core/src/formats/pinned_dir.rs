@@ -980,6 +980,7 @@ mod imp {
         /// With `mode`, the file is created owner-only and then set to exactly
         /// `mode` through the open descriptor (`fchmod`), so the umask cannot
         /// reduce it and no path is resolved again.
+        #[cfg(test)]
         pub(crate) fn create_new(
             &self,
             name: Leaf<'_>,

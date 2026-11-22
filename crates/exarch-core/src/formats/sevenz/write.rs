@@ -9,15 +9,16 @@ use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_cancellable;
 use crate::formats::common;
+use crate::formats::common::ModeTiming;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
-use crate::formats::pinned_dir::PendingMode;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
 use crate::mark::MarkRun;
 use crate::security::fs_view::FsView;
+use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -35,6 +36,7 @@ pub(super) struct FileWrite<'a> {
     pub(super) copy_buffer: &'a mut CopyBuffer,
     pub(super) permit: QuotaPermit,
     pub(super) marking: Option<&'a MarkRun>,
+    pub(super) mode: Option<SanitizedMode>,
     pub(super) progress: &'a mut dyn ProgressCallback,
 }
 
@@ -91,9 +93,10 @@ pub(super) fn write_file_direct(
         copy_buffer,
         permit,
         marking,
+        mode,
         progress,
     } = write;
-    let file = parent.create_new(leaf, None)?;
+    let (file, pending) = common::create_file(parent, leaf, mode, ModeTiming::of(marking))?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
     // since this branch only runs when nothing occupied `leaf` beforehand, it
@@ -117,7 +120,7 @@ pub(super) fn write_file_direct(
     )
     .map_err(|error| faults.classify(error))?;
     writer.flush()?;
-    common::finish_written(writer, PendingMode::applied(), marking)?;
+    common::finish_written(writer, pending, marking)?;
     guard.persist();
     Ok(bytes_written)
 }
@@ -212,10 +215,17 @@ pub(super) fn write_file_with_permit_using(
         copy_buffer,
         permit,
         marking,
+        mode,
         progress,
     } = write;
-    let (temp, temp_file) =
-        common::create_temp_sibling(parent, leaf, None, &replace, next_candidate)?;
+    let (temp, temp_file, pending) = common::create_temp_sibling_with(
+        parent,
+        leaf,
+        mode,
+        ModeTiming::of(marking),
+        &replace,
+        next_candidate,
+    )?;
 
     // Declared before `writer` takes ownership of `temp_file` below, for the
     // same reason as write_file_direct's `guard`: reverse-declaration-order
@@ -238,7 +248,7 @@ pub(super) fn write_file_with_permit_using(
     writer.flush()?;
     // Closed before the rename: renaming a still-open file is fine on Unix but
     // the handle should not outlive its purpose regardless.
-    common::finish_written(writer, PendingMode::applied(), marking)?;
+    common::finish_written(writer, pending, marking)?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 

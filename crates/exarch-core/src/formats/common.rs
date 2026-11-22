@@ -486,37 +486,6 @@ pub(crate) fn record_file_written(
 /// directory resolves on the first or second attempt.
 pub(crate) const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
-/// Creates a new file in `dir` under the first free name drawn from
-/// `next_candidate`, retrying on `AlreadyExists` up to
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
-///
-/// Each attempt uses [`VettedDir::create_new`] (`O_EXCL`), so a planted entry
-/// at a predicted name is never followed or reused. `entry` names the file the
-/// temp file stands in for, for the error text only. The permit proves the
-/// policy allows replacing `entry`, which the temp file exists to do.
-///
-/// # Errors
-///
-/// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
-/// every attempt collided.
-pub(crate) fn create_temp_sibling(
-    dir: &VettedDir,
-    entry: Leaf<'_>,
-    mode: Option<SanitizedMode>,
-    replace: &ReplacePermit,
-    next_candidate: impl FnMut() -> TempLeaf,
-) -> std::io::Result<(TempLeaf, File)> {
-    create_temp_sibling_with(
-        dir,
-        entry,
-        mode,
-        ModeTiming::AtCreate,
-        replace,
-        next_candidate,
-    )
-    .map(|(temp, file, _)| (temp, file))
-}
-
 /// When a created file is given its mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModeTiming {
@@ -527,14 +496,22 @@ pub(crate) enum ModeTiming {
     AfterMark,
 }
 
-/// [`create_temp_sibling`] that can leave the mode to the caller.
+/// Creates a new file in `dir` under the first free name drawn from
+/// `next_candidate`, retrying on `AlreadyExists` up to
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
+///
+/// Each attempt uses [`create_file`] (`O_EXCL`), so a planted entry at a
+/// predicted name is never followed or reused. `entry` names the file the temp
+/// file stands in for, for the error text only. The permit proves the policy
+/// allows replacing `entry`, which the temp file exists to do.
 ///
 /// With [`ModeTiming::AfterMark`] the returned [`PendingMode`] is still to be
 /// applied; with [`ModeTiming::AtCreate`] it is already spent.
 ///
 /// # Errors
 ///
-/// See [`create_temp_sibling`].
+/// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
+/// every attempt collided.
 pub(crate) fn create_temp_sibling_with(
     dir: &VettedDir,
     entry: Leaf<'_>,

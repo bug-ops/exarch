@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use super::SevenZArchive;
 use super::StoredLinkTarget;
+use super::classify;
 use super::classify::SevenZClass;
 use super::classify::SevenZKind;
 use super::classify::abort_with;
@@ -24,10 +25,12 @@ use super::decode::DecodeFailure;
 use super::decode::decode_archive_entries;
 use super::header::BlockIndex;
 use super::iter_sevenz_refusals;
+use super::links::BlockCipher;
 use super::links::read_sevenz_link_target;
 use super::lzma2::DecodeKnobs;
 use super::push_anti_item_warning;
 use crate::ArchiveError;
+use crate::EncryptionRefusal;
 use crate::EntryPosition;
 use crate::EntryTotal;
 use crate::ExtractionReport;
@@ -36,6 +39,7 @@ use crate::RepeatedPaths;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::Violation;
 use crate::formats::common;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::occupant::repeated_path_between;
@@ -312,6 +316,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 plain
             }
         };
+        let block_cipher = |block: Option<BlockIndex>| {
+            if block.is_some_and(|block| header.is_block_encrypted(block)) {
+                BlockCipher::Aes
+            } else {
+                BlockCipher::Plain
+            }
+        };
         let mut file_position = 0_usize;
 
         let mut each = |entry: &sevenz_rust2::ArchiveEntry,
@@ -379,9 +390,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 };
                 Err(ArchiveError::partial_or(
                     report,
-                    pending_error
-                        .take()
-                        .unwrap_or_else(|| outside_callback(error, faults_of(block))),
+                    pending_error.take().unwrap_or_else(|| {
+                        let cipher = block_cipher(block);
+                        outside_callback(error, faults_of(block), cipher)
+                    }),
                 ))
             }
         }
@@ -389,9 +401,21 @@ impl<R: Read + Seek> SevenZArchive<R> {
 }
 
 /// The error `sevenz-rust2` raised outside the per-entry callback, such as
-/// while draining an entry nobody asked for: a read error is a decoder verdict
-/// unless the source faulted.
-fn outside_callback(error: sevenz_rust2::Error, faults: ReadFaults<'_>) -> ArchiveError {
+/// while draining an entry nobody asked for or while building a decoder: a read
+/// error is a decoder verdict unless the source faulted, and any other failure
+/// of an AES block is a verdict on the key, as `verify` reports it.
+fn outside_callback(
+    error: sevenz_rust2::Error,
+    faults: ReadFaults<'_>,
+    cipher: BlockCipher,
+) -> ArchiveError {
+    if cipher.refuses_key(&error) {
+        return Violation::Encrypted {
+            reason: EncryptionRefusal::WrongPasswordOrCorrupt,
+            name: None,
+        }
+        .into();
+    }
     match error {
         sevenz_rust2::Error::Io(io_error, _) => faults.classify_read(io_error),
         other => ArchiveError::from(other),
@@ -431,7 +455,7 @@ pub(super) fn process_entry<T: ExtractTarget>(
             let request = FileRequest {
                 path,
                 size,
-                mode: None,
+                mode: classify::file_permissions(entry),
             };
             if let Admission::Admit(admitted) = target.validate_file(request, tally)? {
                 let mut reader = reader;

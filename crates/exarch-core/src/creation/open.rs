@@ -7,8 +7,12 @@
 //! leave an archive entry whose data disagrees with its header.
 
 use crate::ArchiveError;
+use crate::Limit;
 use crate::Result;
+use crate::Skip;
 use crate::creation::source::source_error;
+use crate::creation::walker::FilteredEntry;
+use crate::creation::walker::over_limit;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 #[cfg(not(unix))]
@@ -18,6 +22,7 @@ use std::fs::File;
 use std::fs::Metadata;
 use std::io;
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 /// Whether a creation source may be reached through a symbolic link.
@@ -166,6 +171,33 @@ pub(crate) fn open_source(
         return Err(changed(path));
     }
     Ok(VerifiedSource { file, metadata })
+}
+
+/// The outcome of opening a source under the per-file size limit.
+#[derive(Debug)]
+pub(crate) enum Opened {
+    /// The opened handle is within the limit.
+    Within(VerifiedSource),
+
+    /// The file grew past the limit since the walk, so it is left out.
+    OverLimit(Skip),
+}
+
+/// Opens the source of `entry` like [`open_source`], then applies `limit` to
+/// the size of the opened handle, which can differ from the size the walk saw.
+///
+/// # Errors
+///
+/// The errors of [`open_source`].
+pub(crate) fn open_within_limit(
+    entry: &FilteredEntry,
+    walked: WalkedSource,
+    links: LinkPolicy,
+    limit: Limit<NonZeroU64>,
+) -> Result<Opened> {
+    let source = open_source(&entry.path, walked, links)?;
+    Ok(over_limit(limit, source.size(), &entry.archive_path)
+        .map_or_else(|| Opened::Within(source), Opened::OverLimit))
 }
 
 fn changed(path: &Path) -> ArchiveError {

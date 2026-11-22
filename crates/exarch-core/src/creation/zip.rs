@@ -16,8 +16,9 @@ use crate::ZipBombScope;
 use crate::copy::CancelClock;
 use crate::creation::config::CreationConfig;
 use crate::creation::open::LinkPolicy;
+use crate::creation::open::Opened;
 use crate::creation::open::WalkedSource;
-use crate::creation::open::open_source;
+use crate::creation::open::open_within_limit;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::progress::check_cancelled;
 use crate::creation::report::CreationReport;
@@ -278,17 +279,12 @@ impl<'a, E: Executor> Staging<'a, E> {
         walked: WalkedSource,
         links: LinkPolicy,
     ) -> Result<Staged<E::Pending>> {
-        let source = match open_source(&entry.path, walked, links) {
-            Ok(source) => source,
+        let source = match open_within_limit(entry, walked, links, self.config.max_file_size) {
+            Ok(Opened::Within(source)) => source,
+            Ok(Opened::OverLimit(skip)) => return Ok(Staged::Skipped(skip)),
             Err(error) => return Ok(Staged::Failed(error)),
         };
         let size = source.size();
-        if !self.config.max_file_size.admits(size) {
-            return Ok(Staged::Skipped(Skip::new(
-                SkipKind::OverMaxFileSize,
-                entry.archive_path.to_path_buf(),
-            )));
-        }
         let (metadata, reader) = source.into_exact();
         let name = match normalize_zip_path(&entry.archive_path) {
             Ok(name) => name,
@@ -1159,5 +1155,46 @@ mod tests {
         assert!(has_file1, "Expected file1.txt in progress callbacks");
         assert!(has_file2, "Expected file2.txt in progress callbacks");
         assert!(has_file3, "Expected file3.txt in progress callbacks");
+    }
+
+    /// Appends to the file when its entry starts, which is after the walk and
+    /// before the source is opened.
+    struct GrowOnStart(std::path::PathBuf);
+
+    impl crate::ProgressCallback for GrowOnStart {
+        fn on_entry_start(&mut self, _path: &Path, _position: crate::EntryPosition) {
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&self.0)
+                .unwrap()
+                .write_all(&[0u8; 4096])
+                .unwrap();
+        }
+
+        fn on_bytes_written(&mut self, _bytes: u64) {}
+
+        fn on_entry_complete(&mut self, _path: &Path) {}
+
+        fn on_complete(&mut self) {}
+    }
+
+    /// #1288
+    #[test]
+    fn test_create_zip_skips_a_file_that_grew_after_the_walk() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("a.bin");
+        fs::write(&file, [0u8; 10]).unwrap();
+        let config = CreationConfig::default().with_max_file_size(crate::non_zero!(100));
+        let mut grow = GrowOnStart(file.clone());
+        let mut buf = std::io::Cursor::new(Vec::new());
+
+        let report = crate::CreateRequest::new(&config)
+            .with_progress(&mut grow)
+            .write(crate::ArchiveWriter::zip(&mut buf), &[file.as_path()])
+            .unwrap();
+
+        assert_eq!(report.files_added, 0);
+        assert_eq!(report.skipped.count(SkipKind::OverMaxFileSize), 1);
     }
 }

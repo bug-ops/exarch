@@ -190,6 +190,21 @@ to archive parsers, decryption, `extract_to_sink` or `ArchiveReader::detect` mus
 [`fuzz/README.md`](fuzz/README.md) for running targets and turning a crash into
 a regression test.
 
+### Linux Sandbox Tests
+
+The `--sandbox` (Landlock) tests in `exarch-cli` (`tests/sandbox.rs`,
+`tests/sandbox_stage.rs`, `tests/sandbox_spool.rs`, `tests/password.rs`) only enforce on Linux. On
+another host, run them in a container with Docker:
+
+```bash
+.github/scripts/linux-sandbox-docker.sh --require
+```
+
+The script copies the tree into a `rust` container and prints a `probe:` line;
+trust the run only if it says `landlock enforced`. `--require` sets
+`EXARCH_REQUIRE_LANDLOCK=1`, so a kernel without Landlock fails instead of
+skipping. CI runs the same tests in the `test` job of `ci.yml`.
+
 ### Test Fixtures
 
 7z fixtures in `crates/exarch-core/tests/fixtures/` are generated, not hand-edited:
@@ -265,6 +280,12 @@ fn test_cve_xxxx_description() {
 # Rust only
 cargo bench -p exarch-core --features testing
 ```
+
+Record numbers only from an idle host: run benchmarks serially as the last
+step, with no parallel builds or test runs, and only when the 1-minute load
+average (`uptime`) is at or below about 7. Note the load next to each result;
+a result taken above that bar is directional only and must not be used to
+claim or dismiss a regression.
 
 ## Pull Request Process
 

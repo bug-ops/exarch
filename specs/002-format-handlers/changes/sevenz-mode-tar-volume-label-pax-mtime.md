@@ -24,7 +24,7 @@ related:
 
 WHEN a 7z entry classified as a regular file (`SevenZKind::File`) has `has_windows_attributes` set and the Unix-extension flag `0x8000` set in `windows_attributes`, THE SYSTEM SHALL restore its permission bits: the raw mode is `(windows_attributes >> 16) & 0o7777` (file-type bits only dropped, the same mask as TAR; #1305 replaced the earlier `& 0o777`), it goes through the same `sanitize_permissions` / `SanitizedMode` pipeline as TAR and ZIP (setuid, setgid and sticky stripped, world-writable stripped unless `allowed.world_writable` admits it; see the 001-security-pipeline delta `sanitizer-clears-sticky-bit`), and the file is created with that mode by the host target and handed to an `EntrySink` as the same `SanitizedMode`. The flag is read in exactly one place, shared with the file-type classification of FR-043, so type and permission never come from different conditions. Rules:
 
-- No attributes, or attributes without `0x8000`, mean no mode: the file keeps the default mode (`0666 & ~umask`).
+- No attributes, or attributes without `0x8000`, mean no mode: the file gets `0666 & ~umask` under both policies.
 - A flag set with no file-type bits is a regular file and its mode is restored.
 - A derived mode of `0` is applied as-is (parity with `7zz x`, TAR and ZIP).
 - Directories, symlinks, reparse points, special files, kind contradictions, undefined types and anti-items get no mode, and a mode field never changes whether they are refused (FR-043 unchanged); a directory keeps the default directory mode.
@@ -33,7 +33,8 @@ WHEN a 7z entry classified as a regular file (`SevenZKind::File`) has `has_windo
 - WHEN `--force` replaces an existing file, the temporary sibling carries the archive's mode before the rename (FR-052), so the replacement ends with the archive's mode, not the previous occupant's.
 - A duplicate entry skipped by the duplicate policy never changes the mode of the file already written.
 - Mode restore changes no admission outcome, quota charge, ratio check, duplicate decision or refusal; a hostile attribute word (arbitrary high 16 bits) never panics.
-- `list` and `verify` are unchanged: 7z `ArchiveEntry.mode` stays `None`, so no mode is reported (the fallback of the 7z mode draft's FR-012; reporting a mode is a separate public-API decision).
+- `list` reports the attribute mode when the Unix flag is set (`ArchiveEntry.mode`), and `verify` judges it like TAR and ZIP (#1307; see the 001-security-pipeline delta `sanitizer-clears-sticky-bit`, FR-060).
+- Which sanitized mode the file ends with follows `PermissionPolicy` (#1308; [[001-security-pipeline/spec]] FR-059): `Preserve` the sanitized mode exactly, `Normalize` the sanitized mode minus the process umask.
 
 **Priority**: must
 

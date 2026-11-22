@@ -1408,7 +1408,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();
@@ -1443,7 +1443,7 @@ mod tests {
             .unwrap();
 
         let tar_data = builder.into_inner().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = TarArchive::new(Cursor::new(tar_data), &config);
 
         let temp = TempDir::new().unwrap();

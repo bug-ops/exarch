@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
 - Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
 - Permissions: extraction clears the sticky bit of regular files in every format, so a TAR file with the sticky bit extracts like ZIP and 7z, and `verify` reports a stored sticky bit on a TAR regular file as `InvalidPermissions` like setuid and setgid (#1309).
+- Permissions: `extract` honors the permission policy: without `--preserve-permissions` a file gets its archive mode minus the umask, with it the exact sanitized archive mode, in TAR, ZIP and 7z (#PRNUM).
+- ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits of ZIP files and the mode of 7z files, so `verify --strict` can exit 3 on archives that passed before (#PRNUM).
 
 ### Changed
 
@@ -27,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lints: test-only helpers are `#[cfg(test)]`, the zip symlink cast states its real bound, the CLI interrupt guard uses `DropGuard`, and binding docs refer to `Password::MAX_LEN` (#1309).
 - Tests: the grow-after-walk creation fixture and the 7z encrypted-block predicate are written once (#1309).
 - Fuzzing: the fuzz crate lints clean under clippy as a CI step, and the `encrypted` oracle keys its empty-file exemption by path and encryption state (#1309).
+- Tests: a Docker recipe runs the Linux sandbox tests with Landlock enforced, and the serial idle-host benchmark step is documented (#PRNUM).
 
 ### Fixed
 

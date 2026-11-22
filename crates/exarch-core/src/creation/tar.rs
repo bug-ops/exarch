@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(report.files_added, 1);
 
         let extract_dir = TempDir::new().unwrap();
-        let security_config = SecurityConfig::default();
+        let security_config = SecurityConfig::default().with_preserve_permissions(true);
         extract_archive(&output, extract_dir.path(), &security_config).unwrap();
 
         let extracted = extract_dir.path().join("test.txt");

@@ -55,7 +55,7 @@ Details that matter:
 
 ## 7z
 
-- `extract` restores `mode & 0o777` of a regular file that carries a Unix mode; setuid, setgid, and sticky never apply, and world-write follows `--allow-world-writable`. Entries without a Unix mode, directories, and symlinks keep the default mode. `list` and `verify` output is unchanged.
+- `extract` gives a regular file that carries a Unix mode `mode & 0o777` minus the umask (exactly, with `--preserve-permissions`); setuid, setgid, and sticky never apply, and world-write follows `--allow-world-writable`. Entries without a Unix mode, directories, and symlinks keep the default mode. `list -l` shows the stored mode; `verify` flags executables and special bits.
 - Symlink entries (Unix mode `0x8000` flag plus `S_IFLNK`) hold their target in the entry data:
   - `list` leaves it unread unless `--read-link-targets`.
   - `verify` without `--allow-symlinks` fails `symlinks not allowed`; with it, targets are validated only under `--check-integrity` (see [verify.md](verify.md)).

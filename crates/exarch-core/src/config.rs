@@ -251,6 +251,9 @@ closed_enum! {
 closed_enum! {
     /// Whether file modes from the archive (or the source tree) are kept.
     ///
+    /// On extraction only regular files are affected: directory modes are not
+    /// restored under either policy.
+    ///
     /// # Examples
     ///
     /// ```
@@ -263,10 +266,15 @@ closed_enum! {
     #[non_exhaustive]
     pub enum PermissionPolicy {
         /// Use the default mode instead of the recorded one.
+        ///
+        /// An extracted regular file gets the sanitized recorded mode minus the
+        /// process umask, as `tar` does without `-p`; execute bits are kept. A
+        /// file without a recorded mode gets `0666` minus the umask.
         Normalize => "normalize",
 
-        /// Keep the recorded mode. Setuid, setgid and sticky bits are still stripped,
-        /// and world-writable bits unless the configuration allows them.
+        /// Keep the recorded mode exactly, without the umask. Setuid, setgid and
+        /// sticky bits are still stripped, and world-writable bits unless the
+        /// configuration allows them.
         Preserve => "preserve",
     }
 }
@@ -814,7 +822,9 @@ pub struct SecurityConfig {
     /// Use this to enable symlinks, hardlinks, absolute paths, etc.
     pub allowed: AllowedFeatures,
 
-    /// Whether file permissions from the archive are preserved.
+    /// Whether extracted files keep the archive mode exactly
+    /// ([`PermissionPolicy::Preserve`]) or minus the umask
+    /// ([`PermissionPolicy::Normalize`], the default).
     pub permissions: PermissionPolicy,
 
     /// Which file extensions are extracted; [`ExtensionFilter::Any`] admits
@@ -1308,7 +1318,9 @@ impl SecurityConfig {
         self
     }
 
-    /// Enables or disables preserving file permissions from the archive.
+    /// Sets whether extracted files get the archive mode exactly
+    /// ([`PermissionPolicy::Preserve`]) or minus the umask
+    /// ([`PermissionPolicy::Normalize`], the default).
     ///
     /// # Examples
     ///

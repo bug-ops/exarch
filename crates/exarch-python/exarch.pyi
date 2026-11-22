@@ -431,7 +431,7 @@ class SecurityConfig:
         ...
 
     def with_preserve_permissions(self, preserve: bool = True) -> SecurityConfig:
-        """Sets whether to preserve permissions from archive."""
+        """Sets whether extracted files get the archive mode exactly instead of minus the umask."""
         ...
 
     def add_allowed_extension(self, ext: str) -> SecurityConfig:
@@ -561,7 +561,7 @@ class SecurityConfig:
     def max_path_depth(self, value: int) -> None: ...
     @property
     def preserve_permissions(self) -> bool:
-        """Whether to preserve file permissions from archive (default: False)."""
+        """Whether extracted files get the archive mode exactly instead of minus the umask (default: False)."""
         ...
 
     @preserve_permissions.setter

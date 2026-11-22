@@ -1986,7 +1986,7 @@ mod tests {
 
         let zip_data = zip.finish().unwrap().into_inner();
         let cursor = Cursor::new(zip_data);
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = ZipArchive::new(cursor, &config).unwrap();
 
         let temp = TempDir::new().unwrap();
@@ -2020,7 +2020,7 @@ mod tests {
 
         let zip_data = zip.finish().unwrap().into_inner();
         let cursor = Cursor::new(zip_data);
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = ZipArchive::new(cursor, &config).unwrap();
 
         let temp = TempDir::new().unwrap();
@@ -2054,7 +2054,7 @@ mod tests {
 
         let zip_data = zip.finish().unwrap().into_inner();
         let cursor = Cursor::new(zip_data);
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = ZipArchive::new(cursor, &config).unwrap();
 
         let temp = TempDir::new().unwrap();
@@ -2088,7 +2088,7 @@ mod tests {
 
         let zip_data = zip.finish().unwrap().into_inner();
         let cursor = Cursor::new(zip_data);
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().with_preserve_permissions(true);
         let archive = ZipArchive::new(cursor, &config).unwrap();
 
         let temp = TempDir::new().unwrap();

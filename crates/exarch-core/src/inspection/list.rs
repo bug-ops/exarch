@@ -43,6 +43,7 @@ use crate::formats::sevenz::SevenZHeader;
 use crate::formats::sevenz::SevenZKind;
 use crate::formats::sevenz::StoredLinkTarget;
 use crate::formats::sevenz::deliver_undecoded_links;
+use crate::formats::sevenz::file_permissions;
 use crate::formats::sevenz::is_decode_announced;
 use crate::formats::sevenz::open_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
@@ -742,7 +743,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let size = entry.size();
         let compression = EntryCompression::Entry(Compressed(entry.compressed_size()));
-        let mode = entry.unix_mode().map(|m| RawMode::new(m & 0o7777));
+        let mode = zip_stored_mode(&entry);
         #[expect(
             clippy::cast_sign_loss,
             reason = "the value is non-negative at this point"
@@ -1073,7 +1074,7 @@ fn list_sevenz_archive(
             path,
             kind: manifest_entry_kind(entry_type, target, size),
             compression,
-            mode: None,
+            mode: file_permissions(entry),
             modified,
             encryption: EntryEncryption::from_flag(
                 header
@@ -1236,6 +1237,25 @@ fn convert_tar_entry_type(tar_type: tar::EntryType) -> Result<ManifestEntryType>
         TarNode::Directory => ManifestEntryType::Directory,
         TarNode::Symlink => ManifestEntryType::Symlink,
         TarNode::Hardlink => ManifestEntryType::Hardlink,
+    })
+}
+
+/// The permission bits a ZIP entry stores.
+///
+/// `ZipFile::unix_mode` clears setuid, setgid and sticky for every host
+/// system it reads the high attribute word for, so that word is read raw
+/// there. Only a DOS entry keeps the library's reading, which derives a mode
+/// from the DOS attributes and must not be taken for stored Unix bits.
+fn zip_stored_mode<R: std::io::Read + std::io::Seek>(
+    entry: &zip::read::ZipFile<'_, R>,
+) -> Option<RawMode> {
+    entry.unix_mode().map(|library_mode| {
+        let bits = if entry.system() == ::zip::System::Dos {
+            library_mode
+        } else {
+            entry.external_attributes() >> 16
+        };
+        RawMode::new(bits & 0o7777)
     })
 }
 

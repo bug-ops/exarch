@@ -123,7 +123,8 @@ pub enum MemoryEntry {
         /// The file's bytes.
         data: Vec<u8>,
         /// The permission bits after setuid, setgid and sticky were stripped,
-        /// if the archive carries any.
+        /// if the archive carries any; no umask is applied and the value does
+        /// not depend on the permission policy.
         mode: Option<SanitizedMode>,
     },
     /// A directory the archive names explicitly.

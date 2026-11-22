@@ -1,5 +1,6 @@
 //! File permission validation and sanitization.
 
+use crate::PermissionPolicy;
 use crate::SecurityConfig;
 
 /// A Unix permission mode exactly as an archive header records it.
@@ -71,6 +72,38 @@ impl SanitizedMode {
     #[must_use]
     pub fn as_u32(self) -> u32 {
         self.0
+    }
+}
+
+/// A sanitized mode together with how a created file receives it.
+///
+/// [`Umasked`](Self::Umasked) is `PermissionPolicy::Normalize`: the mode goes
+/// to the create call, so the kernel clears the umask bits, as `tar` does
+/// without `-p`. [`Exact`](Self::Exact) is `PermissionPolicy::Preserve` (and a
+/// hardlink copy of an on-disk target): the mode is set through the open
+/// descriptor and the umask cannot reduce it. The umask is never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateMode {
+    /// The mode minus the process umask.
+    Umasked(SanitizedMode),
+    /// Exactly the mode.
+    Exact(SanitizedMode),
+}
+
+impl CreateMode {
+    /// The way `policy` gives `mode` to a file.
+    pub(crate) const fn new(mode: SanitizedMode, policy: PermissionPolicy) -> Self {
+        match policy {
+            PermissionPolicy::Preserve => Self::Exact(mode),
+            PermissionPolicy::Normalize => Self::Umasked(mode),
+        }
+    }
+
+    /// The sanitized mode, before any umask.
+    pub(crate) const fn sanitized(self) -> SanitizedMode {
+        match self {
+            Self::Umasked(mode) | Self::Exact(mode) => mode,
+        }
     }
 }
 

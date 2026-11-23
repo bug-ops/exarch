@@ -89,6 +89,11 @@ jobs:
 
       - name: Publish crates to crates.io
         uses: katyo/publish-crates@02cc2f1ad653fb25c7d1ff9eb590a8a50d06186b # v2
+        env:
+          # Override .cargo/config.toml's [registry] global-min-publish-age cooldown:
+          # exarch-cli is published seconds after exarch-core and resolves the
+          # freshly published exarch-core from crates.io during cargo publish.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
         with:
           registry-token: ${{ steps.crates-io-auth.outputs.token }}
           ignore-unpublished-changes: true

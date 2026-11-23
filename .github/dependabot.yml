@@ -8,11 +8,7 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 10
-    # #627: half is held at 2.4.1 (2.5+ pulls zerocopy-derive on syn 2, a duplicate syn).
-    # Unpin once zerocopy-derive ships a stable release on syn 3 or half drops zerocopy.
     ignore:
-      - dependency-name: "half"
-        versions: [">=2.5"]
       # #854: a lone direct bump leaves two windows-sys versions and fails
       # cargo-deny `multiple-versions`; move it together with the transitive users.
       - dependency-name: "windows-sys"

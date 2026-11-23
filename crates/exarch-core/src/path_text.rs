@@ -155,7 +155,7 @@ fn push_wide(out: &mut String, text: &std::ffi::OsStr) {
 
     for unit in char::decode_utf16(text.encode_wide()) {
         match unit {
-            Ok(ch) => push_text(out, ch.encode_utf8(&mut [0; 4])),
+            Ok(ch) => push_text(out, ch.encode_utf8(&mut [0; char::MAX_LEN_UTF8])),
             Err(unpaired) => {
                 // Writing to a String cannot fail.
                 let _ = write!(out, "\\u{:04X}", unpaired.unpaired_surrogate());

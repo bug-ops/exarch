@@ -68,6 +68,12 @@ zeroize = "1.9.1"
 zip = { version = "~9.8", default-features = false }
 zstd = { version = "0.14", default-features = false }
 
+[workspace.lints.cargo]
+unused_dependencies = "warn"
+unused_workspace_dependencies = "warn"
+unused_workspace_package_fields = "warn"
+missing_lints_inheritance = "warn"
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

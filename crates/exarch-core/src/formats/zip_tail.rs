@@ -26,7 +26,6 @@ use std::rc::Rc;
 use zip::ZipArchive as ZipReader;
 use zip::read::ZipFile;
 
-use super::bounded_read::invalid_data;
 use super::bounded_read::read_prefix;
 use super::bounded_read::read_up_to;
 use super::chunk_search::ChunkPlan;
@@ -314,21 +313,25 @@ enum Decoded<R> {
     },
 }
 
-/// Whether the bytes at the start of `bytes` are a record a streaming reader
-/// acts on, by the rules the gap search applies inside the budget: a local
-/// header the reader takes something from, or the bare signature of a central
-/// directory or end record, which stops its listing.
-fn starts_reader_record(bytes: &[u8]) -> bool {
-    let Some(signature) = bytes.first_chunk::<4>() else {
-        return false;
-    };
-    match *signature {
-        LFH_SIGNATURE => bytes
-            .first_chunk::<LFH_FIXED_LEN>()
-            .is_some_and(is_reachable_header),
-        CDFH_SIGNATURE | EOCD_SIGNATURE | ZIP64_END_SIGNATURE => true,
-        _ => false,
-    }
+/// Kind of streaming-reader record signature found by [`holds_reader_record`].
+#[derive(Debug, Clone, Copy)]
+enum ReaderRecord {
+    LocalHeader,
+    DirectoryOrEnd,
+}
+
+/// Finds the first signature in `bytes` that a streaming reader acts on.
+fn find_reader_record(bytes: &[u8]) -> Option<(usize, ReaderRecord)> {
+    bytes
+        .array_windows::<4>()
+        .enumerate()
+        .find_map(|(index, sig)| match *sig {
+            LFH_SIGNATURE => Some((index, ReaderRecord::LocalHeader)),
+            CDFH_SIGNATURE | EOCD_SIGNATURE | ZIP64_END_SIGNATURE => {
+                Some((index, ReaderRecord::DirectoryOrEnd))
+            }
+            _ => None,
+        })
 }
 
 /// Whether the `compressed` bytes at `data_start` hold a record a streaming
@@ -347,46 +350,44 @@ pub(super) fn holds_reader_record<R: Read + Seek>(
     data_start: u64,
     compressed: u64,
 ) -> Result<bool> {
-    reader.seek(SeekFrom::Start(data_start))?;
-    let mut data = Read::take(
-        &mut *reader,
-        compressed.saturating_add(LFH_FIXED_LEN as u64),
-    );
-    let mut buf = vec![0u8; SCAN_CHUNK + LFH_FIXED_LEN];
-    let (mut filled, mut base) = (0usize, 0u64);
-    loop {
-        let room = buf.get_mut(filled..).ok_or_else(invalid_data)?;
-        let read = read_prefix(&mut data, room)?.len();
-        filled = filled.saturating_add(read);
-        let at_end = read == 0;
-        let judged = if at_end {
-            filled
-        } else {
-            filled.saturating_sub(LFH_FIXED_LEN)
-        };
-        let in_range = usize::try_from(compressed.saturating_sub(base)).unwrap_or(usize::MAX);
-        let limit = judged.min(in_range);
-        let window = buf.get(..limit).ok_or_else(invalid_data)?;
-        let mut at = 0usize;
-        while let Some(found) = window
-            .get(at..)
-            .ok_or_else(invalid_data)?
-            .iter()
-            .position(|&b| b == b'P')
-        {
-            at = at.saturating_add(found);
-            if starts_reader_record(buf.get(at..filled).ok_or_else(invalid_data)?) {
-                return Ok(true);
-            }
-            at = at.saturating_add(1);
-        }
-        if limit < judged || at_end {
-            return Ok(false);
-        }
-        buf.copy_within(judged..filled, 0);
-        base = base.saturating_add(judged as u64);
-        filled = filled.saturating_sub(judged);
+    if compressed == 0 {
+        return Ok(false);
     }
+    reader.seek(SeekFrom::Start(data_start))?;
+    let total = compressed.saturating_add(LFH_FIXED_LEN as u64);
+    let mut data = Read::take(&mut *reader, total);
+    let plan = ChunkPlan {
+        range: 0..total,
+        chunk: SCAN_CHUNK,
+        signature_len: LFH_SIGNATURE.len(),
+        max_lookahead: LFH_FIXED_LEN,
+    };
+    let mut found = false;
+    search_chunks(
+        &mut Sequential(&mut data),
+        &plan,
+        find_reader_record,
+        |_, hit| {
+            if hit.offset >= compressed {
+                return Ok(Flow::Stop);
+            }
+            match hit.kind {
+                ReaderRecord::DirectoryOrEnd => {
+                    found = true;
+                    Ok(Flow::Stop)
+                }
+                ReaderRecord::LocalHeader => match hit.bytes.first_chunk::<LFH_FIXED_LEN>() {
+                    Some(header) if is_reachable_header(header) => {
+                        found = true;
+                        Ok(Flow::Stop)
+                    }
+                    Some(_) => Ok(Flow::Next),
+                    None => Ok(Flow::NeedMore),
+                },
+            }
+        },
+    )?;
+    Ok(found)
 }
 
 /// What the tail check concluded about one entry.
@@ -694,5 +695,121 @@ mod tests {
             drained(Failing, 10),
             Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
         );
+    }
+
+    fn reachable_lfh() -> [u8; LFH_FIXED_LEN] {
+        let mut header = [0u8; LFH_FIXED_LEN];
+        header[..4].copy_from_slice(&LFH_SIGNATURE);
+        header[26..28].copy_from_slice(&1u16.to_le_bytes());
+        header
+    }
+
+    fn unreachable_lfh() -> [u8; LFH_FIXED_LEN] {
+        let mut header = [0u8; LFH_FIXED_LEN];
+        header[..4].copy_from_slice(&LFH_SIGNATURE);
+        header
+    }
+
+    #[test]
+    fn holds_reader_record_zero_compressed_returns_false() {
+        let header = reachable_lfh();
+        let mut cursor = Cursor::new(header);
+        assert!(!holds_reader_record(&mut cursor, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn holds_reader_record_range_end_boundaries() {
+        let header = reachable_lfh();
+
+        // Reachable LFH starting at compressed - 1 extends into lookahead bytes
+        // and counts.
+        let mut buf = vec![0u8; 64];
+        let compressed = 10u64;
+        buf[9..9 + LFH_FIXED_LEN].copy_from_slice(&header);
+        assert!(holds_reader_record(&mut Cursor::new(&buf), 0, compressed).unwrap());
+
+        // Reachable LFH starting at compressed (first byte past range) does not
+        // count.
+        let mut buf = vec![0u8; 64];
+        buf[10..10 + LFH_FIXED_LEN].copy_from_slice(&header);
+        assert!(!holds_reader_record(&mut Cursor::new(&buf), 0, compressed).unwrap());
+
+        // 4-byte directory/end records starting at compressed - 1 count even
+        // for compressed = 1, and starting at compressed do not count.
+        for sig in [CDFH_SIGNATURE, EOCD_SIGNATURE, ZIP64_END_SIGNATURE] {
+            let mut at_zero = vec![0u8; 16];
+            at_zero[..4].copy_from_slice(&sig);
+            assert!(holds_reader_record(&mut Cursor::new(&at_zero), 0, 1).unwrap());
+
+            let mut past_end = vec![0u8; 16];
+            past_end[1..5].copy_from_slice(&sig);
+            assert!(!holds_reader_record(&mut Cursor::new(&past_end), 0, 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn holds_reader_record_across_scan_chunk_boundaries() {
+        let header = reachable_lfh();
+        let unreachable = unreachable_lfh();
+
+        // LFH signature straddling SCAN_CHUNK (1..3 bytes in chunk 1, rest in
+        // chunk 2) and LFH header straddling SCAN_CHUNK (signature in chunk 1,
+        // body in chunk 2).
+        for offset in [
+            SCAN_CHUNK - LFH_FIXED_LEN + 1,
+            SCAN_CHUNK - 10,
+            SCAN_CHUNK - 4,
+            SCAN_CHUNK - 3,
+            SCAN_CHUNK - 2,
+            SCAN_CHUNK - 1,
+        ] {
+            let mut buf = vec![0u8; SCAN_CHUNK + LFH_FIXED_LEN + 16];
+            buf[offset..offset + LFH_FIXED_LEN].copy_from_slice(&header);
+            assert!(
+                holds_reader_record(&mut Cursor::new(&buf), 0, SCAN_CHUNK as u64).unwrap(),
+                "expected hit for reachable LFH at offset {offset}"
+            );
+        }
+
+        // LFH starting exactly at SCAN_CHUNK when compressed == SCAN_CHUNK is
+        // out of range.
+        let mut buf = vec![0u8; SCAN_CHUNK + LFH_FIXED_LEN + 16];
+        buf[SCAN_CHUNK..SCAN_CHUNK + LFH_FIXED_LEN].copy_from_slice(&header);
+        assert!(!holds_reader_record(&mut Cursor::new(&buf), 0, SCAN_CHUNK as u64).unwrap());
+
+        // Unreachable LFH needing lookahead across SCAN_CHUNK followed by EOCD
+        // in range: NeedMore must carry over, reject the unreachable LFH, and
+        // still find EOCD.
+        let mut buf = vec![0u8; SCAN_CHUNK + LFH_FIXED_LEN + 16];
+        let lfh_at = SCAN_CHUNK - 16;
+        let eocd_at = SCAN_CHUNK - 6;
+        buf[lfh_at..lfh_at + LFH_FIXED_LEN].copy_from_slice(&unreachable);
+        buf[eocd_at..eocd_at + 4].copy_from_slice(&EOCD_SIGNATURE);
+        assert!(holds_reader_record(&mut Cursor::new(&buf), 0, SCAN_CHUNK as u64).unwrap());
+    }
+
+    #[test]
+    fn holds_reader_record_eof_and_nonzero_data_start() {
+        let unreachable = unreachable_lfh();
+        let header = reachable_lfh();
+
+        // Unreachable LFH alone returns false.
+        assert!(!holds_reader_record(&mut Cursor::new(unreachable), 0, 30).unwrap());
+
+        // Truncated LFH at EOF (< LFH_FIXED_LEN bytes) returns false.
+        let truncated = &header[..LFH_FIXED_LEN - 1];
+        assert!(!holds_reader_record(&mut Cursor::new(truncated), 0, 20).unwrap());
+
+        // Truncated LFH at EOF followed by EOCD before EOF still detects EOCD.
+        let mut trunc_plus_eocd = header[..LFH_FIXED_LEN - 1].to_vec();
+        trunc_plus_eocd[10..14].copy_from_slice(&EOCD_SIGNATURE);
+        assert!(holds_reader_record(&mut Cursor::new(&trunc_plus_eocd), 0, 20).unwrap());
+
+        // Non-zero data_start ignores records in the prefix before data_start.
+        let mut prefixed = vec![0u8; 64];
+        prefixed[..4].copy_from_slice(&EOCD_SIGNATURE);
+        assert!(!holds_reader_record(&mut Cursor::new(&prefixed), 16, 32).unwrap());
+        prefixed[20..24].copy_from_slice(&CDFH_SIGNATURE);
+        assert!(holds_reader_record(&mut Cursor::new(&prefixed), 16, 32).unwrap());
     }
 }

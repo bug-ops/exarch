@@ -440,7 +440,7 @@ impl PartialExtractionContext {
         let r = &self.report;
         let message = match self.writes {
             PartialWrites::Kept => {
-                let items = r.files_extracted + r.directories_created + r.symlinks_created;
+                let items = r.total_items();
                 let mut message = Message::default()
                     .lit("WARNING: Extraction was stopped. ")
                     .text(format!(
@@ -2873,6 +2873,30 @@ mod tests {
         );
         assert_eq!(leftover_path(&error), None);
         assert!(chain_hints(&error, terminal).is_empty());
+    }
+
+    #[test]
+    fn partial_extraction_message_saturates_total_items_on_overflow() {
+        let mut report = ExtractionReport::default();
+        report.files_extracted = usize::MAX;
+        report.directories_created = 1;
+        report.symlinks_created = 1;
+        let ctx = PartialExtractionContext::new(
+            report,
+            PartialWrites::Kept,
+            StagingFate::Removed,
+            anyhow::anyhow!("boom"),
+        );
+
+        let message = ctx.dedicated_message().unwrap();
+        let rendered = raw(&message.parts);
+        let max = usize::MAX;
+        assert!(
+            rendered.contains(&format!(
+                "{max} items ({max} files, 1 directories, 1 symlinks)"
+            )),
+            "{rendered}"
+        );
     }
 
     #[test]

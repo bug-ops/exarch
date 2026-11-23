@@ -163,7 +163,7 @@ impl ProgressCallback for CliProgress {
     }
 
     fn on_bytes_written(&mut self, bytes: u64) {
-        self.bytes_written += bytes;
+        self.bytes_written = self.bytes_written.saturating_add(bytes);
         self.bar.set_message(format!(
             "{} ({})",
             self.label,
@@ -279,5 +279,13 @@ mod tests {
 
         progress.on_entry_start(Path::new("b"), position(2, EntryTotal::Known(7)));
         assert_eq!(progress.bar.length(), Some(7));
+    }
+
+    #[test]
+    fn test_on_bytes_written_saturates_on_overflow() {
+        let mut progress = CliProgress::new(BarLength::Known(1), "Testing");
+        progress.on_bytes_written(u64::MAX - 10);
+        progress.on_bytes_written(100);
+        assert_eq!(progress.bytes_written, u64::MAX);
     }
 }

@@ -126,12 +126,10 @@ impl DualClass {
             .map(|class| class.bind(py))
     }
 
-    fn error(&self, description: String) -> PyErr {
-        Python::attach(|py| {
-            self.class(py)
-                .and_then(|class| class.call1((description,)))
-                .map_or_else(|err| err, PyErr::from_value)
-        })
+    fn error(&self, py: Python<'_>, description: String) -> PyErr {
+        self.class(py)
+            .and_then(|class| class.call1((description,)))
+            .map_or_else(|err| err, PyErr::from_value)
     }
 }
 
@@ -171,9 +169,9 @@ static DUAL_CLASSES: [&DualClass; 5] = [
 ];
 
 /// Builds the Python exception for one error class from its message.
-type NewErr = fn(String) -> PyErr;
+type NewErr = fn(Python<'_>, String) -> PyErr;
 
-fn new_base_error(description: String) -> PyErr {
+fn new_base_error(_py: Python<'_>, description: String) -> PyErr {
     ArchiveError::new_err(description)
 }
 
@@ -185,22 +183,22 @@ fn new_base_error(description: String) -> PyErr {
 /// that.
 fn class_for(code: ErrorCode) -> Option<NewErr> {
     let ctor: NewErr = match code {
-        ErrorCode::PathTraversal => |d| PathTraversalError::new_err(d),
-        ErrorCode::SymlinkEscape => |d| SymlinkEscapeError::new_err(d),
-        ErrorCode::HardlinkEscape => |d| HardlinkEscapeError::new_err(d),
-        ErrorCode::ZipBomb => |d| ZipBombError::new_err(d),
-        ErrorCode::ZipInconsistency => |d| ZipInconsistencyError::new_err(d),
-        ErrorCode::InvalidPermissions => |d| InvalidPermissionsError::new_err(d),
-        ErrorCode::QuotaExceeded => |d| QuotaExceededError::new_err(d),
-        ErrorCode::SecurityViolation => |d| SecurityViolationError::new_err(d),
-        ErrorCode::InvalidArchive => |d| InvalidArchiveError::new_err(d),
-        ErrorCode::SourceNotFound => |d| SOURCE_NOT_FOUND.error(d),
-        ErrorCode::SourceNotAccessible => |d| SOURCE_NOT_ACCESSIBLE.error(d),
-        ErrorCode::SourceChanged => |d| SourceChangedError::new_err(d),
-        ErrorCode::OutputExists => |d| OUTPUT_EXISTS.error(d),
-        ErrorCode::InvalidCompressionLevel => |d| INVALID_COMPRESSION_LEVEL.error(d),
-        ErrorCode::InvalidConfiguration => |d| INVALID_CONFIGURATION.error(d),
-        ErrorCode::UnknownFormat => |d| UnknownFormatError::new_err(d),
+        ErrorCode::PathTraversal => |_, d| PathTraversalError::new_err(d),
+        ErrorCode::SymlinkEscape => |_, d| SymlinkEscapeError::new_err(d),
+        ErrorCode::HardlinkEscape => |_, d| HardlinkEscapeError::new_err(d),
+        ErrorCode::ZipBomb => |_, d| ZipBombError::new_err(d),
+        ErrorCode::ZipInconsistency => |_, d| ZipInconsistencyError::new_err(d),
+        ErrorCode::InvalidPermissions => |_, d| InvalidPermissionsError::new_err(d),
+        ErrorCode::QuotaExceeded => |_, d| QuotaExceededError::new_err(d),
+        ErrorCode::SecurityViolation => |_, d| SecurityViolationError::new_err(d),
+        ErrorCode::InvalidArchive => |_, d| InvalidArchiveError::new_err(d),
+        ErrorCode::SourceNotFound => |py, d| SOURCE_NOT_FOUND.error(py, d),
+        ErrorCode::SourceNotAccessible => |py, d| SOURCE_NOT_ACCESSIBLE.error(py, d),
+        ErrorCode::SourceChanged => |_, d| SourceChangedError::new_err(d),
+        ErrorCode::OutputExists => |py, d| OUTPUT_EXISTS.error(py, d),
+        ErrorCode::InvalidCompressionLevel => |py, d| INVALID_COMPRESSION_LEVEL.error(py, d),
+        ErrorCode::InvalidConfiguration => |py, d| INVALID_CONFIGURATION.error(py, d),
+        ErrorCode::UnknownFormat => |_, d| UnknownFormatError::new_err(d),
         ErrorCode::Cancelled => new_base_error,
         _ => return None,
     };
@@ -220,6 +218,15 @@ pub fn convert_error(err: CoreError) -> PyErr {
     let reason = err
         .encryption_refusal()
         .map(exarch_core::EncryptionRefusal::as_str);
+    let msg = err.into_ffi_message();
+    Python::attach(|py| convert_error_with_py(py, msg, reason))
+}
+
+fn convert_error_with_py(
+    py: Python<'_>,
+    msg: FfiErrorMessage,
+    reason: Option<&'static str>,
+) -> PyErr {
     let FfiErrorMessage {
         kind,
         description,
@@ -230,46 +237,48 @@ pub fn convert_error(err: CoreError) -> PyErr {
         detail,
         raw_os_error,
         ..
-    } = err.into_ffi_message();
+    } = msg;
     let code = kind.code();
     let py_err = if let FfiKind::Io(io_kind) = kind {
-        let err = io_error(io_kind, &description, path.as_deref(), raw_os_error);
+        let err = io_error(py, io_kind, &description, path.as_deref(), raw_os_error);
         // A builtin `OSError` has no class defaults, so these read `None`
         // only when set.
         for name in ["restore", "backup_path", "leftover_path"] {
-            set_none(&err, name);
+            set_none(py, &err, name);
         }
         err
     } else {
-        let err = class_for(kind.code()).unwrap_or(new_base_error)(description);
+        let err = class_for(kind.code()).unwrap_or(new_base_error)(py, description);
         if let Some(fault) = source_fault {
-            set_os_error_fields(&err, &fault);
+            set_os_error_fields(py, &err, &fault);
         }
         if matches!(kind, FfiKind::SourceChanged) {
-            set_attr(&err, "path", path.clone());
+            set_attr(py, &err, "path", path.clone());
         }
         if let (Some(errno), Some(filename)) = (errno_name(&kind), path) {
-            set_errno_fields(&err, errno, &filename);
+            set_errno_fields(py, &err, errno, &filename);
         }
         set_optional_str(
+            py,
             &err,
             "relaxable_by",
             kind.relaxable_by().map(PolicySetting::as_str),
         );
-        set_optional_str(&err, "sub_code", kind.sub_code().map(SubCode::as_str));
-        set_optional_str(&err, "reason", reason);
+        set_optional_str(py, &err, "sub_code", kind.sub_code().map(SubCode::as_str));
+        set_optional_str(py, &err, "reason", reason);
         set_optional_str(
+            py,
             &err,
             "setting",
             kind.setting().map(exarch_core::ConfigSetting::as_str),
         );
         err
     };
-    attach_detail(&py_err, detail);
-    set_attr(&py_err, "leftover_path", leftover_path);
-    set_optional_str(&py_err, "code", Some(code.as_str()));
+    attach_detail(py, &py_err, detail);
+    set_attr(py, &py_err, "leftover_path", leftover_path);
+    set_optional_str(py, &py_err, "code", Some(code.as_str()));
     if let Some(outcome) = partial {
-        attach_partial(&py_err, outcome);
+        attach_partial_with_py(py, &py_err, outcome);
     }
     py_err
 }
@@ -284,6 +293,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
 /// which pickles with `filename`; `errno` is `None` where the cause has no OS
 /// code, and the description still carries it.
 fn io_error(
+    py: Python<'_>,
     kind: std::io::ErrorKind,
     description: &str,
     path: Option<&str>,
@@ -295,10 +305,10 @@ fn io_error(
         PyErr::from(std::io::Error::new(kind, description))
     };
     let err = match path {
-        Some(path) => with_os_error_args(&err, raw_os_error, description, path),
+        Some(path) => with_os_error_args(py, &err, raw_os_error, description, path),
         None => err,
     };
-    set_optional_str(&err, "io_kind", Some(IoKind::from(kind).as_str()));
+    set_optional_str(py, &err, "io_kind", Some(IoKind::from(kind).as_str()));
     err
 }
 
@@ -306,23 +316,22 @@ fn io_error(
 /// `(errno, strerror, filename)`; keeps `err` with `filename` set when the call
 /// fails.
 fn with_os_error_args(
+    py: Python<'_>,
     err: &PyErr,
     raw_os_error: Option<i32>,
     description: &str,
     filename: &str,
 ) -> PyErr {
-    Python::attach(|py| {
-        err.get_type(py)
-            .call1((raw_os_error, description, filename))
-            .map_or_else(
-                |_| {
-                    let kept = err.clone_ref(py);
-                    set_attr(&kept, "filename", Some(filename));
-                    kept
-                },
-                PyErr::from_value,
-            )
-    })
+    err.get_type(py)
+        .call1((raw_os_error, description, filename))
+        .map_or_else(
+            |_| {
+                let kept = err.clone_ref(py);
+                set_attr(py, &kept, "filename", Some(filename));
+                kept
+            },
+            PyErr::from_value,
+        )
 }
 
 /// The `errno` name of a refusal that is also a builtin `OSError`
@@ -435,27 +444,27 @@ impl From<FfiOccupiedPath> for PyOccupiedPath {
 ///
 /// Exhaustive over [`FfiDetail`]: a new detail does not compile until it is
 /// named here.
-fn attach_detail(err: &PyErr, detail: FfiDetail) {
+fn attach_detail(py: Python<'_>, err: &PyErr, detail: FfiDetail) {
     match detail {
         FfiDetail::None => {}
-        FfiDetail::ExistingSymlink { by } => set_optional_str(err, "by", Some(by.as_str())),
+        FfiDetail::ExistingSymlink { by } => set_optional_str(py, err, "by", Some(by.as_str())),
         FfiDetail::Occupied { conflicts, by } => {
             let conflicts: Vec<PyOccupiedPath> = conflicts
                 .into_vec()
                 .into_iter()
                 .map(PyOccupiedPath::from)
                 .collect();
-            set_attr(err, "conflicts", Some(conflicts));
-            set_optional_str(err, "by", Some(by.as_str()));
+            set_attr(py, err, "conflicts", Some(conflicts));
+            set_optional_str(py, err, "by", Some(by.as_str()));
         }
         FfiDetail::Replace(restore) => {
-            set_optional_str(err, "restore", Some(restore.kind().as_str()));
+            set_optional_str(py, err, "restore", Some(restore.kind().as_str()));
             if let FfiRestore::Failed { backup_path } = restore {
-                set_attr(err, "backup_path", Some(backup_path));
+                set_attr(py, err, "backup_path", Some(backup_path));
             }
         }
         FfiDetail::ProtectedPath(path) => {
-            set_optional_str(err, "protected_path", Some(path.as_str()));
+            set_optional_str(py, err, "protected_path", Some(path.as_str()));
         }
         FfiDetail::NameCollision(FfiNameCollision {
             name,
@@ -463,6 +472,7 @@ fn attach_detail(err: &PyErr, detail: FfiDetail) {
             second,
             ..
         }) => set_attr(
+            py,
             err,
             "collision",
             Some(PyNameCollision {
@@ -472,90 +482,81 @@ fn attach_detail(err: &PyErr, detail: FfiDetail) {
             }),
         ),
         FfiDetail::UnmatchedInclude { patterns } => {
-            set_attr(err, "unmatched_patterns", Some(patterns.into_vec()));
+            set_attr(py, err, "unmatched_patterns", Some(patterns.into_vec()));
         }
-        FfiDetail::NonUtf8EntryPath { path } => set_attr(err, "non_utf8_entry_path", Some(path)),
-        FfiDetail::Destination { step } => set_optional_str(err, "step", Some(step.as_str())),
+        FfiDetail::NonUtf8EntryPath { path } => {
+            set_attr(py, err, "non_utf8_entry_path", Some(path));
+        }
+        FfiDetail::Destination { step } => set_optional_str(py, err, "step", Some(step.as_str())),
     }
 }
 
 /// Sets `errno`, `strerror` and `filename` the way `open()` fills them for the
 /// same failure.
-fn set_errno_fields(err: &PyErr, errno: &str, filename: &str) {
-    Python::attach(|py| {
-        let fill = || -> PyResult<()> {
-            let errno: i32 = py.import("errno")?.getattr(errno)?.extract()?;
-            let strerror = py.import("os")?.call_method1("strerror", (errno,))?;
-            let value = err.value(py);
-            value.setattr("errno", errno)?;
-            value.setattr("strerror", strerror)?;
-            value.setattr("filename", filename)
-        };
-        // Best-effort, like the other attributes: the exception is raised
-        // either way.
-        let _ = fill();
-    });
+fn set_errno_fields(py: Python<'_>, err: &PyErr, errno: &str, filename: &str) {
+    let fill = || -> PyResult<()> {
+        let errno: i32 = py.import("errno")?.getattr(errno)?.extract()?;
+        let strerror = py.import("os")?.call_method1("strerror", (errno,))?;
+        let value = err.value(py);
+        value.setattr("errno", errno)?;
+        value.setattr("strerror", strerror)?;
+        value.setattr("filename", filename)
+    };
+    // Best-effort, like the other attributes: the exception is raised
+    // either way.
+    let _ = fill();
 }
 
 /// Sets `name` on the exception when `value` is present.
-fn set_attr<T>(err: &PyErr, name: &str, value: Option<T>)
-where
-    for<'py> T: IntoPyObject<'py>,
-{
+fn set_attr<'py, T: IntoPyObject<'py>>(py: Python<'py>, err: &PyErr, name: &str, value: Option<T>) {
     if let Some(value) = value {
-        Python::attach(|py| {
-            // setattr failures are silenced to preserve the `PyErr` signature.
-            let _ = err.value(py).setattr(name, value);
-        });
+        // setattr failures are silenced to preserve the `PyErr` signature.
+        let _ = err.value(py).setattr(name, value);
     }
 }
 
 /// Sets `name` to `None` on an exception whose class has no default for it.
-fn set_none(err: &PyErr, name: &str) {
-    Python::attach(|py| {
-        // setattr failures are silenced to preserve the `PyErr` signature.
-        let _ = err.value(py).setattr(name, py.None());
-    });
+fn set_none(py: Python<'_>, err: &PyErr, name: &str) {
+    // setattr failures are silenced to preserve the `PyErr` signature.
+    let _ = err.value(py).setattr(name, py.None());
 }
 
 /// Sets `name` on the exception when `value` is present; otherwise the class
 /// default (`None`) stays visible.
-fn set_optional_str(err: &PyErr, name: &str, value: Option<&'static str>) {
+fn set_optional_str(py: Python<'_>, err: &PyErr, name: &str, value: Option<&'static str>) {
     if let Some(value) = value {
-        Python::attach(|py| {
-            // setattr failures are silenced to preserve the `PyErr` signature.
-            let _ = err.value(py).setattr(name, value);
-        });
+        // setattr failures are silenced to preserve the `PyErr` signature.
+        let _ = err.value(py).setattr(name, value);
     }
 }
 
 /// Sets `errno`, `strerror` and `filename` of an `OSError`-based exception from
 /// an unreadable creation source, so `str(err)` names the file and the OS
 /// error.
-fn set_os_error_fields(err: &PyErr, fault: &FfiSourceFault) {
-    Python::attach(|py| {
-        let value = err.value(py);
-        // setattr failures are silenced to preserve the `PyErr` signature.
-        if let Some(errno) = fault.raw_os_error {
-            let _ = value.setattr("errno", errno);
-        }
-        let _ = value.setattr("strerror", fault.text.as_str());
-        let _ = value.setattr("filename", fault.name.as_str());
-    });
+fn set_os_error_fields(py: Python<'_>, err: &PyErr, fault: &FfiSourceFault) {
+    let value = err.value(py);
+    // setattr failures are silenced to preserve the `PyErr` signature.
+    if let Some(errno) = fault.raw_os_error {
+        let _ = value.setattr("errno", errno);
+    }
+    let _ = value.setattr("strerror", fault.text.as_str());
+    let _ = value.setattr("filename", fault.name.as_str());
 }
 
 /// Attaches `writes`, and while the writes remain on disk the report counters
 /// (#210, #508), to the concrete exception of a partial extraction.
 pub fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
-    Python::attach(|py| {
-        let exc_value = err.value(py);
-        // setattr failures are silenced to preserve the `PyErr` signature; the
-        // workspace forbids unwrap/expect outside tests.
-        let _ = exc_value.setattr("writes", outcome.writes().as_str());
-        if let PartialOutcome::Kept(report) = outcome {
-            attach_extraction_report(exc_value, &report);
-        }
-    });
+    Python::attach(|py| attach_partial_with_py(py, err, outcome));
+}
+
+fn attach_partial_with_py(py: Python<'_>, err: &PyErr, outcome: PartialOutcome) {
+    let exc_value = err.value(py);
+    // setattr failures are silenced to preserve the `PyErr` signature; the
+    // workspace forbids unwrap/expect outside tests.
+    let _ = exc_value.setattr("writes", outcome.writes().as_str());
+    if let PartialOutcome::Kept(report) = outcome {
+        attach_extraction_report(exc_value, &report);
+    }
 }
 
 /// Attaches what a finished or interrupted extraction wrote that is still on

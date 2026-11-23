@@ -109,13 +109,11 @@ impl DestOccupancy {
     /// How to write over this occupant with the policy's `permit`, or the
     /// occupant that cannot be replaced.
     fn replace_mode(self, permit: ReplacePermit) -> std::result::Result<WriteMode, KeptOccupant> {
-        if let Some(kept) = self.kept_symlink() {
-            return Err(kept);
-        }
         match self {
             Self::Vacant => Ok(WriteMode::CreateNew),
+            Self::RegularFile => Ok(WriteMode::ReplaceRegular(permit)),
+            Self::Symlink => Err(KeptOccupant::Symlink),
             Self::Directory => Err(KeptOccupant::Directory),
-            Self::RegularFile | Self::Symlink => Ok(WriteMode::ReplaceRegular(permit)),
         }
     }
 }
@@ -407,5 +405,32 @@ impl SevenZTarget for SevenZHostTarget<'_> {
             options,
         };
         run(&mut pre)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use super::*;
+
+    #[test]
+    fn replace_mode_maps_every_occupancy_explicitly() {
+        assert_matches!(
+            DestOccupancy::Vacant.replace_mode(ReplacePermit::for_test()),
+            Ok(WriteMode::CreateNew)
+        );
+        assert_matches!(
+            DestOccupancy::RegularFile.replace_mode(ReplacePermit::for_test()),
+            Ok(WriteMode::ReplaceRegular(_))
+        );
+        assert_matches!(
+            DestOccupancy::Symlink.replace_mode(ReplacePermit::for_test()),
+            Err(KeptOccupant::Symlink)
+        );
+        assert_matches!(
+            DestOccupancy::Directory.replace_mode(ReplacePermit::for_test()),
+            Err(KeptOccupant::Directory)
+        );
     }
 }

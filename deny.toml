@@ -34,8 +34,11 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 skip = [
-    # enumflags2_derive (landlock, Linux-only CLI sandbox) is still on syn 2.
-    { crate = "syn@2", reason = "landlock's enumflags2_derive has not moved to syn 3" },
+    # Proc-macro crates still on syn 2:
+    # - enumflags2_derive (landlock, Linux-only CLI sandbox)
+    # - zerocopy-derive (half -> ciborium -> criterion dev-dep)
+    # - zeroize_derive (zeroize)
+    { crate = "syn@2", reason = "enumflags2_derive, zerocopy-derive, and zeroize_derive have not moved to syn 3" },
 ]
 
 [sources]

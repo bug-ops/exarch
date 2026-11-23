@@ -514,6 +514,20 @@ pub(crate) fn strip_prefix_folded<'p>(path: &'p Path, base: &Path) -> Option<&'p
     Some(rest.as_path())
 }
 
+/// What follows `root` in a canonical `path`, under the comparison [`contain`]
+/// uses for the host: exact components on Unix, the case-insensitive rule of
+/// [`paths_start_with`] on Windows.
+pub(crate) fn relative_below<'p>(path: &'p Path, root: &Path) -> Option<&'p Path> {
+    #[cfg(windows)]
+    {
+        strip_prefix_folded(path, root)
+    }
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(root).ok()
+    }
+}
+
 /// Case-sensitive path prefix check for Unix (not macOS).
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn paths_start_with(path: &Path, base: &Path) -> bool {
@@ -1943,7 +1957,7 @@ fn portable_fold(name: &OsStr) -> Cow<'_, OsStr> {
 }
 
 /// APFS compares canonically decomposed names case-insensitively.
-fn decomposed_fold(text: &str) -> String {
+pub(crate) fn decomposed_fold(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     upper_lower_upper(text.nfd())
 }

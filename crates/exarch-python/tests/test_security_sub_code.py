@@ -46,6 +46,28 @@ def test_banned_component_is_path_name_and_relaxable(temp_dir):
     assert error.relaxable_by == "banned_components"
 
 
+@pytest.mark.parametrize(
+    "name",
+    [".\u017fsh/authorized_keys", ".\u00dfh/authorized_keys", ".\u212aube/config"],
+)
+def test_banned_component_alias_spelling_is_refused(temp_dir, name):
+    error = _violation(temp_dir, _tar_with(_file_member(name)))
+
+    assert error.sub_code == "PATH_NAME"
+    assert error.relaxable_by == "banned_components"
+
+
+def test_decomposed_spelling_of_a_configured_name_is_refused(temp_dir):
+    archive = temp_dir / "a.tar"
+    archive.write_bytes(_tar_with(_file_member("cafe\u0301/x")))
+    config = exarch.SecurityConfig().add_banned_component("caf\u00e9")
+
+    with pytest.raises(exarch.SecurityViolationError) as caught:
+        exarch.extract_archive(archive, temp_dir / "out", config)
+
+    assert caught.value.sub_code == "PATH_NAME"
+
+
 def test_symlink_policy_is_link_policy(temp_dir):
     error = _violation(temp_dir, _tar_with(_symlink_member))
 

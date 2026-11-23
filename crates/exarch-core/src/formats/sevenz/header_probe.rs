@@ -30,6 +30,7 @@ use super::header::SEVENZ_MAGIC;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
 use crate::encryption::kdf;
+use crate::encryption::kdf::AesParams;
 use crate::encryption::kdf::KeyMode;
 use crate::formats::le;
 use crate::formats::le::le64;
@@ -116,8 +117,9 @@ impl DeclaredTables {
 /// Why a header is refused without being parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Refusal {
-    /// A coder of the header is encryption.
-    Encrypted(KeyMode),
+    /// A coder of the header is encryption: its mode, and the parameters of
+    /// its key when the header has exactly one AES coder with a derived key.
+    Encrypted(KeyMode, Option<AesParams>),
     /// A coder of the header needs more than the memory limit.
     Memory,
 }
@@ -290,7 +292,16 @@ fn decode_header<R: Read + Seek>(
         } else {
             KeyMode::Derived
         };
-        return Err(Stop::Refused(Refusal::Encrypted(key)));
+        let only_aes = record
+            .coders
+            .iter()
+            .filter(|coder| coder.id == METHOD_AES)
+            .count()
+            == 1;
+        let params = (only_aes && record.chain_complete && key == KeyMode::Derived)
+            .then(|| AesParams::parse(first.properties))
+            .flatten();
+        return Err(Stop::Refused(Refusal::Encrypted(key, params)));
     }
     let decoded = record.decoded().ok_or(Stop::Unmodelled)?;
     let coder = record.coders.first().copied().ok_or(Stop::Unmodelled)?;
@@ -324,6 +335,31 @@ fn decode_header<R: Read + Seek>(
     }
 }
 
+/// Whether the chain from the packed stream `start`, following the bind pairs
+/// `(input, output)` the way sevenz-rust2 orders a block's coders, reaches
+/// each of `count` single-stream coders exactly once.
+fn chain_covers(count: usize, start: u64, binds: &[(u64, u64)]) -> bool {
+    let mut visited = vec![false; count];
+    let mut current = start;
+    let mut seen = 0usize;
+    loop {
+        let Some(slot) = usize::try_from(current)
+            .ok()
+            .and_then(|index| visited.get_mut(index))
+        else {
+            return false;
+        };
+        if std::mem::replace(slot, true) {
+            return false;
+        }
+        seen = seen.saturating_add(1);
+        match binds.iter().find(|(_, output)| *output == current) {
+            Some(&(input, _)) => current = input,
+            None => return seen == count,
+        }
+    }
+}
+
 /// One coder of the first folder of an encoded header, as the record spells
 /// it.
 #[derive(Debug, Clone, Copy)]
@@ -342,6 +378,7 @@ struct EncodedRecord<'a> {
     first_unpack_size: u64,
     largest_unpack_size: u64,
     coders: Vec<Coder<'a>>,
+    chain_complete: bool,
 }
 
 impl<'a> EncodedRecord<'a> {
@@ -358,6 +395,7 @@ impl<'a> EncodedRecord<'a> {
             first_unpack_size: streams.folders.first_unpack_size?,
             largest_unpack_size: streams.folders.largest_unpack_size?,
             coders: streams.folders.first_coders?,
+            chain_complete: streams.folders.first_chain_complete,
         })
     }
 
@@ -396,6 +434,7 @@ struct Folders<'a> {
     packed: u64,
     crcs: Digests<'a>,
     first_coders: Option<Vec<Coder<'a>>>,
+    first_chain_complete: bool,
     first_unpack_size: Option<u64>,
     largest_unpack_size: Option<u64>,
 }
@@ -552,11 +591,12 @@ impl<'a> Bytes<'a> {
         self.expect(0)?;
         let mut out_streams = 0u64;
         for index in 0..folders.count {
-            let (coders, packed) = self.folder()?;
+            let (coders, packed, chain_complete) = self.folder()?;
             out_streams = out_streams.checked_add(coders.len() as u64)?;
             folders.packed = folders.packed.checked_add(packed)?;
             if index == 0 {
                 folders.first_coders = Some(coders);
+                folders.first_chain_complete = chain_complete;
             }
         }
         self.expect(K_CODERS_UNPACK_SIZE)?;
@@ -578,11 +618,12 @@ impl<'a> Bytes<'a> {
     /// One folder, as sevenz-rust2 reads it: coders with one output stream
     /// each, bind pairs, and the packed streams. Returns the coders and the
     /// number of packed streams.
-    fn folder(&mut self) -> Option<(Vec<Coder<'a>>, u64)> {
+    fn folder(&mut self) -> Option<(Vec<Coder<'a>>, u64, bool)> {
         let count = self.number()?;
         (count <= MAX_CODERS).then_some(())?;
         let mut coders = Vec::new();
         let mut in_streams = 0u64;
+        let mut single_input = true;
         for _ in 0..count {
             let flags = self.byte()?;
             (flags & CODER_RESERVED == 0).then_some(())?;
@@ -593,6 +634,7 @@ impl<'a> Bytes<'a> {
                 (1, 1)
             };
             (outs == 1).then_some(())?;
+            single_input &= ins == 1;
             in_streams = in_streams.checked_add(ins)?;
             (in_streams <= MAX_IN_STREAMS).then_some(())?;
             let properties = if flags & CODER_HAS_PROPERTIES != 0 {
@@ -604,13 +646,21 @@ impl<'a> Bytes<'a> {
             coders.push(Coder { id, properties });
         }
         let bind_count = count.checked_sub(1)?;
-        self.skip_numbers(bind_count.checked_mul(2)?)?;
+        let mut binds = Vec::new();
+        for _ in 0..bind_count {
+            binds.push((self.number()?, self.number()?));
+        }
         let packed = in_streams.checked_sub(bind_count)?;
         (packed > 0).then_some(())?;
         if packed > 1 {
             self.skip_numbers(packed)?;
         }
-        Some((coders, packed))
+        let chain_complete = single_input
+            && packed == 1
+            && (0..in_streams)
+                .find(|stream| !binds.iter().any(|(bound, _)| bound == stream))
+                .is_some_and(|start| chain_covers(coders.len(), start, &binds));
+        Some((coders, packed, chain_complete))
     }
 
     /// A substreams info, returning how many sub-streams it declares.
@@ -1065,14 +1115,29 @@ mod tests {
             .position(|w| w == [0, 1, K_CODERS_UNPACK_SIZE])
             .unwrap();
         off_chain[at + 1] = 0;
-        for record in [on_chain, single, off_chain] {
+        // The key is named only when the coder is on the header's decode chain.
+        for (record, params) in [
+            (on_chain, AesParams::parse(&[0; 4])),
+            (single, AesParams::parse(&[0; 4])),
+            (off_chain, None),
+        ] {
             let bytes = archive_with_record(&[0; 4], &record);
             assert_eq!(
                 entries(&bytes),
-                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::Derived)),
+                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::Derived, params)),
                 "{record:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_chain_covers_a_folder_only_when_it_reaches_every_coder_once() {
+        assert!(chain_covers(1, 0, &[]));
+        assert!(chain_covers(2, 1, &[(0, 1)]));
+        assert!(!chain_covers(2, 1, &[]));
+        assert!(!chain_covers(2, 0, &[(0, 0)]));
+        assert!(!chain_covers(2, 1, &[(1, 1)]));
+        assert!(!chain_covers(1, 5, &[]));
     }
 
     #[test]
@@ -1086,7 +1151,7 @@ mod tests {
             let bytes = archive_with_record(&[0; 4], &record_of(&coders, 4, 4));
             assert_eq!(
                 entries(&bytes),
-                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::RawKey)),
+                HeaderEntries::Refused(Refusal::Encrypted(KeyMode::RawKey, None)),
                 "{coders:?}"
             );
         }

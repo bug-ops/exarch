@@ -22,7 +22,8 @@ use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
-use crate::types::safe_path::check_component_for;
+use crate::types::safe_symlink::check_resolved_target;
+use crate::types::safe_symlink::check_target_components;
 use crate::types::safe_symlink::has_root_or_prefix;
 
 /// Error for a hardlink whose target is absent when the link is created.
@@ -251,10 +252,6 @@ impl HardlinkTracker {
     }
 
     /// Validates against `view` instead of the real filesystem.
-    #[expect(
-        clippy::items_after_statements,
-        reason = "the import is placed next to its only use"
-    )]
     pub(crate) fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         link_path: &SafePath<P>,
@@ -280,8 +277,6 @@ impl HardlinkTracker {
             return Err(Violation::LinkTargetNul(LinkKind::Hardlink).into());
         }
 
-        use std::path::Component;
-
         // H-SEC-2: Reject Windows-specific absolute path components in target
         // (before resolution) This prevents bypasses on Windows like
         // C:\ or \\server\share
@@ -291,11 +286,7 @@ impl HardlinkTracker {
             });
         }
 
-        for component in target.components() {
-            if let Component::Normal(comp) = component {
-                check_component_for(view.path_model(), comp, config)?;
-            }
-        }
+        check_target_components(target, LinkKind::Hardlink, view.path_model(), config)?;
 
         // Also reject absolute targets (redundant with above, but keeps
         // existing check)
@@ -318,6 +309,16 @@ impl HardlinkTracker {
             .map_err(|_| ArchiveError::HardlinkEscape {
                 path: link_path.as_path().to_path_buf(),
             })?;
+
+        // The literal target passed above; the location it resolves to may run
+        // through a symlink already on disk, so it is checked too.
+        check_resolved_target(
+            &resolved,
+            root.as_path(),
+            link_path.as_path(),
+            LinkKind::Hardlink,
+            config,
+        )?;
 
         // Track this hardlink target (H-PERF-6: use entry API)
         self.seen_targets
@@ -529,6 +530,55 @@ mod tests {
         assert!(stepping.has_parent_dir());
     }
 
+    #[test]
+    fn test_hardlink_target_in_banned_directory_is_refused() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = crate::Admit::Allow;
+        let link = SafePath::validate(&PathBuf::from("copy"), &dest, &config).unwrap();
+
+        for target in [
+            ".ssh/id_ed25519",
+            ".SSH/id_ed25519",
+            ".\u{17f}sh/id_ed25519",
+            ".\u{df}h/id_ed25519",
+            ".aw\u{17f}/credentials",
+            ".\u{212a}ube/config",
+            ".doc\u{212a}er/config.json",
+            ".git/config",
+            ".gnupg/key",
+            "d/.env",
+        ] {
+            let mut tracker = HardlinkTracker::new();
+            let result = tracker.validate_hardlink(&link, Path::new(target), &dest, &config);
+            assert_matches!(
+                result,
+                Err(ArchiveError::SecurityViolation {
+                    kind: Violation::LinkTargetBannedComponent {
+                        kind: LinkKind::Hardlink,
+                        ..
+                    }
+                }),
+                "target {target:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hardlink_target_outside_banned_directory_is_allowed() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = crate::Admit::Allow;
+        let link = SafePath::validate(&PathBuf::from("copy"), &dest, &config).unwrap();
+
+        let mut tracker = HardlinkTracker::new();
+        assert!(
+            tracker
+                .validate_hardlink(&link, Path::new("docs/readme.txt"), &dest, &config)
+                .is_ok()
+        );
+    }
+
     // H-TEST-2: Duplicate hardlink to same target test
     #[test]
     fn test_duplicate_hardlink_to_same_target() {
@@ -581,6 +631,43 @@ mod tests {
 
         // Three different targets
         assert_eq!(tracker.count(), 3, "should track each unique target");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_through_existing_symlink_is_judged_where_it_lands() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, dest) = create_test_dest();
+        let root = temp.path();
+        std::fs::create_dir(root.join(".ssh")).unwrap();
+        std::fs::File::create(root.join(".ssh/id")).unwrap();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::File::create(root.join("docs/readme")).unwrap();
+        symlink(".ssh", root.join("keys")).unwrap();
+        symlink("docs", root.join("manuals")).unwrap();
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = crate::Admit::Allow;
+        let link = SafePath::validate(&PathBuf::from("copy"), &dest, &config).unwrap();
+
+        let refused =
+            HardlinkTracker::new().validate_hardlink(&link, Path::new("keys/id"), &dest, &config);
+        assert_matches!(
+            refused,
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::LinkTargetBannedComponent {
+                    kind: LinkKind::Hardlink,
+                    ..
+                }
+            })
+        );
+
+        assert!(
+            HardlinkTracker::new()
+                .validate_hardlink(&link, Path::new("manuals/readme"), &dest, &config)
+                .is_ok()
+        );
     }
 
     /// Hardlink target that traverses through an already-extracted symlink must

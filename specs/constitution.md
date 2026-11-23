@@ -64,7 +64,7 @@ status: permanent
 - Never commit secrets, keys, or credentials
 - Default banned path components: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env`
 - Default limits: 50 MB per file, 500 MB total, 100× compression ratio, 10,000 files, depth 32
-- Path component matching is case-insensitive to prevent bypass on case-insensitive filesystems
+- Path component matching is case-insensitive (NFD and case folding, ignorable code points dropped) and applies to entry paths, link targets and the resolved location behind a symlink, to prevent bypass on case-insensitive filesystems
 - Entries are validated against a `PathModel`: `Host` (the running platform; on Windows it applies the `Portable` component rules) or `Portable` (the strictest rules of every platform on every host), selected by the destination, e.g. `EntrySink::path_model` (v0.8.0, #780, #787, #790)
 - Security issues detected during `verify_archive` are reported in `VerificationReport.issues`, not propagated as errors (complete picture for the caller)
 - `ValidationReport` was removed with the entry-validator pipeline (#900)

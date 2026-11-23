@@ -5,6 +5,7 @@
 //! end (core, CLI, Python, Node) shares one constructor and a value that could
 //! never match is refused instead of silently turning extraction into a no-op.
 
+use std::cell::OnceCell;
 use std::fmt;
 
 use crate::ArchiveError;
@@ -12,6 +13,7 @@ use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::Result;
 use crate::security::boundary::MAX_CONFIG_ENTRY_LENGTH;
+use crate::security::fs_view::decomposed_fold;
 
 fn invalid(setting: ConfigSetting, problem: ConfigProblem) -> ArchiveError {
     ArchiveError::InvalidConfiguration { setting, problem }
@@ -249,7 +251,12 @@ impl ExtensionFilter {
 /// null byte or path separator, is not `.` or `..`, neither starts nor ends
 /// with an ASCII whitespace or control character, and is at most
 /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes, so it can equal a single component.
-/// Matching ignores ASCII case.
+/// Matching compares names after canonical decomposition (NFD) and a
+/// per-character upper, lower, upper case mapping. That fold equates at least
+/// every pair of names full case folding equates, and a few more, so a ban
+/// holds on filesystems that fold names either way. Code points that HFS+
+/// ignores when it compares names (U+200C to U+200F, U+202A to U+202E,
+/// U+206A to U+206F and U+FEFF) are dropped first.
 ///
 /// # Examples
 ///
@@ -264,7 +271,10 @@ impl ExtensionFilter {
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PathComponentName(Box<str>);
+pub struct PathComponentName {
+    name: Box<str>,
+    folded: Box<str>,
+}
 
 impl PathComponentName {
     const SETTING: ConfigSetting = ConfigSetting::BannedPathComponent;
@@ -272,14 +282,24 @@ impl PathComponentName {
     /// The component name as given.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.name
     }
 
-    /// Whether `component` equals this name ignoring ASCII case, so a ban
-    /// holds on case-insensitive filesystems.
+    /// Whether `component` equals this name after canonical decomposition and
+    /// the case mapping described on [`PathComponentName`], so a ban holds on
+    /// case-insensitive filesystems.
     #[must_use]
     pub fn matches(&self, component: &str) -> bool {
-        self.0.eq_ignore_ascii_case(component)
+        self.matches_folding_once(component, &OnceCell::new())
+    }
+
+    /// Like [`matches`](Self::matches), but computes the fold of `component`
+    /// at most once across calls that share `fold`.
+    pub(crate) fn matches_folding_once(&self, component: &str, fold: &OnceCell<String>) -> bool {
+        if component.is_ascii() && self.name.is_ascii() {
+            return self.name.eq_ignore_ascii_case(component);
+        }
+        *self.folded == **fold.get_or_init(|| fold_name(component))
     }
 }
 
@@ -290,7 +310,8 @@ impl TryFrom<&str> for PathComponentName {
     ///
     /// Returns [`ArchiveError::InvalidConfiguration`] for an empty value, one
     /// with leading or trailing ASCII whitespace or control characters, a null
-    /// byte, a path separator, `.`, `..`, or a value over
+    /// byte, a path separator, `.`, `..`, a value made only of code points
+    /// that name comparison ignores, or a value over
     /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes.
     fn try_from(value: &str) -> Result<Self> {
         check_length_and_nul(value, Self::SETTING)?;
@@ -307,18 +328,42 @@ impl TryFrom<&str> for PathComponentName {
         if value == "." || value == ".." {
             return Err(invalid(Self::SETTING, ConfigProblem::DotEntry));
         }
-        Ok(Self(value.into()))
+        let folded = fold_name(value);
+        if folded.is_empty() {
+            return Err(invalid(Self::SETTING, ConfigProblem::Empty));
+        }
+        Ok(Self {
+            name: value.into(),
+            folded: folded.into(),
+        })
+    }
+}
+
+/// Code points HFS+ drops when it compares names.
+const fn is_ignored_by_compare(c: char) -> bool {
+    matches!(c, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}')
+}
+
+/// The key two names share when a case-insensitive filesystem treats them as
+/// one name.
+fn fold_name(name: &str) -> String {
+    if name.chars().any(is_ignored_by_compare) {
+        decomposed_fold(&name.replace(is_ignored_by_compare, ""))
+    } else {
+        decomposed_fold(name)
     }
 }
 
 impl fmt::Display for PathComponentName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.name)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -381,6 +426,70 @@ mod tests {
         assert_eq!(git.as_str(), ".Git");
         assert!(git.matches(".git"));
         assert!(!git.matches(".gitx"));
+    }
+
+    #[test]
+    fn component_matches_unicode_case_fold_spellings() {
+        for (name, spelled) in [
+            (".ssh", ".\u{17f}sh"),
+            (".ssh", ".\u{df}h"),
+            (".ssh", ".\u{17f}\u{17f}h"),
+            (".aws", ".aw\u{17f}"),
+            (".kube", ".\u{212a}ube"),
+            (".docker", ".doc\u{212a}er"),
+            (".git", ".GIT"),
+            (".gnupg", ".GnuPG"),
+            (".env", ".ENV"),
+        ] {
+            let banned = PathComponentName::try_from(name).unwrap();
+            assert!(banned.matches(spelled), "{spelled:?} must match {name:?}");
+        }
+    }
+
+    #[test]
+    fn component_matches_names_with_ignorable_code_points_inserted() {
+        let banned = PathComponentName::try_from(".ssh").unwrap();
+        for ignorable in [
+            '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{206a}',
+            '\u{206f}', '\u{feff}',
+        ] {
+            let spelled = format!(".s{ignorable}sh");
+            assert!(banned.matches(&spelled), "{spelled:?}");
+            let leading = format!("{ignorable}.ssh{ignorable}");
+            assert!(banned.matches(&leading), "{leading:?}");
+        }
+        assert!(!banned.matches(".s\u{200c}shx"));
+        assert!(!banned.matches(".s\u{2060}sh"));
+
+        let configured = PathComponentName::try_from("a\u{200c}b").unwrap();
+        assert!(configured.matches("ab"));
+        assert!(configured.matches("A\u{feff}B"));
+    }
+
+    #[test]
+    fn component_matches_decomposed_spelling_of_a_non_ascii_name() {
+        let banned = PathComponentName::try_from("caf\u{e9}").unwrap();
+        assert!(banned.matches("cafe\u{301}"));
+        assert!(banned.matches("CAFE\u{301}"));
+        let decomposed = PathComponentName::try_from("cafe\u{301}").unwrap();
+        assert!(decomposed.matches("caf\u{c9}"));
+        assert!(!banned.matches("cafe"));
+    }
+
+    #[test]
+    fn component_refuses_a_name_made_only_of_ignorable_code_points() {
+        for raw in ["\u{200c}", "\u{feff}\u{200d}", "\u{202a}\u{206f}"] {
+            let err = PathComponentName::try_from(raw).unwrap_err();
+            assert_matches!(
+                err,
+                ArchiveError::InvalidConfiguration {
+                    setting: ConfigSetting::BannedPathComponent,
+                    problem: ConfigProblem::Empty
+                },
+                "{raw:?}"
+            );
+        }
+        assert!(PathComponentName::try_from("a\u{200c}").is_ok());
     }
 
     #[test]

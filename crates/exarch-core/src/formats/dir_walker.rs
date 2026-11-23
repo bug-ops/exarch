@@ -134,16 +134,28 @@ impl Hop<'_> {
 
 /// Creates and vets the directories that archive entries are written into.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct DirWalker {
+pub(crate) struct DirWalker<'c> {
     links: LinkPolicy,
+    config: &'c SecurityConfig,
 }
 
-impl DirWalker {
-    /// Builds a walker that applies the symlink policy of `config`.
-    pub(crate) fn new(config: &SecurityConfig) -> Self {
+impl<'c> DirWalker<'c> {
+    /// Builds a walker that applies the symlink policy and the banned
+    /// components of `config`.
+    pub(crate) fn new(config: &'c SecurityConfig) -> Self {
         Self {
             links: LinkPolicy::of(config),
+            config,
         }
+    }
+
+    /// Refuses a followed symlink that lands on a banned name, so an entry
+    /// path is judged where it is written and not only by how it is spelled.
+    fn check_landing(self, position: &Path) -> Result<()> {
+        if let Some(component) = self.config.banned_component_in(position) {
+            return Err(Violation::BannedComponent { component }.into());
+        }
+        Ok(())
     }
 
     /// Creates `dest/rel` and every missing ancestor, vetting each component,
@@ -406,6 +418,7 @@ impl DirWalker {
                 }))
             }
             (Followed::Inside { position, dir }, LinkPolicy::ContainedOnly) => {
+                self.check_landing(&position)?;
                 let dir = match dir {
                     Some(dir) => DirRef::Opened(dir),
                     None => {
@@ -503,11 +516,15 @@ mod tests {
     use std::assert_matches;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::sync::LazyLock;
     use tempfile::TempDir;
 
-    fn walker(allow_symlinks: bool) -> DirWalker {
-        let config = SecurityConfig::default().with_allow_symlinks(allow_symlinks);
-        DirWalker::new(&config)
+    fn walker(allow_symlinks: bool) -> DirWalker<'static> {
+        static DENY: LazyLock<SecurityConfig> =
+            LazyLock::new(|| SecurityConfig::default().with_allow_symlinks(false));
+        static ALLOW: LazyLock<SecurityConfig> =
+            LazyLock::new(|| SecurityConfig::default().with_allow_symlinks(true));
+        DirWalker::new(if allow_symlinks { &ALLOW } else { &DENY })
     }
 
     fn sp(path: &str) -> SafePath {
@@ -1092,10 +1109,15 @@ mod windows_tests {
     use crate::types::safe_path::Resolved;
     use std::assert_matches;
     use std::fs;
+    use std::sync::LazyLock;
     use tempfile::TempDir;
 
-    fn walker(allow_symlinks: bool) -> DirWalker {
-        DirWalker::new(&SecurityConfig::default().with_allow_symlinks(allow_symlinks))
+    fn walker(allow_symlinks: bool) -> DirWalker<'static> {
+        static DENY: LazyLock<SecurityConfig> =
+            LazyLock::new(|| SecurityConfig::default().with_allow_symlinks(false));
+        static ALLOW: LazyLock<SecurityConfig> =
+            LazyLock::new(|| SecurityConfig::default().with_allow_symlinks(true));
+        DirWalker::new(if allow_symlinks { &ALLOW } else { &DENY })
     }
 
     fn sp(path: &str) -> SafePath {

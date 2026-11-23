@@ -211,6 +211,13 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="empty"):
             config.add_banned_component("")
 
+    def test_banned_component_refuses_ignorable_only_name(self):
+        """A name made only of code points that comparison ignores is refused."""
+        config = SecurityConfig()
+        for raw in ("\u200c", "\ufeff\u200d"):
+            with pytest.raises(ValueError, match="empty"):
+                config.add_banned_component(raw)
+
     def test_banned_component_refuses_separators_and_dots(self):
         """A component that can never equal one path component is refused."""
         config = SecurityConfig()

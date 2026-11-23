@@ -336,7 +336,7 @@ pub(super) fn host_context<'r, V: FsView>(
 /// Extraction onto the real filesystem.
 pub(crate) struct HostTarget<'a> {
     root: PinnedRoot,
-    dirs: DirWalker,
+    dirs: DirWalker<'a>,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
     config: &'a SecurityConfig,
@@ -367,7 +367,7 @@ impl<'a> HostTarget<'a> {
         (&mut self.copy_buffer, self.root.marking())
     }
 
-    pub(super) const fn dirs(&self) -> DirWalker {
+    pub(super) const fn dirs(&self) -> DirWalker<'a> {
         self.dirs
     }
 

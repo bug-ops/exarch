@@ -291,7 +291,7 @@ impl<'a> Arrival<'a> {
 
 /// The state of one pre-check walk over the landings.
 struct Visit<'r> {
-    walker: DirWalker,
+    walker: DirWalker<'r>,
     root: &'r PinnedRoot,
     parents: ParentCache<'r>,
     check: DestinationCheck,

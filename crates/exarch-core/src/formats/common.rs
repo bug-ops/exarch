@@ -1303,6 +1303,7 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
     use std::path::PathBuf;
+    use std::sync::LazyLock;
     use tempfile::TempDir;
 
     #[cfg(any(unix, target_os = "wasi"))]
@@ -1351,8 +1352,9 @@ mod tests {
         CreateMode::Exact(sanitize_permissions(RawMode::new(mode), &config))
     }
 
-    fn test_walker() -> DirWalker {
-        DirWalker::new(&SecurityConfig::default())
+    fn test_walker() -> DirWalker<'static> {
+        static CONFIG: LazyLock<SecurityConfig> = LazyLock::new(SecurityConfig::default);
+        DirWalker::new(&CONFIG)
     }
 
     fn pinned(dest: &DestDir) -> PinnedRoot {

@@ -494,7 +494,26 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
-    /// Sets the most SHA-256 rounds of key derivation one operation may spend.
+    /// Sets the most SHA-256 rounds of key derivation one operation may
+    /// perform.
+    ///
+    /// Charged for the keys an archive needs before any encrypted block is
+    /// decoded, and again when another 7z operation of the process replaced
+    /// the cached key with a different one in between (the operation then fails
+    /// with `kdf_cost_exceeded` once the total passes the budget), so encrypted
+    /// 7z operations with different keys that run at the same time can make
+    /// each other fail. 7z operations of one process take turns only during the
+    /// key set-up of each encrypted block and while an encrypted header is
+    /// read.
+    ///
+    /// A pipeline that extracts an encrypted 7z from inside an encrypted 7z
+    /// derives the outer key again after every inner operation, so with the
+    /// default budget and 7-Zip's power 19 it is refused after 256 outer
+    /// blocks; raise `max_kdf_work` for such pipelines.
+    ///
+    /// Blocks that combine several coders in a layout that is not a plain chain
+    /// (such as BCJ2 with several AES coders) are charged for every AES coder,
+    /// so the budget is reached sooner for such archives.
     ///
     /// # Errors
     ///
@@ -596,7 +615,8 @@ impl PySecurityConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if the component is empty, exceeds maximum
-    /// length, or holds a null byte, a path separator, `.` or `..`.
+    /// length, holds a null byte, a path separator, `.` or `..`, or is made
+    /// only of code points that name comparison ignores (such as U+200C).
     fn add_banned_component<'a>(
         mut slf: PyRefMut<'a, Self>,
         component: &str,

@@ -1,5 +1,6 @@
 //! Security configuration for archive extraction.
 
+use std::cell::OnceCell;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
@@ -847,7 +848,8 @@ pub struct SecurityConfig {
     /// name the plain extraction refuses. See [`EntrySelection`].
     pub selection: EntrySelection,
 
-    /// List of banned path components (e.g., ".git", ".ssh").
+    /// List of banned path components (e.g., ".git", ".ssh"), matched after
+    /// Unicode normalization and case folding; see [`PathComponentName`].
     pub banned_path_components: Vec<PathComponentName>,
 
     /// Whether solid 7z archives are extracted, and under which limits.
@@ -1022,15 +1024,35 @@ pub struct SecurityConfig {
     pub repeated_paths: RepeatedPaths,
 
     /// Most SHA-256 rounds of password-based key derivation one operation may
-    /// spend.
+    /// perform.
     ///
     /// Charged at admission, before any encrypted block is decoded, so an
-    /// archive that asks for more work than this is refused as
+    /// archive whose keys need more work than this is refused as
     /// `EncryptionRefusal::KdfCostExceeded` without costing the work. ZIP AES
     /// derivation is a fixed 1000 PBKDF2 iterations per entry and is bounded
     /// by [`max_file_count`](Self::max_file_count) instead.
     ///
-    /// The budget bounds the key-derivation work that the operation requests.
+    /// The budget bounds the derivations the operation performs. 7z keeps one
+    /// derived key per process, so a key that another 7z operation of the
+    /// process (on another thread, or started from an entry callback) replaced
+    /// with a different one in between is derived again; that work is charged
+    /// when the block starts and the operation fails with `KdfCostExceeded`
+    /// once the total passes the budget. Operations that use the same password
+    /// and key parameters cost each other nothing, but encrypted 7z operations
+    /// with different keys that run at the same time can make each other fail
+    /// this way. They take turns during the key set-up of each encrypted block
+    /// and while an encrypted header is read, never while entries are
+    /// processed. A refusal of this kind applies to every later encrypted block
+    /// of the operation. A pipeline that extracts an encrypted 7z from inside
+    /// an encrypted 7z derives the outer key again after every inner operation,
+    /// so with the default budget and 7-Zip's power 19 it is refused after 256
+    /// outer blocks; raise `max_kdf_work` for such pipelines.
+    ///
+    /// Blocks that combine several coders in a layout that is not a plain chain
+    /// (such as BCJ2 with several AES coders) are charged for every AES coder,
+    /// so the budget is reached sooner for such archives.
+    /// Users of `sevenz-rust2` outside `exarch` in the same process are not
+    /// accounted for.
     ///
     /// Default: 2^27 (134,217,728 rounds), including for
     /// [`SecurityConfig::permissive`]. Exposed by both bindings, not by the
@@ -1669,7 +1691,8 @@ impl SecurityConfig {
         self
     }
 
-    /// Sets the most SHA-256 rounds of key derivation one operation may spend.
+    /// Sets the most SHA-256 rounds of key derivation one operation may
+    /// perform.
     ///
     /// # Examples
     ///
@@ -1709,14 +1732,28 @@ impl SecurityConfig {
 impl SecurityConfig {
     /// Validates whether a path component is allowed.
     ///
-    /// Comparison is case-insensitive to prevent bypass on case-insensitive
-    /// filesystems (Windows, macOS default).
+    /// A component is refused when it equals a banned name after canonical
+    /// decomposition and a per-character case mapping (see
+    /// [`PathComponentName`]), so spellings that a case-insensitive filesystem
+    /// treats as the same name are refused too.
     #[must_use]
     pub fn is_path_component_allowed(&self, component: &str) -> bool {
+        let fold = OnceCell::new();
         !self
             .banned_path_components
             .iter()
-            .any(|banned| banned.matches(component))
+            .any(|banned| banned.matches_folding_once(component, &fold))
+    }
+
+    /// The first banned name among the normal components of `path`, if any.
+    pub(crate) fn banned_component_in(&self, path: &std::path::Path) -> Option<Box<str>> {
+        path.components().find_map(|component| {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            let name = name.to_string_lossy();
+            (!self.is_path_component_allowed(&name)).then(|| Box::from(name.as_ref()))
+        })
     }
 
     /// Returns `true` if a file with the given optional extension may be
@@ -2521,6 +2558,47 @@ mod tests {
                 .contains(&PathComponentName::try_from(".ssh").unwrap()),
             "should ban .ssh"
         );
+    }
+
+    #[test]
+    fn test_replaced_banned_components_match_non_ascii_spellings() {
+        let names = ["caf\u{e9}", ".s\u{17f}h"]
+            .into_iter()
+            .map(|raw| PathComponentName::try_from(raw).unwrap())
+            .collect();
+        let config = SecurityConfig::default().with_banned_path_components(names);
+
+        for banned in [
+            "caf\u{e9}",
+            "cafe\u{301}",
+            "CAF\u{c9}",
+            ".ssh",
+            ".SSH",
+            ".\u{df}h",
+        ] {
+            assert!(!config.is_path_component_allowed(banned), "{banned:?}");
+        }
+        for allowed in ["cafe", ".git", ".sshx"] {
+            assert!(config.is_path_component_allowed(allowed), "{allowed:?}");
+        }
+    }
+
+    #[test]
+    fn test_aliased_banned_names_coexist_without_changing_the_verdict() {
+        let spellings = [".ssh", ".\u{17f}sh"];
+        let list: Vec<_> = spellings
+            .into_iter()
+            .map(|raw| PathComponentName::try_from(raw).unwrap())
+            .collect();
+        assert_ne!(list[0], list[1]);
+
+        let config = SecurityConfig::default().with_banned_path_components(list);
+        for component in [".ssh", ".SSH", ".\u{17f}sh", ".\u{df}h"] {
+            assert!(
+                !config.is_path_component_allowed(component),
+                "{component:?}"
+            );
+        }
     }
 
     #[test]

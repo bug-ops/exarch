@@ -204,6 +204,65 @@ proptest! {
         prop_assert!(result.is_err(), "banned component should be rejected");
     }
 
+    /// Alias spellings of the default names, as case-insensitive
+    /// filesystems resolve them, are rejected in entry paths and in symlink
+    /// and hardlink targets; unrelated names are not.
+    #[test]
+    fn prop_banned_components_match_alias_spellings(
+        spelled in prop::sample::select(vec![
+            ".\u{17f}sh", ".\u{17f}\u{17f}h", ".\u{df}h", ".S\u{17f}H", ".SSH",
+            ".aw\u{17f}", ".AW\u{17f}", ".\u{212a}ube", ".KUBE", ".doc\u{212a}er",
+            ".DOC\u{212a}ER", ".GIT", ".GnuPG", ".ENV",
+        ]),
+        prefix in "[a-z]{1,8}",
+    ) {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.symlinks = exarch_core::Admit::Allow;
+        config.allowed.hardlinks = exarch_core::Admit::Allow;
+
+        let entry = PathBuf::from(format!("{prefix}/{spelled}/file"));
+        prop_assert!(SafePath::validate(&entry, &dest, &config).is_err());
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from(format!("{spelled}/file"));
+        prop_assert!(SafeSymlink::validate(&link, &target, &dest, &config).is_err());
+        prop_assert!(
+            HardlinkTracker::new()
+                .validate_hardlink(&link, &target, &dest, &config)
+                .is_err()
+        );
+    }
+
+    /// Ignorable code points inserted anywhere in a banned name do not hide it.
+    #[test]
+    fn prop_banned_components_ignore_hfs_ignorables(
+        ignorable in prop::sample::select(vec![
+            '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202c}',
+            '\u{202e}', '\u{206a}', '\u{206d}', '\u{206f}', '\u{feff}',
+        ]),
+        name in prop::sample::select(vec![".git", ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".env"]),
+        at in 0usize..8,
+        repeat in 1usize..4,
+    ) {
+        let at = at.min(name.len());
+        let spelled = format!("{}{}{}", &name[..at], ignorable.to_string().repeat(repeat), &name[at..]);
+        prop_assert!(!SecurityConfig::default().is_path_component_allowed(&spelled));
+    }
+
+    /// Names that are not banned spellings stay allowed, and no input panics.
+    #[test]
+    fn prop_unrelated_components_are_allowed(
+        name in "[a-zA-Z0-9_\\u{e0}-\\u{ff}][a-zA-Z0-9_\\u{e0}-\\u{ff}.]{0,15}",
+        arbitrary in "\\PC{0,24}",
+    ) {
+        let config = SecurityConfig::default();
+        prop_assume!(!name.starts_with('.'));
+        prop_assert!(config.is_path_component_allowed(&name));
+        let _ = config.is_path_component_allowed(&arbitrary);
+    }
+
     /// Paths within configured depth should be accepted.
     #[test]
     fn prop_within_depth_accepted(

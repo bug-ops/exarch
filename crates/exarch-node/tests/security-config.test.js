@@ -371,11 +371,36 @@ describe('SecurityConfig', () => {
       assert.deepStrictEqual(config.bannedPathComponents, ['.secret']);
     });
 
+    it('should refuse a name made only of ignorable code points', () => {
+      const config = new SecurityConfig();
+      for (const raw of ['\u200c', '\ufeff\u200d']) {
+        assert.throws(
+          () => config.addBannedComponent(raw),
+          { code: 'INVALID_CONFIGURATION', setting: 'banned_path_component' },
+          raw
+        );
+      }
+    });
+
     it('should refuse components with separators or dots', () => {
       const config = new SecurityConfig();
       for (const raw of ['a/b', '..', '.']) {
         assert.throws(() => config.addBannedComponent(raw), undefined, raw);
       }
+    });
+
+    it('should refuse alias and decomposed spellings of banned names', () => {
+      const config = new SecurityConfig();
+      for (const alias of ['.\u017fsh', '.\u00dfh', '.aw\u017f', '.\u212aube', '.doc\u212aer']) {
+        assert.strictEqual(config.isPathComponentAllowed(alias), false, alias);
+        assert.strictEqual(config.hasBannedPathComponent(alias), true, alias);
+      }
+      assert.strictEqual(config.isPathComponentAllowed('.sshx'), true);
+
+      config.withBannedComponents(['caf\u00e9']);
+      assert.strictEqual(config.isPathComponentAllowed('cafe\u0301'), false);
+      assert.strictEqual(config.isPathComponentAllowed('CAFE\u0301'), false);
+      assert.strictEqual(config.isPathComponentAllowed('cafe'), true);
     });
 
     it('should check path component allowed', () => {

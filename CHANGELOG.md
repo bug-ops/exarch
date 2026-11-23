@@ -30,8 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the grow-after-walk creation fixture and the 7z encrypted-block predicate are written once (#1309).
 - Fuzzing: the fuzz crate lints clean under clippy as a CI step, and the `encrypted` oracle keys its empty-file exemption by path and encryption state (#1309).
 - Tests: a Docker recipe runs the Linux sandbox tests with Landlock enforced, and the serial idle-host benchmark step is documented (#1312).
+- Core: centralized buffered file writes via `copy_and_finish_file` (#1314), delegated `zip_tail::holds_reader_record` to `chunk_search::search_chunks` (#1313), made `DestOccupancy::replace_mode` exhaustive (#1317), and adopted Rust 1.93–1.100 cleanups with `[workspace.lints.cargo]` (#1318).
+- Bindings & CLI: `exarch-python` acquires the GIL once per error conversion (#1316), `exarch-cli` uses saturating counters and `ExtractionReport::total_items()` (#1315), and `exarch-node` crate docs point to `bug-ops/exarch` (#1319).
+- CI & Dependencies: added `pnpm audit` and `pip-audit` to the security workflow (#1322), enabled Cargo 1.100's 7-day `global-min-publish-age` cooldown with overrides for `zip-drift` and `release` (#1321), and aligned `dependabot.yml`, `deny.toml`, and `ci.yml` comments (#1320).
 
 ### Fixed
+
+- Staging: recover `0700` owner bits on freshly created staging directories under owner-restricting umasks (e.g. `0277`) and report the umask clearly when the directory cannot be opened (#1311).
+- Tests: made `test_create_tar_directory_mode_without_preserve_permissions` umask-independent (#1310).
 
 - 7z: extraction restores the stored Unix permission bits of regular files through the TAR/ZIP sanitizer (#1306).
 - 7z: `extract` reports a wrong password on an AES PPMd block as `wrong_password_or_corrupt`, like `verify` (#1306).

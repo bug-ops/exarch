@@ -1,2 +1,9 @@
 [build]
 warnings = "deny"
+
+# RFC 3923 dependency cooldown (stabilized in Rust 1.100, matching workspace MSRV).
+# Rejects newly published crates during `cargo update` without affecting crates
+# already locked in Cargo.lock. Override for urgent security bumps or drift checks
+# via `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`.
+[registry]
+global-min-publish-age = "7 days"

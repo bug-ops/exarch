@@ -2440,7 +2440,7 @@ fn extra_fields(block: &[u8]) -> impl Iterator<Item = std::result::Result<(u16, 
 
 /// A record that stops a streaming reader when it sits between entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StrayKind {
+pub(super) enum StrayKind {
     Central,
     End(EndRecordKind),
 }
@@ -2463,7 +2463,7 @@ impl StrayKind {
 
 /// A record kind the gap and prefix searches look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Signature {
+pub(super) enum Signature {
     LocalHeader,
     Stray(StrayKind),
 }
@@ -2473,7 +2473,7 @@ enum Signature {
 ///
 /// Of the end-related signatures only the two end records stop a streaming
 /// reader; the ZIP64 locator and the data descriptor signature do not.
-fn find_signature(bytes: &[u8]) -> Option<(usize, Signature)> {
+pub(super) fn find_signature(bytes: &[u8]) -> Option<(usize, Signature)> {
     bytes
         .array_windows::<4>()
         .enumerate()

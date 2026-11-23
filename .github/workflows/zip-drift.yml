@@ -50,6 +50,10 @@ jobs:
           java-version: '21'
 
       - name: Update zip to the newest 9.x release, beyond the pinned requirement
+        env:
+          # Override .cargo/config.toml's [registry] global-min-publish-age cooldown:
+          # this workflow intentionally resolves freshly published zip releases.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
         run: |
           sed -i 's/^zip = { version = "~9\.[0-9]*"/zip = { version = "9"/' Cargo.toml
           grep -q '^zip = { version = "9"' Cargo.toml

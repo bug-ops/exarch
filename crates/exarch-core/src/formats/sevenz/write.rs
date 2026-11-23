@@ -7,7 +7,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_cancellable;
 use crate::formats::common;
 use crate::formats::common::ModeTiming;
 use crate::formats::occupant::ReplacePermit;
@@ -24,7 +23,6 @@ use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use std::io::ErrorKind;
 use std::io::Read;
-use std::io::Write;
 use std::path::Path;
 
 /// What a 7z file write consumes besides the entry's bytes and location: the
@@ -56,7 +54,7 @@ pub(super) struct FileWrite<'a> {
 /// cannot leave a truncated file where the original stood.
 ///
 /// The entry's sanitized mode, when it has one, is applied through the open
-/// descriptor (`fchmod`) by [`common::finish_written`], after the
+/// descriptor (`fchmod`) by [`common::copy_and_finish_file`], after the
 /// download-origin mark when the run writes one.
 ///
 /// `parent` is the pinned directory handle the caller obtained from the
@@ -106,26 +104,20 @@ pub(super) fn write_file_direct(
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
     // since this branch only runs when nothing occupied `leaf` beforehand, it
     // is always safe to remove whatever we just started writing there.
-    //
-    // Declared before `writer` takes ownership of `file` below: Rust drops
-    // locals in reverse declaration order, so on an error unwind `writer`
-    // (and the `file` it owns) drops — and closes the fd — before `guard`
-    // attempts to remove the name. Reversing this order would let the guard
-    // try to unlink a still-open file, a silent no-op on Windows.
+    // `copy_and_finish_file` takes `file` by value and closes it before
+    // returning on both success and error, so `guard` never unlinks a
+    // still-open handle (critical on Windows).
     let guard = TempFileGuard::new(parent, leaf);
-    // 64KiB write buffering to cut per-file syscall count (finding M2),
-    // matching TAR/ZIP's common::extract_file_with_permit.
-    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-    let bytes_written = copy_cancellable(
+    let bytes_written = common::copy_and_finish_file(
         reader,
-        &mut writer,
+        file,
+        faults,
         copy_buffer,
-        Some(permit.into_bytes()),
+        permit.into_admitted(),
+        pending,
+        marking,
         progress,
-    )
-    .map_err(|error| faults.classify(error))?;
-    writer.flush()?;
-    common::finish_written(writer, pending, marking)?;
+    )?;
     guard.persist();
     Ok(bytes_written)
 }
@@ -235,28 +227,20 @@ pub(super) fn write_file_with_permit_using(
         next_candidate,
     )?;
 
-    // Declared before `writer` takes ownership of `temp_file` below, for the
-    // same reason as write_file_direct's `guard`: reverse-declaration-order
-    // drop means `writer` (owning `temp_file`) closes the fd before
-    // `temp_guard` attempts to remove the temp name on an error unwind,
-    // instead of racing a still-open handle (a silent no-op on Windows).
+    // `copy_and_finish_file` takes `temp_file` by value and closes it before
+    // returning on both success and error, so neither the rename nor
+    // `temp_guard`'s unwind cleanup ever races a still-open handle (Windows).
     let temp_guard = TempFileGuard::for_temp(parent, temp.clone());
-    // 64KiB write buffering to cut per-file syscall count (issue #492
-    // adversarial review, finding M2), matching TAR/ZIP's
-    // common::extract_file_with_permit.
-    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, temp_file);
-    let bytes_written = copy_cancellable(
+    let bytes_written = common::copy_and_finish_file(
         reader,
-        &mut writer,
+        temp_file,
+        faults,
         copy_buffer,
-        Some(permit.into_bytes()),
+        permit.into_admitted(),
+        pending,
+        marking,
         progress,
-    )
-    .map_err(|error| faults.classify(error))?;
-    writer.flush()?;
-    // Closed before the rename: renaming a still-open file is fine on Unix but
-    // the handle should not outlive its purpose regardless.
-    common::finish_written(writer, pending, marking)?;
+    )?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 

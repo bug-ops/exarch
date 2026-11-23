@@ -68,6 +68,7 @@ use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::CreateMode;
+use crate::security::quota::AdmittedSize;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
 use crate::types::SafePath;
@@ -412,8 +413,8 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // guards report.bytes_written, a different quantity, against overflow.
     // Checked before any filesystem mutation so a rejected entry never
     // leaves a zero-byte file on disk (restores the pre-#446 ordering).
-    let expected_size = permit.into_bytes();
-    checked_add_bytes(report.bytes_written, expected_size)?;
+    let expected_size = permit.into_admitted();
+    checked_add_bytes(report.bytes_written, expected_size.get())?;
 
     let marking = root.marking();
     let timing = ModeTiming::of(marking);
@@ -437,17 +438,16 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // Removes the partial file when the copy aborts (forged `expected_size`);
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
-    let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_cancellable(
+    let bytes_written = copy_and_finish_file(
         reader,
-        &mut buffered_writer,
+        output_file,
+        faults,
         copy_buffer,
-        Some(expected_size),
+        expected_size,
+        pending,
+        marking,
         &mut *progress,
-    )
-    .map_err(|error| faults.classify(error))?;
-    buffered_writer.flush()?;
-    drop(finish_written(buffered_writer, pending, marking)?);
+    )?;
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     if replaced {
@@ -608,17 +608,69 @@ pub(crate) fn seal_output(
     pending.apply(file)
 }
 
+/// Write buffer capacity (64 KiB) used when streaming archive file contents
+/// to disk, matching typical filesystem block sizes and cutting per-file
+/// write syscalls.
+const FILE_WRITE_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Streams `reader` into `file` through a [`FILE_WRITE_BUFFER_BYTES`]-byte
+/// buffer, enforces `expected_size`, classifies read faults, flushes, seals
+/// the file (download-origin mark then pending mode), and closes `file` before
+/// returning.
+///
+/// Taking `file` by value ensures the descriptor closes on both success
+/// (explicit `drop`) and any error unwind before the caller's cleanup guard
+/// unlinks the file or renames a temp file into place — critical on Windows,
+/// where unlinking or renaming an open handle fails.
+///
+/// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
+///
+/// `expected_size` is an [`AdmittedSize`] produced by spending a
+/// [`QuotaPermit`], enforced as a hard streaming ceiling and exact post-copy
+/// match by [`copy_cancellable`].
+///
+/// # Errors
+///
+/// Returns a classified error when reading, writing, size enforcement,
+/// cancellation, flushing, or mode application fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+)]
+pub(crate) fn copy_and_finish_file<R: Read + ?Sized>(
+    reader: &mut R,
+    file: File,
+    faults: ReadFaults<'_>,
+    copy_buffer: &mut CopyBuffer,
+    expected_size: AdmittedSize,
+    pending: PendingMode,
+    marking: Option<&MarkRun>,
+    progress: &mut dyn ProgressCallback,
+) -> Result<u64> {
+    let mut writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_BYTES, file);
+    let bytes_written = copy_cancellable(
+        reader,
+        &mut writer,
+        copy_buffer,
+        Some(expected_size.get()),
+        progress,
+    )
+    .map_err(|error| faults.classify(error))?;
+    writer.flush()?;
+    drop(finish_written(writer, pending, marking)?);
+    Ok(bytes_written)
+}
+
 /// Flushes out `writer`'s file handle and seals it: the mark, then the mode.
 ///
-/// The one place a finished write is closed out, shared by every format that
-/// writes file content. The caller drops the returned handle before the name
-/// is published or replaced.
+/// The caller drops the returned handle before the name is published or
+/// replaced.
 ///
 /// # Errors
 ///
 /// The I/O error of recovering the file from the buffer, or of applying the
 /// mode.
-pub(crate) fn finish_written(
+fn finish_written(
     writer: BufWriter<File>,
     pending: PendingMode,
     marking: Option<&MarkRun>,
@@ -2259,6 +2311,59 @@ mod tests {
 
         assert_matches!(refusal, ArchiveError::SourceNotFound { .. });
         assert!(!NotARegularFile::is_cause_of(&refusal));
+    }
+
+    #[test]
+    fn copy_and_finish_file_writes_flushes_and_enforces_admitted_size() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = pinned(&DestDir::new(temp.path()).expect("dest"));
+        let config = SecurityConfig::default();
+        let mut copy_buffer = CopyBuffer::new();
+
+        let (_, leaf) = Leaf::split(Path::new("ok.txt")).expect("leaf");
+        let (file, pending) = create_file(
+            root.dir(),
+            leaf,
+            Some(sanitized(0o644)),
+            ModeTiming::AfterMark,
+        )
+        .expect("create file");
+        let permit = QuotaTracker::new().reserve(11, &config).expect("reserve");
+        let mut reader = Cursor::new(b"hello world");
+        let written = copy_and_finish_file(
+            &mut reader,
+            file,
+            ReadFaults::new(ReadFamily::SevenZ, None),
+            &mut copy_buffer,
+            permit.into_admitted(),
+            pending,
+            None,
+            &mut NoopProgress,
+        )
+        .expect("exact copy should succeed");
+        assert_eq!(written, 11);
+        assert_eq!(
+            std::fs::read(temp.path().join("ok.txt")).expect("read file"),
+            b"hello world"
+        );
+
+        let (_, over_leaf) = Leaf::split(Path::new("over.txt")).expect("leaf");
+        let (over_file, over_pending) =
+            create_file(root.dir(), over_leaf, None, ModeTiming::AtCreate).expect("create file");
+        let over_permit = QuotaTracker::new().reserve(4, &config).expect("reserve");
+        let mut over_reader = Cursor::new(b"longer than four bytes");
+        let err = copy_and_finish_file(
+            &mut over_reader,
+            over_file,
+            ReadFaults::new(ReadFamily::SevenZ, None),
+            &mut copy_buffer,
+            over_permit.into_admitted(),
+            over_pending,
+            None,
+            &mut NoopProgress,
+        )
+        .expect_err("overrun must fail");
+        assert_matches!(err, ArchiveError::SecurityViolation { .. });
     }
 }
 

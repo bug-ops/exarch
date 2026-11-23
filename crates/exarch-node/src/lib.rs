@@ -34,7 +34,7 @@
 //!
 //! # Repository
 //!
-//! <https://github.com/rabax/exarch>
+//! <https://github.com/bug-ops/exarch>
 //!
 //! # License
 //!

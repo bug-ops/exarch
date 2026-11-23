@@ -454,11 +454,9 @@ impl TarReadBudget {
 
 /// Adds `by` to `counter`, saturating at `u64::MAX`, and returns the new value.
 fn saturating_add_counter(counter: &AtomicU64, by: u64) -> u64 {
-    let previous = counter
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-            Some(v.saturating_add(by))
-        })
-        .unwrap_or_else(|v| v);
+    let previous = counter.update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        v.saturating_add(by)
+    });
     previous.saturating_add(by)
 }
 

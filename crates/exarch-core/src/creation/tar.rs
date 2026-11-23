@@ -527,16 +527,34 @@ mod tests {
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.directories_added, 1);
 
+        let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
+        let dir_modes: Vec<u32> = archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap())
+            .filter(|e| e.header().entry_type().is_dir())
+            .map(|e| e.header().mode().unwrap())
+            .collect();
+        assert_eq!(
+            dir_modes,
+            vec![0o755],
+            "directory entries without preserve_permissions must store the \
+             deterministic default 0o755 in the TAR header, not mode 0 or the source mode"
+        );
+
         let extract_dir = TempDir::new().unwrap();
         let security_config = SecurityConfig::default();
         extract_archive(&output, extract_dir.path(), &security_config).unwrap();
 
+        let probe = extract_dir.path().join("umask-probe");
+        fs::create_dir(&probe).unwrap();
+        let expected_mode = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+
         let extracted = extract_dir.path().join("subdir");
         let mode = fs::metadata(&extracted).unwrap().permissions().mode() & 0o777;
         assert_eq!(
-            mode, 0o755,
-            "directory entries without preserve_permissions must use a traversable \
-             deterministic default, not mode 0"
+            mode, expected_mode,
+            "extracted directory mode must match the default mkdir mode under the active umask"
         );
     }
 

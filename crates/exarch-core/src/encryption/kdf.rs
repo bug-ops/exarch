@@ -1,18 +1,58 @@
-//! Key-derivation cost of 7z AES blocks, charged before any block is decoded.
+//! Key-derivation cost of 7z AES blocks.
 //!
 //! sevenz-rust2 derives a block key with `2^power` SHA-256 rounds and keeps
-//! only the last derived key, so a derivation costs only when the pair
-//! (power, salt) differs from the previous block's. [`KdfRuns`] mirrors that:
-//! it walks the AES blocks in archive order and charges `2^power` for each
-//! change of pair.
+//! only the last derived key in one process-wide slot, so a derivation costs
+//! only when the pair (power, salt) differs from the previous derivation's.
+//!
+//! [`KdfRuns`] charges against `max_kdf_work` at admission, before any block
+//! is decoded: it walks the AES blocks in archive order and charges `2^power`
+//! for each change of pair, which is the work an operation that nobody
+//! interrupts performs.
+//!
+//! Other operations of the process share the slot. Two things keep the charge
+//! at or above the derivations performed:
+//!
+//! - An [`AesTurn`] is held while an AES block sets up its decoder (where the
+//!   key is derived) and while an encrypted header is read, never while entry
+//!   callbacks, progress hooks or sinks run and never between blocks.
+//! - Under the turn the process records a keyed digest of the (power, salt,
+//!   password) of the key the slot holds, the same identity the library caches
+//!   by; nothing secret is stored. A [`SlotWatch`] charges `2^power` again for
+//!   a block whose key admission expected to find cached but the slot does not
+//!   hold (another operation, or one nested in a callback, used a different
+//!   key, or an encrypted header whose key is not modelled was read), and the
+//!   operation is refused with `KdfCostExceeded` once admitted plus repeated
+//!   work exceeds the budget. Operations that use the same key cost each other
+//!   nothing.
+//!
+//! Guaranteed: charge >= derivations performed by exarch operations, so the
+//! work of one operation stays within `max_kdf_work` plus at most one
+//! derivation per concurrent set-up. Consequence: operations with different
+//! keys running at the same time can make each other fail mid-operation with
+//! `KdfCostExceeded`. Not covered: other users of sevenz-rust2 in the same
+//! process, and the `Read`/`Seek` calls of the archive source, which run under
+//! the turn during an encrypted header read and an AES block's set-up and must
+//! not wait on another encrypted 7z operation. The turn is not fair: under
+//! sustained load a waiter can be overtaken.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::io;
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
+use std::sync::Condvar;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::PoisonError;
+use std::thread;
+use std::thread::ThreadId;
 
 use super::Credentials;
 use super::UnusablePassword;
 use crate::ArchiveError;
 use crate::EncryptionRefusal;
 use crate::Malformation;
+use crate::formats::io_marker::IoMarker;
 
 /// The largest `NumCyclesPower` sevenz-rust2 derives a key for.
 pub(crate) const MAX_POWER: u8 = 24;
@@ -50,16 +90,20 @@ pub(crate) fn key_mode(properties: &[u8]) -> Option<KeyMode> {
 }
 
 /// What the AES coder properties of a 7z block declare.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AesParams {
+///
+/// The salt is at most 16 bytes (one flag bit plus a four-bit size), kept
+/// zero-padded so equal parameters compare equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AesParams {
     power: u8,
-    params_tail: Vec<u8>,
+    salt_len: u8,
+    salt: [u8; 16],
 }
 
 impl AesParams {
     /// Parses the coder properties the way sevenz-rust2 does: a lone byte is
     /// padded with a zero size byte, the salt follows the two size bytes.
-    fn parse(properties: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(properties: &[u8]) -> Option<Self> {
         let padded;
         let properties = match properties {
             [] => return None,
@@ -77,9 +121,12 @@ impl AesParams {
         if properties.len() < tail_end.checked_add(iv_size)? {
             return None;
         }
+        let mut salt = [0u8; 16];
+        salt.get_mut(..tail.len())?.copy_from_slice(tail);
         Some(Self {
             power: b0 & 0x3F,
-            params_tail: tail.to_vec(),
+            salt_len: u8::try_from(tail.len()).ok()?,
+            salt,
         })
     }
 }
@@ -92,6 +139,9 @@ pub(crate) enum KeySource<'a> {
     Header(KeyMode),
     /// A block's AES coder, with its properties.
     Block(&'a [u8]),
+    /// An AES coder of a block whose build order is not known, charged at its
+    /// full cost whatever the slot held.
+    Uncached(&'a [u8]),
 }
 
 /// Why a 7z AES key cannot be admitted, in the order it is checked.
@@ -117,6 +167,204 @@ impl From<KeyRefusal> for ArchiveError {
                 crate::Violation::Encrypted { reason, name: None }.into()
             }
         }
+    }
+}
+
+struct TurnState {
+    holder: Mutex<Option<ThreadId>>,
+    released: Condvar,
+}
+
+static TURN: TurnState = TurnState {
+    holder: Mutex::new(None),
+    released: Condvar::new(),
+};
+
+/// Fingerprint of the key the shared slot holds, or `None` when unknown.
+static SLOT_KEY: Mutex<Option<SlotKey>> = Mutex::new(None);
+
+/// Keys the fingerprints, so one cannot be reversed or compared across
+/// processes; the secret itself is never stored.
+static FINGERPRINT_KEYS: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
+/// A keyed digest of the (power, salt, password) a derived key came from,
+/// which is what sevenz-rust2's own cache is keyed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlotKey(u64);
+
+impl SlotKey {
+    fn of(params: &AesParams, password: &[u8]) -> Self {
+        Self(
+            FINGERPRINT_KEYS.hash_one((
+                params.power,
+                params
+                    .salt
+                    .get(..usize::from(params.salt_len))
+                    .unwrap_or_default(),
+                password,
+            )),
+        )
+    }
+}
+
+/// Exclusive use of the key slot sevenz-rust2 shares across the process,
+/// released on drop.
+///
+/// Held by one thread at a time. A thread that already holds the turn gets a
+/// handle that holds nothing, so a nested use on that thread cannot deadlock.
+/// Stays on the thread that took it.
+#[derive(Debug)]
+pub(crate) struct AesTurn {
+    owned: bool,
+    on_thread: PhantomData<*const ()>,
+}
+
+impl AesTurn {
+    /// Waits until no other thread holds the turn, then takes it.
+    pub(crate) fn acquire() -> Self {
+        let me = thread::current().id();
+        let mut holder = TURN.holder.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match *holder {
+                None => {
+                    *holder = Some(me);
+                    return Self::new(true);
+                }
+                Some(current) if current == me => return Self::new(false),
+                Some(_) => {
+                    holder = TURN
+                        .released
+                        .wait(holder)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+        }
+    }
+
+    const fn new(owned: bool) -> Self {
+        Self {
+            owned,
+            on_thread: PhantomData,
+        }
+    }
+}
+
+impl Drop for AesTurn {
+    fn drop(&mut self) {
+        if self.owned {
+            *TURN.holder.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            TURN.released.notify_one();
+        }
+    }
+}
+
+/// Reads an encrypted 7z header under the turn and records the key the slot
+/// holds afterwards: `header_key` (the parameters the probe read from the
+/// header's single AES coder) with `password` when the read succeeded, else
+/// unknown.
+pub(crate) fn with_header_key<T, E>(
+    header_key: Option<AesParams>,
+    password: &[u8],
+    read: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let _turn = AesTurn::acquire();
+    let value = read();
+    let known = header_key
+        .filter(|params| params.power <= MAX_POWER)
+        .filter(|_| value.is_ok())
+        .map(|params| SlotKey::of(&params, password));
+    *SLOT_KEY.lock().unwrap_or_else(PoisonError::into_inner) = known;
+    value
+}
+
+/// Marks the key slot unknown, for a block set-up that failed before the
+/// decoder was built. Call holding the [`AesTurn`].
+pub(crate) fn forget_slot_key() {
+    *SLOT_KEY.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// Marker carried in an [`io::Error`] when repeated key derivation would take
+/// an operation over its `max_kdf_work`; recovered by
+/// `budget_violation`.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("key derivation would exceed the max_kdf_work budget of this operation")]
+pub(crate) struct KdfRepeatExceeded;
+
+impl IoMarker for KdfRepeatExceeded {
+    const KIND: io::ErrorKind = io::ErrorKind::Other;
+}
+
+impl From<KdfRepeatExceeded> for ArchiveError {
+    fn from(_: KdfRepeatExceeded) -> Self {
+        crate::Violation::Encrypted {
+            reason: EncryptionRefusal::KdfCostExceeded,
+            name: None,
+        }
+        .into()
+    }
+}
+
+/// What one operation charges beyond admission when the shared key slot does
+/// not hold the key admission expected to find there.
+#[derive(Debug, Default)]
+pub(crate) struct SlotWatch {
+    last: Option<AesParams>,
+    repeated: u64,
+}
+
+impl SlotWatch {
+    /// Registers the set-up of a block whose AES coders have `coders`
+    /// properties, in the order the decoder builds them, to be called holding
+    /// the [`AesTurn`] before the decoder is built. Returns the work charged
+    /// beyond admission for this block.
+    ///
+    /// Admission charged nothing for a coder whose pair equals the operation's
+    /// previous one. If the slot holds another key (or an unknown one) the
+    /// decoder derives it again, so its `2^power` is charged. A slot that holds
+    /// the same key, also when another operation put it there, costs nothing.
+    pub(crate) fn enter_block<'a>(
+        &mut self,
+        coders: impl IntoIterator<Item = &'a [u8]>,
+        password: &[u8],
+    ) -> u64 {
+        let charged = {
+            let mut slot = SLOT_KEY.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut charged = 0u64;
+            for properties in coders {
+                let Some(params) = AesParams::parse(properties) else {
+                    continue;
+                };
+                if params.power > MAX_POWER {
+                    continue;
+                }
+                let key = SlotKey::of(&params, password);
+                let derived = *slot != Some(key);
+                if derived && self.last.as_ref() == Some(&params) {
+                    charged = charged.saturating_add(1u64 << params.power);
+                }
+                *slot = Some(key);
+                self.last = Some(params);
+            }
+            drop(slot);
+            charged
+        };
+        self.repeated = self.repeated.saturating_add(charged);
+        charged
+    }
+
+    /// Registers the set-up of a block whose coders are built in an order not
+    /// visible here. Admission charged every AES coder of it in full, which
+    /// bounds the derivations, so nothing is charged now; the slot afterwards
+    /// holds a key that is not known, and so does this operation's memory of
+    /// its last pair.
+    pub(crate) fn enter_unordered_block(&mut self) {
+        *SLOT_KEY.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.last = None;
+    }
+
+    /// Work charged so far beyond admission.
+    pub(crate) const fn repeated(&self) -> u64 {
+        self.repeated
     }
 }
 
@@ -158,12 +406,18 @@ impl KdfRuns {
             .ok_or(KeyRefusal::PasswordRequired)?;
         let admitted = match source {
             KeySource::Block(properties) => self.admit(properties),
+            KeySource::Uncached(properties) => self.admit_uncached(properties),
             KeySource::Header(KeyMode::RawKey) => Err(KeyRefusal::Refused(
                 EncryptionRefusal::WeakEncryptionRefused,
             )),
             KeySource::Header(KeyMode::Derived) => self.within_budget(),
         };
         admitted.map(|()| password)
+    }
+
+    /// Rounds charged so far.
+    pub(crate) const fn spent(&self) -> u64 {
+        self.spent
     }
 
     fn within_budget(&self) -> Result<(), KeyRefusal> {
@@ -184,6 +438,24 @@ impl KdfRuns {
     /// `WeakEncryptionRefused` for raw-key mode and `KdfCostExceeded` for a
     /// power above the cap or a total above the budget.
     pub(crate) fn admit(&mut self, properties: &[u8]) -> Result<(), KeyRefusal> {
+        self.admit_coder(properties, true)
+    }
+
+    /// Like [`admit`](Self::admit), but charges the coder in full and forgets
+    /// what the previous block left cached.
+    ///
+    /// For a block whose coders are built in an order exarch cannot see (a
+    /// multi-input coder): each coder derives at most once, so the sum over
+    /// its AES coders bounds the derivations whatever the order.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`admit`](Self::admit).
+    pub(crate) fn admit_uncached(&mut self, properties: &[u8]) -> Result<(), KeyRefusal> {
+        self.admit_coder(properties, false)
+    }
+
+    fn admit_coder(&mut self, properties: &[u8], reuse_cached: bool) -> Result<(), KeyRefusal> {
         let params = AesParams::parse(properties).ok_or(KeyRefusal::Malformed)?;
         if KeyMode::of_power(params.power) == KeyMode::RawKey {
             return Err(KeyRefusal::Refused(
@@ -193,10 +465,10 @@ impl KdfRuns {
         if params.power > MAX_POWER {
             return Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded));
         }
-        if self.last.as_ref() != Some(&params) {
+        if !reuse_cached || self.last.as_ref() != Some(&params) {
             self.spent = self.spent.saturating_add(1u64 << params.power);
-            self.last = Some(params);
         }
+        self.last = reuse_cached.then_some(params);
         self.within_budget()
     }
 }
@@ -219,6 +491,122 @@ mod tests {
 
     fn budget(rounds: u64) -> NonZeroU64 {
         NonZeroU64::new(rounds).unwrap()
+    }
+
+    #[test]
+    fn the_turn_is_exclusive_across_threads() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let inside = AtomicUsize::new(0);
+        let overlaps = AtomicUsize::new(0);
+        thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        let _turn = AesTurn::acquire();
+                        if inside.fetch_add(1, Ordering::SeqCst) != 0 {
+                            overlaps.fetch_add(1, Ordering::SeqCst);
+                        }
+                        thread::yield_now();
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_nested_turn_on_one_thread_does_not_deadlock_and_keeps_the_outer_one() {
+        let outer = AesTurn::acquire();
+        let inner = AesTurn::acquire();
+        assert!(outer.owned);
+        assert!(!inner.owned);
+        drop(inner);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let _turn = AesTurn::acquire();
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(outer);
+        rx.recv().unwrap();
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn a_slot_holding_another_key_charges_a_repeated_pair_again() {
+        let _turn = AesTurn::acquire();
+        let same = [19u8, 0];
+        let other_pair = [20u8, 0];
+        let mut mine = SlotWatch::default();
+        let mut other = SlotWatch::default();
+        assert_eq!(mine.enter_block([&same[..]], b"pw"), 0);
+        other.enter_block([&other_pair[..]], b"pw");
+        assert_eq!(mine.enter_block([&same[..]], b"pw"), 1 << 19);
+        other.enter_block([&other_pair[..]], b"pw");
+        assert_eq!(mine.enter_block([&other_pair[..]], b"pw"), 0);
+        assert_eq!(mine.repeated(), 1 << 19);
+    }
+
+    #[test]
+    fn a_slot_holding_the_same_key_costs_nothing_and_the_password_is_part_of_the_key() {
+        let _turn = AesTurn::acquire();
+        let same = [19u8, 0];
+        let mut mine = SlotWatch::default();
+        let mut other = SlotWatch::default();
+        assert_eq!(mine.enter_block([&same[..]], b"pw"), 0);
+        other.enter_block([&same[..]], b"pw");
+        assert_eq!(mine.enter_block([&same[..]], b"pw"), 0);
+        other.enter_block([&same[..]], b"other password");
+        assert_eq!(mine.enter_block([&same[..]], b"pw"), 1 << 19);
+    }
+
+    #[test]
+    fn a_header_read_leaves_its_own_key_in_the_slot_and_a_failed_one_leaves_none() {
+        let _turn = AesTurn::acquire();
+        let props = [19u8, 0];
+        let params = AesParams::parse(&props);
+        let mut mine = SlotWatch::default();
+        assert_eq!(mine.enter_block([&props[..]], b"pw"), 0);
+        with_header_key(params, b"pw", || Ok::<(), ()>(())).unwrap();
+        assert_eq!(mine.enter_block([&props[..]], b"pw"), 0);
+        with_header_key(params, b"pw", || Err::<(), ()>(())).unwrap_err();
+        assert_eq!(mine.enter_block([&props[..]], b"pw"), 1 << 19);
+        with_header_key(None, b"pw", || Ok::<(), ()>(())).unwrap();
+        assert_eq!(mine.enter_block([&props[..]], b"pw"), 1 << 19);
+    }
+
+    #[test]
+    fn an_uncached_admission_charges_every_coder_and_forgets_the_pair() {
+        let mut runs = KdfRuns::new(budget(3 << 19), false);
+        let block = [19, 0];
+        for _ in 0..3 {
+            assert_eq!(runs.admit_uncached(&block), Ok(()));
+        }
+        assert_eq!(runs.spent(), 3 << 19);
+        assert_eq!(
+            runs.admit_uncached(&block),
+            Err(KeyRefusal::Refused(EncryptionRefusal::KdfCostExceeded))
+        );
+        let mut runs = KdfRuns::new(budget(u64::MAX), false);
+        assert_eq!(runs.admit_uncached(&block), Ok(()));
+        assert_eq!(runs.admit(&block), Ok(()));
+        assert_eq!(runs.spent(), 2 << 19);
+    }
+
+    #[test]
+    fn a_block_with_unordered_coders_leaves_the_slot_unknown() {
+        let _turn = AesTurn::acquire();
+        let props = [19u8, 0];
+        let mut probe = SlotWatch::default();
+        assert_eq!(probe.enter_block([&props[..]], b"pw"), 0);
+        SlotWatch::default().enter_unordered_block();
+        assert_eq!(probe.enter_block([&props[..]], b"pw"), 1 << 19);
     }
 
     #[test]

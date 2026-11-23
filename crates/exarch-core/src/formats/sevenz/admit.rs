@@ -5,6 +5,7 @@ use super::SIGNATURE_HEADER_SIZE;
 use super::header::BlockIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
+use super::header::aes_coders_in_decode_order;
 use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::Limit;
@@ -403,19 +404,27 @@ pub(super) fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 /// ([`ArchiveError::SecurityViolation`]) and for an unknown method,
 /// unparseable coder properties, or a block whose files do not add up to its
 /// decoded size ([`ArchiveError::InvalidArchive`]).
+///
+/// `graph` tells that sevenz-rust2 may build the block's coders as a graph
+/// (see `walks_coder_graph`), which makes every AES coder cost its full
+/// derivation.
 pub(super) fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
     declared_size: Option<u64>,
     config: &SecurityConfig,
     credentials: &Credentials,
     kdf: &mut KdfRuns,
+    graph: bool,
 ) -> std::result::Result<(), Refused> {
     let not_decodable = |error| Refused::new(UnverifiedReason::NotDecodable, error);
     let output = block_charge(block).max(declared_size.unwrap_or_default());
     let mut memory: u64 = 0;
+    let mut aes_admitted = false;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
-            admit_aes_coder(coder, credentials, kdf)?;
+            if !std::mem::replace(&mut aes_admitted, true) {
+                admit_aes_coders(block, credentials, kdf, graph)?;
+            }
             continue;
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
@@ -441,6 +450,21 @@ pub(super) fn admit_sevenz_block(
     Ok(())
 }
 
+/// Admits every AES coder of `block`, in decode order (all of them in listed
+/// order, each in full, when `graph` says the block may be built as a coder
+/// graph).
+pub(super) fn admit_aes_coders(
+    block: &sevenz_rust2::Block,
+    credentials: &Credentials,
+    kdf: &mut KdfRuns,
+    graph: bool,
+) -> std::result::Result<(), Refused> {
+    for aes in aes_coders_in_decode_order(block, graph) {
+        admit_aes_coder(aes, credentials, kdf, graph)?;
+    }
+    Ok(())
+}
+
 /// Admits the AES coder of a block through [`KdfRuns::admit_key`].
 ///
 /// No password is reported by `verify` as [`UnverifiedReason::Encrypted`], like
@@ -449,8 +473,14 @@ fn admit_aes_coder(
     coder: &sevenz_rust2::Coder,
     credentials: &Credentials,
     kdf: &mut KdfRuns,
+    uncached: bool,
 ) -> std::result::Result<(), Refused> {
-    kdf.admit_key(credentials, KeySource::Block(coder.properties()))
+    let source = if uncached {
+        KeySource::Uncached(coder.properties())
+    } else {
+        KeySource::Block(coder.properties())
+    };
+    kdf.admit_key(credentials, source)
         .map(drop)
         .map_err(|refusal| {
             let reason = match refusal {
@@ -527,6 +557,7 @@ pub(crate) fn iter_sevenz_refusals<'a>(
             config,
             header.credentials(),
             &mut kdf,
+            header.block_walks_graph(index),
         )
         .err()
         .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))

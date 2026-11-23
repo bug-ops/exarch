@@ -19,8 +19,10 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::copy::CopyError;
+use crate::encryption::kdf::KdfRepeatExceeded;
 use crate::formats::bounded_read::invalid_data;
 use crate::formats::common;
+use crate::formats::io_marker::IoMarker;
 use crate::formats::source_fault::ReadFamily;
 use crate::formats::source_fault::is_sevenz_checksum;
 use crate::inspection::integrity::Charge;
@@ -385,6 +387,9 @@ pub(super) fn walk_block_links<R: Read + Seek>(
         return Err(e);
     }
     let failure = match result {
+        Err(sevenz_rust2::Error::Io(error, _)) if KdfRepeatExceeded::find(&error).is_some() => {
+            return Err(KdfRepeatExceeded.into());
+        }
         Err(_) => LinkReadFailure::Decode(LinkDecodeFailure::BlockAborted),
         Ok(_) => LinkReadFailure::Decode(LinkDecodeFailure::NotReached),
     };

@@ -10,6 +10,8 @@ use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
+use crate::encryption::kdf::AesTurn;
+use crate::encryption::kdf::forget_slot_key;
 use crate::formats::bounded_read::read_prefix;
 use crate::formats::source_fault::is_sevenz_checksum;
 use sevenz_rust2::BlockDecoder;
@@ -110,9 +112,21 @@ fn sequential_block<R: Read + Seek>(
     source: &mut R,
     header: &SevenZHeader,
     block_index: BlockIndex,
+    password: &sevenz_rust2::Password,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
-    let password = header.block_password();
+    // The turn covers the decoder set-up, where an AES key is derived, and is
+    // given up before the first entry reaches user code.
+    let mut turn = (header.is_block_encrypted(block_index)
+        && block_has_streams(header, block_index))
+    .then(AesTurn::acquire);
+    if turn.is_some()
+        && let Err(error) = header.enter_aes_block(block_index, password)
+    {
+        // The set-up already recorded this block's key; no decoder is built.
+        forget_slot_key();
+        return Err(sevenz_rust2::Error::from(error));
+    }
     let mismatch = RefCell::new(None);
     let callback_failed = Cell::new(false);
     let last_entry = Cell::new(0);
@@ -124,10 +138,11 @@ fn sequential_block<R: Read + Seek>(
         1,
         block_index.get(),
         header.unchecked_crc_archive(),
-        &password,
+        password,
         source,
     )
     .for_each_entries(&mut |_, reader| {
+        drop(turn.take());
         let index = next_file;
         let file = header.files().get(index).ok_or_else(handover_violation)?;
         next_file = next_file.saturating_add(1);
@@ -151,6 +166,12 @@ fn sequential_block<R: Read + Seek>(
         };
         each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
     });
+    if turn.is_some() && result.is_err() {
+        // The decoder was never built, so the key it would have derived is
+        // not the one the slot holds.
+        forget_slot_key();
+    }
+    drop(turn);
     match result {
         Err(sevenz_rust2::Error::Io(e, _))
             if !callback_failed.get()
@@ -162,6 +183,14 @@ fn sequential_block<R: Read + Seek>(
         }
         other => other,
     }
+}
+
+/// Whether the decoder builds anything for the block: sevenz-rust2 skips a
+/// block that declares no sub-streams, and then derives no key. Its stream map
+/// gives such a block an empty file span and every block that declares
+/// sub-streams a first file that has a stream, so the two tests agree.
+fn block_has_streams(header: &SevenZHeader, block_index: BlockIndex) -> bool {
+    block_span(header, block_index).any(|i| header.files().get(i).is_some_and(|f| f.has_stream))
 }
 
 /// Decodes the files of one block and hands each to `each`.
@@ -196,7 +225,7 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
         _ => None,
     };
     let Some((stream, lookahead)) = plan else {
-        return sequential_block(source, header, block_index, each);
+        return sequential_block(source, header, block_index, &password, each);
     };
 
     // The dry run fails exactly as the sequential path would on a coder graph

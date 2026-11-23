@@ -1032,7 +1032,20 @@ export declare class SecurityConfig {
   /** Sets how ZIP archives with ambiguous structure are handled. */
   withZipConsistency(policy: ZipConsistencyPolicy): this
   /**
-   * Sets the most SHA-256 rounds of key derivation one operation may spend.
+   * Sets the most SHA-256 rounds of key derivation one operation may
+   * perform.
+   *
+   * Charged for the keys an archive needs before any encrypted block is
+   * decoded, and again when another 7z operation of the process replaced
+   * the cached key with a different one in between (the operation then fails
+   * with `kdf_cost_exceeded` once the total passes the budget), so encrypted
+   * 7z operations with different keys that run at the same time can make
+   * each other fail. 7z operations of one process take turns only during the
+   * key set-up of each encrypted block and while an encrypted header is read.
+   *
+   * A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives the outer key again after every inner operation, so with the default budget and 7-Zip's power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for such pipelines.
+   *
+   * Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives.
    *
    * Default: 2^27.
    *
@@ -1094,8 +1107,9 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if the component is empty, exceeds maximum length, or
-   * contains a null byte, a path separator, `.` or `..`.
+   * Returns error if the component is empty, exceeds maximum length,
+   * contains a null byte, a path separator, `.` or `..`, or is made only of
+   * code points that name comparison ignores (such as U+200C).
    */
   addBannedComponent(component: string): this
   /**
@@ -1272,7 +1286,7 @@ export declare class SecurityConfig {
   get allowWindowsReservedNames(): boolean
   /** Budget in bytes for TAR metadata. */
   get maxTarMetadataBytes(): number
-  /** Most SHA-256 rounds of key derivation one operation may spend. */
+  /** Most SHA-256 rounds of key derivation one operation may perform. */
   get maxKdfWork(): number
   /** Memory in bytes a decoder may use for its dictionary or window. */
   get maxDecoderMemory(): number

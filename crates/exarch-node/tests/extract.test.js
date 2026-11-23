@@ -323,6 +323,23 @@ describe('SECURITY_VIOLATION relaxableBy property', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+  it('refuses an alias spelling of a banned directory', async () => {
+    const tempDir = createTempDir();
+    try {
+      const archivePath = path.join(tempDir, 'a.tar');
+      fs.writeFileSync(archivePath, tarWithEntry('.\u017fsh/authorized_keys', '0'));
+      await assert.rejects(
+        () => extractArchive(archivePath, path.join(tempDir, 'output')),
+        (err) => {
+          assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+          assert.strictEqual(err.relaxableBy, 'banned_components');
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
   it('names banned_components and max_path_depth', async () => {
     for (const [entry, setting] of [
       ['.git/config', 'banned_components'],

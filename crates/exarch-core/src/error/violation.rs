@@ -330,8 +330,10 @@ pub enum Violation {
     LinkTargetEmpty(LinkKind),
     /// A link target contains a NUL byte.
     LinkTargetNul(LinkKind),
-    /// A symlink target contains a banned path component.
+    /// A symlink or hardlink target contains a banned path component.
     LinkTargetBannedComponent {
+        /// Whether the link is a symlink or a hardlink.
+        kind: LinkKind,
         /// The component.
         component: Box<str>,
     },
@@ -690,8 +692,8 @@ impl fmt::Display for Violation {
             }
             Self::LinkTargetEmpty(kind) => write!(f, "{kind} target is empty"),
             Self::LinkTargetNul(kind) => write!(f, "{kind} target contains null bytes"),
-            Self::LinkTargetBannedComponent { component } => {
-                write!(f, "symlink target contains banned component: {component}")
+            Self::LinkTargetBannedComponent { kind, component } => {
+                write!(f, "{kind} target contains banned component: {component}")
             }
             Self::LinkTargetTooLarge { size, max } => {
                 write!(f, "symlink target too large: {size} bytes (max {max})")
@@ -873,6 +875,7 @@ mod tests {
             (Violation::LinkTargetNul(link), C::LinkTarget, None),
             (
                 Violation::LinkTargetBannedComponent {
+                    kind: link,
                     component: text("c"),
                 },
                 C::LinkTarget,

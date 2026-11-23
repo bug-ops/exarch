@@ -5,6 +5,8 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
 use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::PathModel;
+use crate::security::fs_view::relative_below;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -187,20 +189,8 @@ impl<P: ParentCheck> SafeSymlink<P> {
         }
 
         // 2.5. Check target for banned components and depth (HIGH-005)
-        let mut target_depth = 0_usize;
-        for component in target.components() {
-            if let std::path::Component::Normal(comp) = component {
-                target_depth = target_depth.saturating_add(1);
-                check_component_for(view.path_model(), comp, config)?;
-                let comp_str = comp.to_string_lossy();
-                if !config.is_path_component_allowed(&comp_str) {
-                    return Err(Violation::LinkTargetBannedComponent {
-                        component: comp_str.as_ref().into(),
-                    }
-                    .into());
-                }
-            }
-        }
+        let target_depth =
+            check_target_components(target, LinkKind::Symlink, view.path_model(), config)?;
 
         // Validate target depth against max_path_depth
         if target_depth > config.max_path_depth.get() {
@@ -220,7 +210,15 @@ impl<P: ParentCheck> SafeSymlink<P> {
         // is already a symlink written to disk by a previous entry can redirect
         // subsequent `..` traversal outside the extraction root (two-hop chain,
         // GHSA-83g3-92jg-28cx variant — issue #116).
-        view.resolve_link_target(link.as_path(), target, LinkBase::LinkDirectory, root)?;
+        let resolved =
+            view.resolve_link_target(link.as_path(), target, LinkBase::LinkDirectory, root)?;
+        check_resolved_target(
+            &resolved,
+            root.as_path(),
+            link.as_path(),
+            LinkKind::Symlink,
+            config,
+        )?;
 
         Ok(Self {
             link: link.clone(),
@@ -294,6 +292,71 @@ pub(crate) fn require_symlinks_allowed(config: &SecurityConfig) -> Result<()> {
         .symlinks
         .is_allowed()
         .ok_or_else(|| Violation::LinksNotAllowed(LinkKind::Symlink).into())
+}
+
+/// Checks every normal component of a link target against the path model and
+/// the banned components, and returns how many there are.
+pub(crate) fn check_target_components(
+    target: &Path,
+    kind: LinkKind,
+    model: PathModel,
+    config: &SecurityConfig,
+) -> Result<usize> {
+    let mut count = 0_usize;
+    for component in target.components() {
+        if let std::path::Component::Normal(comp) = component {
+            count = count.saturating_add(1);
+            check_component_for(model, comp, config)?;
+            check_target_component_allowed(comp, kind, config)?;
+        }
+    }
+    Ok(count)
+}
+
+/// Checks the location a link target resolved to, below `root`, against the
+/// banned components, so a target that runs through a symlink already on disk
+/// is judged where it lands and not only by how it is spelled.
+///
+/// # Errors
+///
+/// Returns the escape error of `kind` when `resolved` is not below `root`,
+/// and a banned-component violation for a banned name on the way.
+pub(crate) fn check_resolved_target(
+    resolved: &Path,
+    root: &Path,
+    link: &Path,
+    kind: LinkKind,
+    config: &SecurityConfig,
+) -> Result<()> {
+    let relative = relative_below(resolved, root).ok_or_else(|| {
+        let path = link.to_path_buf();
+        match kind {
+            LinkKind::Symlink => ArchiveError::SymlinkEscape { path },
+            LinkKind::Hardlink => ArchiveError::HardlinkEscape { path },
+        }
+    })?;
+    if let Some(component) = config.banned_component_in(relative) {
+        return Err(Violation::LinkTargetBannedComponent { kind, component }.into());
+    }
+    Ok(())
+}
+
+/// Refuses a link-target component that is a banned name, as `kind` of link.
+pub(crate) fn check_target_component_allowed(
+    component: &std::ffi::OsStr,
+    kind: LinkKind,
+    config: &SecurityConfig,
+) -> Result<()> {
+    let name = component.to_string_lossy();
+    if config.is_path_component_allowed(&name) {
+        Ok(())
+    } else {
+        Err(Violation::LinkTargetBannedComponent {
+            kind,
+            component: name.as_ref().into(),
+        }
+        .into())
+    }
 }
 
 /// Returns `true` when `target` contains a `Prefix` or `RootDir` component.
@@ -915,6 +978,34 @@ mod tests {
             Err(ArchiveError::SecurityViolation { .. }),
             "symlink to banned component should be rejected"
         );
+    }
+
+    #[test]
+    fn test_safe_symlink_target_banned_component_unicode_spellings() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
+
+        for target in [
+            ".\u{17f}sh/id",
+            ".\u{df}h/id",
+            ".aw\u{17f}/credentials",
+            ".\u{212a}ube/config",
+            ".doc\u{212a}er/config.json",
+            ".GIT/config",
+        ] {
+            let result = SafeSymlink::validate(&link, Path::new(target), &dest, &config);
+            assert_matches!(
+                result,
+                Err(ArchiveError::SecurityViolation {
+                    kind: Violation::LinkTargetBannedComponent {
+                        kind: LinkKind::Symlink,
+                        ..
+                    }
+                }),
+                "target {target:?} must be refused"
+            );
+        }
     }
 
     #[test]

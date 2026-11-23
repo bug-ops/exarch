@@ -4276,6 +4276,46 @@ fn test_extract_security_violation_text_reason_appears_once() {
     );
 }
 
+/// A default banned directory spelled with a character that case-insensitive
+/// filesystems fold into its letters is refused like the plain name.
+#[test]
+fn test_extract_refuses_alias_spelling_of_default_banned_component() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("alias.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".\u{17f}sh");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("banned path component"));
+    assert!(!out_dir.join(".\u{17f}sh").exists());
+}
+
+/// A configured non-ASCII name is matched against its decomposed spelling.
+#[test]
+fn test_extract_banned_component_matches_decomposed_spelling() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("nfd.tar.gz");
+    create_tar_gz_with_component(&archive_path, "cafe\u{301}");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg("caf\u{e9}")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("banned path component"));
+}
+
 /// Regression test for issue #449: `--banned-component ""` is a documented
 /// idiom (see clap help on `ExtractArgs::banned_components`) for disabling
 /// the default ban list entirely. `SecurityConfig::validate()` now rejects

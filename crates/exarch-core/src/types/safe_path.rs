@@ -16,6 +16,7 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::fs_view::paths_start_with;
+use crate::security::fs_view::relative_below;
 use crate::selection::Rewritten;
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -368,7 +369,9 @@ impl<P: ParentCheck> SafePath<P> {
             .filter(|parent| *parent != dest && matches!(P::VETTING, ParentVetting::Validator))
         {
             match view.canonicalize(parent, root) {
-                Ok(Containment::Within(_)) => {}
+                Ok(Containment::Within(canonical)) => {
+                    check_landing_allowed(&canonical, dest, path, config)?;
+                }
                 Ok(Containment::Escapes) => {
                     return Err(escape_refusal(view, root, &final_path, path));
                 }
@@ -540,6 +543,26 @@ pub(crate) fn portable_component_hazard(comp: &OsStr) -> Option<PortableHazard> 
     } else {
         None
     }
+}
+
+/// Refuses a canonical parent below `root` that runs through a banned name,
+/// which a symlink on the entry's own path can lead to, and one that is not
+/// below `root` at all.
+fn check_landing_allowed(
+    canonical: &Path,
+    root: &Path,
+    entry: &Path,
+    config: &SecurityConfig,
+) -> Result<()> {
+    let Some(relative) = relative_below(canonical, root) else {
+        return Err(ArchiveError::PathTraversal {
+            path: entry.to_path_buf(),
+        });
+    };
+    if let Some(component) = config.banned_component_in(relative) {
+        return Err(Violation::BannedComponent { component }.into());
+    }
+    Ok(())
 }
 
 /// Rejects the component hazards of `model`: none for the host's own rules
@@ -922,6 +945,131 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn test_safe_path_reject_banned_components_unicode_spellings() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        for path in [
+            ".\u{17f}sh/authorized_keys",
+            ".\u{df}h/authorized_keys",
+            ".aw\u{17f}/config",
+            ".\u{212a}ube/config",
+            ".doc\u{212a}er/config.json",
+            ".GIT/config",
+            ".GnuPG/key",
+            ".ENV",
+        ] {
+            let result = SafePath::validate(Path::new(path), &dest, &config);
+            assert_matches!(
+                result,
+                Err(ArchiveError::SecurityViolation {
+                    kind: Violation::BannedComponent { .. }
+                }),
+                "path {path:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_safe_path_reject_banned_components_with_ignorable_code_points() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        for path in [
+            ".s\u{200c}sh/authorized_keys",
+            ".s\u{feff}sh/authorized_keys",
+            ".\u{200d}git/config",
+            ".ssh\u{202e}/authorized_keys",
+        ] {
+            let result = SafePath::validate(Path::new(path), &dest, &config);
+            assert_matches!(
+                result,
+                Err(ArchiveError::SecurityViolation {
+                    kind: Violation::BannedComponent { .. }
+                }),
+                "path {path:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_safe_path_through_existing_symlink_is_judged_where_it_lands() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, dest) = create_test_dest();
+        std::fs::create_dir(temp.path().join(".ssh")).unwrap();
+        std::fs::create_dir(temp.path().join("docs")).unwrap();
+        symlink(".ssh", temp.path().join("keys")).unwrap();
+        symlink("docs", temp.path().join("manuals")).unwrap();
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+
+        let refused = SafePath::validate(Path::new("keys/rc"), &dest, &config);
+        assert_matches!(
+            refused,
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { .. }
+            })
+        );
+        assert!(SafePath::validate(Path::new("manuals/new"), &dest, &config).is_ok());
+    }
+
+    #[test]
+    fn test_relative_below_follows_whole_components() {
+        use crate::security::fs_view::relative_below;
+        let base = std::env::temp_dir();
+        let root = base.join("dest");
+        let nested = root.join("a").join("b");
+        assert_eq!(
+            relative_below(&nested, &root),
+            Some(Path::new("a").join("b").as_path())
+        );
+        assert_eq!(relative_below(&root, &root), Some(Path::new("")));
+        assert_eq!(
+            relative_below(&base.join("destevil").join("a"), &root),
+            None
+        );
+        assert_eq!(relative_below(&base.join("other").join("a"), &root), None);
+    }
+
+    #[test]
+    fn test_landing_outside_the_root_is_refused() {
+        let config = SecurityConfig::default();
+        let result = check_landing_allowed(
+            Path::new("/elsewhere/docs"),
+            Path::new("/dest"),
+            Path::new("a/b"),
+            &config,
+        );
+        assert_matches!(result, Err(ArchiveError::PathTraversal { .. }));
+        assert!(
+            check_landing_allowed(
+                Path::new("/dest/docs"),
+                Path::new("/dest"),
+                Path::new("a/b"),
+                &config
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_safe_path_reject_decomposed_spelling_of_configured_name() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default()
+            .try_add_banned_path_component("caf\u{e9}")
+            .unwrap();
+
+        let result = SafePath::validate(Path::new("cafe\u{301}/x"), &dest, &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { .. }
+            })
+        );
     }
 
     #[test]

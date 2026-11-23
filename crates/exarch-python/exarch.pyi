@@ -348,8 +348,25 @@ class SecurityConfig:
 
     def with_max_kdf_work(self, rounds: int) -> SecurityConfig:
         """
-        Sets the most SHA-256 rounds of key derivation one operation may spend
+        Sets the most SHA-256 rounds of key derivation one operation may perform
         (default: 2**27).
+
+        Charged for the keys an archive needs before any encrypted block is decoded,
+        and again when another 7z operation of the process replaced the cached key with
+        a different one in between (the operation then fails with ``"kdf_cost_exceeded"``
+        once the total passes the budget), so encrypted 7z operations with different
+        keys that run at the same time can make each other fail. 7z operations of one
+        process take turns only during the key set-up of each encrypted block and while
+        an encrypted header is read.
+
+        A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives
+        the outer key again after every inner operation, so with the default budget
+        and 7-Zip's power 19 it is refused after 256 outer blocks; raise
+        ``max_kdf_work`` for such pipelines.
+
+        Blocks that combine several coders in a layout that is not a plain chain
+        (such as BCJ2 with several AES coders) are charged for every AES coder, so
+        the budget is reached sooner for such archives.
 
         Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer;
         its ``setting`` attribute is ``"max_kdf_work"``.
@@ -446,8 +463,9 @@ class SecurityConfig:
     def add_banned_component(self, component: str) -> SecurityConfig:
         """Adds a banned path component.
 
-        Raises ``ValueError`` for an empty value or one holding a path
-        separator, ``.`` or ``..``.
+        Raises ``ValueError`` for an empty value, one holding a path
+        separator, ``.`` or ``..``, or one made only of code points that
+        name comparison ignores (such as U+200C).
         """
         ...
 
@@ -648,7 +666,7 @@ class SecurityConfig:
     def zip_consistency(self, value: _ZipConsistency) -> None: ...
     @property
     def max_kdf_work(self) -> int:
-        """Most SHA-256 rounds of key derivation one operation may spend (default: 2**27)."""
+        """Most SHA-256 rounds of key derivation one operation may perform (default: 2**27)."""
         ...
 
     @max_kdf_work.setter

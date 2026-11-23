@@ -558,6 +558,9 @@ pub(crate) fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
                 resource: crate::QuotaResource::DecoderMemory { max: exceeded.max },
             });
         }
+        if let Some(exceeded) = err.downcast_ref::<crate::encryption::kdf::KdfRepeatExceeded>() {
+            return Some((*exceeded).into());
+        }
         if let Some(exceeded) = err.downcast_ref::<CompressedMembersExceeded>() {
             return Some(crate::ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::CompressedMembers {

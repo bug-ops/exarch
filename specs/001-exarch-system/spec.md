@@ -173,14 +173,14 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-001 | WHEN any archive entry path is validated, THE SYSTEM SHALL reject paths containing `../`, absolute paths, null bytes, or components matching `banned_path_components` (case-insensitive) | must |
+| FR-001 | WHEN any archive entry path is validated, THE SYSTEM SHALL reject paths containing `../`, absolute paths, null bytes, or components matching `banned_path_components` (NFD and case folding, ignorable code points dropped; see [[001-security-pipeline/spec]] FR-001) | must |
 | FR-002 | WHEN a file entry's uncompressed size exceeds `max_file_size`, THE SYSTEM SHALL reject it with `QuotaExceeded` | must |
 | FR-003 | WHEN the cumulative uncompressed size across all file entries exceeds `max_total_size`, THE SYSTEM SHALL reject further entries with `QuotaExceeded` | must |
 | FR-004 | WHEN a file entry has a known compressed size and the ratio (uncompressed / compressed) exceeds `max_compression_ratio`, THE SYSTEM SHALL reject it with `ZipBomb` | must |
 | FR-005 | WHEN a symlink entry is encountered and `allowed.symlinks` is false, THE SYSTEM SHALL skip the entry (default deny) | must |
 | FR-006 | WHEN a symlink entry is encountered and `allowed.symlinks` is true, THE SYSTEM SHALL validate that the resolved symlink target does not escape `output_dir` | must |
 | FR-007 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is false, THE SYSTEM SHALL skip the entry | must |
-| FR-008 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is true, THE SYSTEM SHALL validate that the hardlink target path is within `output_dir` and has been previously seen | must |
+| FR-008 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is true, THE SYSTEM SHALL validate that the hardlink target path is within `output_dir` and has been previously seen, and SHALL check each normal component of a symlink or hardlink target, and the resolved location of a path or target that passes through a symlink, against `banned_path_components` ([[001-security-pipeline/spec]] FR-015, FR-059) | must |
 | FR-009 | WHEN extracting files on Unix, THE SYSTEM SHALL strip setuid (0o4000) and setgid (0o2000) bits from all file permissions | must |
 | FR-010 | WHEN a 7z archive is detected as solid and `allow_solid_archives` is false, THE SYSTEM SHALL reject extraction | must |
 | FR-011 | WHEN a 7z solid archive extraction is permitted, THE SYSTEM SHALL reject it if the total uncompressed size exceeds `max_solid_block_memory` | must |
@@ -267,7 +267,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | NFR-001 | Security | Default config limits: 50 MB per file, 500 MB total, 100× compression ratio, 10,000 files, path depth 32 |
 | NFR-002 | Security | All security checks run before any bytes are written to disk for each entry |
 | NFR-003 | Security | Solid 7z archives are rejected by default; must be explicitly enabled |
-| NFR-004 | Security | Banned path components checked case-insensitively on every entry |
+| NFR-004 | Security | Banned path components checked case-insensitively (NFD, case folding) on every entry path and link target |
 | NFR-005 | Performance | Extraction throughput regression > 10% vs baseline triggers P1 review |
 | NFR-006 | Performance | `BufReader` used for all TAR file handles; `CopyBuffer` for all byte copying |
 | NFR-007 | Reliability | Atomic extraction mode ensures all-or-nothing semantics (no partial output on failure) |
@@ -324,7 +324,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | setuid/setgid bits on Unix | Stripped silently; `mode` in `ValidatedEntry` reflects sanitized value |
 | Solid 7z archive with `allow_solid_archives = false` | `ArchiveError::InvalidArchive` or format-specific rejection |
 | Path depth > `max_path_depth` | `ArchiveError::PathTraversal` (depth exceeded) |
-| Banned component (`.git`) in path | `ArchiveError::PathTraversal` (banned component) |
+| Banned component (`.git`) in path, link target or resolved location | `ArchiveError::PathTraversal` (banned component) |
 | `SecurityConfig` with zero limit | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
 | Python: null byte in path | `ValueError` raised at Python boundary |
 | Python: path exceeds 4096 bytes | `ValueError` raised at Python boundary |

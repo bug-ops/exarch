@@ -249,6 +249,75 @@ fn a_link_without_data_has_an_empty_target() {
     assert_eq!(seen, [(0, Ok(target("")))]);
 }
 
+#[cfg(feature = "encryption")]
+#[test]
+fn a_kdf_refusal_in_the_link_walk_is_reported_as_the_refusal() {
+    use super::header::open_sevenz_header;
+    use crate::EncryptionRefusal;
+    use crate::Password;
+    use crate::Violation;
+    use crate::encryption::Credentials;
+    use crate::encryption::kdf::AesTurn;
+    use crate::encryption::kdf::SlotWatch;
+    use sevenz_rust2::encoder_options::AesEncoderOptions;
+    use std::sync::Arc;
+
+    let _turn = AesTurn::acquire();
+    let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
+    options.salt = [1; 16];
+    options.num_cycles_power = 10;
+    let mut archive = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    archive.set_encrypt_header(false);
+    archive.set_content_methods(vec![
+        options.into(),
+        EncoderConfiguration::new(EncoderMethod::COPY),
+    ]);
+    for (name, data) in [("a", &b"first"[..]), ("b", &b"second"[..])] {
+        archive
+            .push_archive_entry(entry(name, data), Some(Cursor::new(data.to_vec())))
+            .unwrap();
+    }
+    let bytes = archive.finish().unwrap().into_inner();
+    let config = SecurityConfig::default().with_max_kdf_work(crate::non_zero!(1 << 10));
+    let credentials = Credentials::new(Some(Arc::new(Password::new(b"pw".to_vec()).unwrap())));
+    let header = open_sevenz_header(
+        &mut Cursor::new(&bytes),
+        HeaderLimit::from_config(&config),
+        &credentials,
+    )
+    .unwrap();
+    let compression = sevenz_entry_compression(&header, bytes.len() as u64).unwrap();
+    let password = header.block_password();
+    let mut other_operation = SlotWatch::default();
+    let mut calls = 0;
+
+    let result = walk_sevenz_links(
+        &header,
+        &mut Cursor::new(bytes),
+        &compression,
+        &config,
+        &table(&[0, 1]),
+        &mut |_, _| {
+            calls += 1;
+            if calls == 1 {
+                other_operation.enter_block([&[11u8, 0][..]], password.as_slice());
+            }
+            Ok(())
+        },
+    );
+
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation {
+            kind: Violation::Encrypted {
+                reason: EncryptionRefusal::KdfCostExceeded,
+                ..
+            },
+            ..
+        })
+    );
+}
+
 #[test]
 fn an_error_from_the_receiver_ends_the_walk() {
     let bytes = one_block_each(&[("a", b"first"), ("b", b"second")]);

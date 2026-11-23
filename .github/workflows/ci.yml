@@ -333,8 +333,10 @@ jobs:
           github.event_name == 'schedule'
         working-directory: crates/exarch-python
         run: |
-          uv export --quiet --locked --no-emit-project --all-groups -o "$RUNNER_TEMP/python-audit-requirements.txt"
-          uvx pip-audit==2.10.1 --require-hashes --disable-pip --strict --progress-spinner off -r "$RUNNER_TEMP/python-audit-requirements.txt"
+          uv export --quiet --locked --no-emit-project --only-group ci-audit -o "$RUNNER_TEMP/python-ci-audit-requirements.txt"
+          uv pip install --system --require-hashes --no-build -r "$RUNNER_TEMP/python-ci-audit-requirements.txt"
+          uv export --quiet --locked --no-emit-project --all-groups --no-group ci-audit -o "$RUNNER_TEMP/python-audit-requirements.txt"
+          pip-audit --require-hashes --disable-pip --strict --progress-spinner off -r "$RUNNER_TEMP/python-audit-requirements.txt"
 
   # Scheduled fuzzing. Narrow but real: 9 targets x 300s weekly on a corpus
   # that persists via actions/cache, layered on top of the existing

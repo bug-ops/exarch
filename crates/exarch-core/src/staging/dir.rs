@@ -298,6 +298,10 @@ fn umask_error(mode: u32) -> io::Error {
 /// owner permissions from our freshly created staging directory, removes the
 /// empty directory best-effort, and returns the most informative error.
 #[cfg(unix)]
+#[expect(
+    clippy::verbose_bit_mask,
+    reason = "octal mask 0o077 expresses the Unix group/world permission bits directly"
+)]
 fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io::Error {
     let stripped_mode = (error.kind() == io::ErrorKind::PermissionDenied)
         .then(|| parent.status(name.as_leaf()).ok().flatten())
@@ -305,6 +309,7 @@ fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io:
         .filter(|status| {
             status.occupant == Occupant::Directory
                 && status.mode.uid().get() == rustix::process::geteuid().as_raw()
+                && status.mode.bits() & 0o077 == 0
                 && status.mode.bits() & PRIVATE_STAGE_MODE != PRIVATE_STAGE_MODE
         })
         .map(|status| status.mode.bits() & 0o7777);
@@ -1483,5 +1488,25 @@ mod tests {
             0o2400
         };
         claim_preserving_setgid(restricted);
+    }
+
+    #[test]
+    fn unopenable_error_ignores_directory_open_to_others() {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let name = LeafBuf::random(STAGING_PREFIX);
+        pin.make_private_dir(name.as_leaf()).unwrap();
+        let at = parent.join(&name);
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o077)).unwrap();
+
+        let error = unopenable_error(
+            &pin,
+            &name,
+            io::Error::new(io::ErrorKind::PermissionDenied, "original error"),
+        );
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "original error");
+        assert!(!at.exists());
     }
 }

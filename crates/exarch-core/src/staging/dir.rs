@@ -1283,6 +1283,28 @@ mod tests {
             .env(UMASK_CHILD_EXPECTED, format!("{expected_mode:o}"))
             .output()
             .unwrap();
+        // `cargo llvm-cov` child processes write `.profraw` files subject to
+        // the child's umask, leaving `0000`/`0200` files unreadable by
+        // `llvm-profdata merge`.
+        if let Some(prof_env) = std::env::var_os("LLVM_PROFILE_FILE")
+            && let Some(prof_dir) = Path::new(&prof_env).parent()
+            && let Ok(entries) = std::fs::read_dir(prof_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "profraw")
+                    && let Ok(meta) = std::fs::metadata(&path)
+                {
+                    let mode = meta.permissions().mode();
+                    if mode & 0o600 != 0o600 {
+                        let _ = std::fs::set_permissions(
+                            &path,
+                            std::fs::Permissions::from_mode((mode & 0o777) | 0o600),
+                        );
+                    }
+                }
+            }
+        }
         assert!(
             output.status.success(),
             "child under umask {umask} failed:\nstdout:\n{}\nstderr:\n{}",

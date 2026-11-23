@@ -29,6 +29,7 @@ use crate::formats::tar_metadata_limit::budget_violation;
 use crate::ArchiveError;
 use crate::ProgressCallback;
 use crate::Violation;
+use crate::security::quota::AdmittedSize;
 
 /// Bytes an entry copy moves between two cancellation polls.
 pub(crate) const CANCEL_POLL_INTERVAL: u64 = 8 * 1024 * 1024;
@@ -233,7 +234,11 @@ pub(crate) fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
 }
 
 /// [`copy_bounded`] that also polls `progress` every
-/// [`CANCEL_POLL_INTERVAL`] bytes.
+/// [`CANCEL_POLL_INTERVAL`] bytes, capped by `ceiling`.
+///
+/// The ceiling is an [`AdmittedSize`], so an extraction copy can only be
+/// capped by a size a spent permit reserved: it cannot run uncapped or with a
+/// number that did not come from the quota tracker.
 ///
 /// # Errors
 ///
@@ -245,14 +250,14 @@ pub(crate) fn copy_cancellable<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
     buffer: &mut CopyBuffer,
-    expected_size: Option<u64>,
+    ceiling: AdmittedSize,
     progress: &mut dyn ProgressCallback,
 ) -> Result<u64, CopyError> {
     copy_polled(
         reader,
         writer,
         buffer,
-        expected_size,
+        Some(ceiling.get()),
         Some((progress, CancelClock::standard())),
     )
 }
@@ -357,30 +362,36 @@ mod tests {
     }
 
     #[test]
-    fn copy_cancellable_stops_between_chunks_once_an_interval_has_passed() {
+    fn copy_polled_stops_between_chunks_once_an_interval_has_passed() {
         let len = usize::try_from(CANCEL_POLL_INTERVAL).unwrap() + 4096;
         let mut input = Cursor::new(vec![0u8; len]);
         let mut output = Vec::new();
         let mut buffer = CopyBuffer::new();
 
-        let result = copy_cancellable(&mut input, &mut output, &mut buffer, None, &mut Cancelling);
+        let result = copy_polled(
+            &mut input,
+            &mut output,
+            &mut buffer,
+            None,
+            Some((&mut Cancelling, CancelClock::standard())),
+        );
 
         assert_matches!(result, Err(CopyError::Cancelled));
         assert_eq!(output.len() as u64, CANCEL_POLL_INTERVAL);
     }
 
     #[test]
-    fn copy_cancellable_does_not_poll_a_short_copy() {
+    fn copy_polled_does_not_poll_a_short_copy() {
         let mut input = Cursor::new(vec![7u8; 1000]);
         let mut output = Vec::new();
         let mut buffer = CopyBuffer::new();
 
-        let copied = copy_cancellable(
+        let copied = copy_polled(
             &mut input,
             &mut output,
             &mut buffer,
             Some(1000),
-            &mut Cancelling,
+            Some((&mut Cancelling, CancelClock::standard())),
         )
         .unwrap();
 

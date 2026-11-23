@@ -242,7 +242,7 @@ fn first_ciphertext_offset(bytes: &[u8]) -> usize {
     let mut at = 0;
     loop {
         assert_eq!(&bytes[at..at + 4], b"PK\x03\x04");
-        let compressed = u32::from_le_bytes(bytes[at + 18..at + 22].try_into().unwrap());
+        let compressed = u32::from_le_bytes(*bytes[at + 18..at + 22].as_array().unwrap());
         let name = usize::from(u16::from_le_bytes([bytes[at + 26], bytes[at + 27]]));
         let extra = usize::from(u16::from_le_bytes([bytes[at + 28], bytes[at + 29]]));
         let data = at + 30 + name + extra;

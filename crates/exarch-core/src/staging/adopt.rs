@@ -92,10 +92,30 @@ mod imp {
 
         /// This mode with its permission bits replaced and its sticky and
         /// setgid bits kept.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         #[must_use]
         const fn with_permission_bits(self, permission: u32) -> Self {
             Self((self.0 & 0o7000) | (permission & 0o777))
+        }
+
+        /// This mode with the owner's read, write and search bits only, and
+        /// its sticky and setgid bits kept.
+        #[must_use]
+        pub(in crate::staging) const fn restored_private(self) -> Self {
+            self.with_permission_bits(Self::PRIVATE.0)
+        }
+
+        /// Whether group and world have no access.
+        #[expect(
+            clippy::verbose_bit_mask,
+            reason = "octal mask 0o077 expresses the Unix group/world permission bits directly"
+        )]
+        pub(in crate::staging) const fn is_owner_only(self) -> bool {
+            self.0 & 0o077 == 0
+        }
+
+        /// Whether the owner has read, write and search access.
+        pub(in crate::staging) const fn owner_has_full_access(self) -> bool {
+            self.0 & Self::PRIVATE.0 == Self::PRIVATE.0
         }
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -103,7 +123,31 @@ mod imp {
             self.0 & 0o777
         }
 
-        #[cfg(test)]
+        /// The mode as the type `chmodat` takes, built flag by flag so no
+        /// raw integer is converted.
+        pub(in crate::staging) fn as_raw_mode(self) -> rustix::fs::Mode {
+            use rustix::fs::Mode;
+
+            const FLAGS: [(u32, Mode); 12] = [
+                (0o4000, Mode::SUID),
+                (0o2000, Mode::SGID),
+                (0o1000, Mode::SVTX),
+                (0o0400, Mode::RUSR),
+                (0o0200, Mode::WUSR),
+                (0o0100, Mode::XUSR),
+                (0o0040, Mode::RGRP),
+                (0o0020, Mode::WGRP),
+                (0o0010, Mode::XGRP),
+                (0o0004, Mode::ROTH),
+                (0o0002, Mode::WOTH),
+                (0o0001, Mode::XOTH),
+            ];
+            FLAGS
+                .iter()
+                .filter(|(bit, _)| self.0 & bit != 0)
+                .fold(Mode::empty(), |mode, (_, flag)| mode | *flag)
+        }
+
         pub(in crate::staging) const fn as_u32(self) -> u32 {
             self.0
         }
@@ -313,6 +357,16 @@ mod imp {
             stage: &VerifiedStage,
             captured: AclPlan,
         ) -> io::Result<Adoption> {
+            Ok(Adoption::fresh(Self::probe_dir_mode(stage)?, captured))
+        }
+
+        /// The mode a directory made inside `stage` gets under the process
+        /// umask, read from a throwaway directory that is removed again.
+        ///
+        /// # Errors
+        ///
+        /// The I/O error of creating, inspecting or removing the probe.
+        pub(in crate::staging) fn probe_dir_mode(stage: &VerifiedStage) -> io::Result<DirMode> {
             let staging = VettedDir::reopen_at(stage.as_file())?;
             for _ in 0..PROBE_ATTEMPTS {
                 let probe = LeafBuf::random(".exarch-probe-");
@@ -322,10 +376,7 @@ mod imp {
                         staging.remove_dir(probe.as_leaf())?;
                         let status =
                             status?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-                        return Ok(Adoption::fresh(
-                            DirMode::of_umask_probe(status.mode),
-                            captured,
-                        ));
+                        return Ok(DirMode::of_umask_probe(status.mode));
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(e) => return Err(e),
@@ -947,4 +998,6 @@ mod imp {
 pub(super) use imp::Adoption;
 #[cfg(all(test, unix))]
 pub(super) use imp::Claim;
+#[cfg(unix)]
+pub(super) use imp::DirMode;
 pub(super) use removable::make_removable;

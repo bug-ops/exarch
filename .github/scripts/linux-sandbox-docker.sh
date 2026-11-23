@@ -9,6 +9,12 @@
 #
 # Without --require the run is only meaningful when the probe line says
 # "landlock enforced": a skipped test passes, so read the probe result.
+#
+# After the root run, a umask matrix (0277 0177 0377 0477 0677) extracts a flat
+# and a nested archive as uid 65534. Root bypasses mode bits, so only the
+# non-root run exercises staging umask handling. Expected: the flat archive and
+# the nested archive under 0477 extract; the nested archive under the other
+# masks exits nonzero, mentions the umask and leaves no .exarch-* directory.
 set -eu
 
 require=0
@@ -36,7 +42,7 @@ docker run --rm \
     # build and test from a copy on the container filesystem (-m gives fresh
     # mtimes, otherwise cargo replays stale cached diagnostics).
     mkdir /work
-    tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /work -mxf -
+    tar -C /src --exclude=./target --exclude=./.local --exclude=./.git -cf - . | tar -C /work -mxf -
     cd /work
     uname -r
     cat /sys/kernel/security/lsm 2>/dev/null || echo "securityfs lsm list unavailable"
@@ -53,4 +59,48 @@ docker run --rm \
 
     cargo test -p exarch-cli --all-features \
       --test sandbox --test sandbox_stage --test sandbox_spool --test password -- --test-threads=1
+
+    # Non-root umask matrix: owner-restricting umasks only bite for uid != 0.
+    nonroot="setpriv --reuid=65534 --regid=65534 --clear-groups"
+    m=$(mktemp -d)
+    chmod 755 "$m"
+    mkdir -p "$m/flat" "$m/nested/d/sub"
+    echo flat > "$m/flat/f"
+    echo deep > "$m/nested/d/sub/f"
+    tar -C "$m/flat" -cf "$m/flat.tar" f
+    tar -C "$m/nested" -cf "$m/nested.tar" d
+    mkdir "$m/run"
+    chmod 777 "$m/run"
+    failed=0
+    for mask in 0277 0177 0377 0477 0677; do
+      for kind in flat nested; do
+        parent="$m/run/$kind-$mask"
+        mkdir "$parent"
+        chmod 777 "$parent"
+        out="$parent/out"
+        if [ "$kind" = flat ]; then expect="$out/f"; else expect="$out/d/sub/f"; fi
+        status=0
+        $nonroot sh -c "umask $mask && exec /target/debug/exarch extract $m/$kind.tar $out" \
+          >"$m/log" 2>&1 || status=$?
+        if [ "$kind" = nested ] && [ "$mask" != 0477 ]; then
+          # Owner-restricting umask on nested trees must be refused, name the umask, and leave no staging dir.
+          if [ "$status" -ne 0 ] && grep -q umask "$m/log" && [ -z "$(ls -A "$parent")" ]; then
+            result=ok
+          else
+            result=FAILED
+          fi
+        elif [ "$status" -eq 0 ] && [ -r "$expect" ]; then
+          result=ok
+        else
+          result=FAILED
+        fi
+        echo "umask $mask $kind: $result"
+        if [ "$result" = FAILED ]; then
+          cat "$m/log"
+          ls -A "$parent"
+          failed=1
+        fi
+      done
+    done
+    exit "$failed"
   '

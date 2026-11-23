@@ -572,7 +572,10 @@ pub(crate) fn extract_reserved(
 
     let mut report = match extract_in(&staging, options, progress, extract) {
         Ok(report) => report,
-        Err(e) => return Err(e.rolled_back_with(staging.discard())),
+        Err(e) => {
+            let e = staging.explaining_umask(e);
+            return Err(e.rolled_back_with(staging.discard()));
+        }
     };
     if progress.is_cancelled() {
         return Err(discarded_after(

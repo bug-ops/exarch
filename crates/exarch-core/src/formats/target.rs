@@ -517,14 +517,17 @@ impl ExtractTarget for HostTarget<'_> {
             reader,
             faults,
             &path,
-            mode,
-            permit,
             &self.root,
             tally.report,
-            &mut self.copy_buffer,
             self.dirs,
             tally.options,
-            tally.progress,
+            common::FileWrite {
+                copy_buffer: &mut self.copy_buffer,
+                permit,
+                marking: self.root.marking(),
+                mode,
+                progress: tally.progress,
+            },
         )
     }
 

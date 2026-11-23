@@ -30,12 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the grow-after-walk creation fixture and the 7z encrypted-block predicate are written once (#1309).
 - Fuzzing: the fuzz crate lints clean under clippy as a CI step, and the `encrypted` oracle keys its empty-file exemption by path and encryption state (#1309).
 - Tests: a Docker recipe runs the Linux sandbox tests with Landlock enforced, and the serial idle-host benchmark step is documented (#1312).
+- Core: the extraction copy takes its write ceiling as `AdmittedSize` and `QuotaPermit::into_bytes` is removed (#1340), TAR/ZIP/7z writes share one `FileWrite` bundle (#1343), staging owner-bit recovery goes through `DirMode` and drops setuid (#1341), and MSRV 1.100 APIs replace older patterns (#1344) (#1347).
+- CI & Dependencies: Dependabot waits 7 days after publication in every ecosystem (#1338), a weekly `floor-vs-cooldown` job flags a `zip` floor the cooldown cannot resolve (#1342), and the Linux sandbox recipe runs an owner-restricting umask matrix as a non-root user (#1346) (#1347).
+- Docs: `CONTRIBUTING.md` documents the `cargo hack --no-dev-deps` workaround for the workspace lint (#1345) (#1347).
 - Core: centralized buffered file writes via `copy_and_finish_file` (#1314), delegated `zip_tail::holds_reader_record` to `chunk_search::search_chunks` (#1313), made `DestOccupancy::replace_mode` exhaustive (#1317), and adopted Rust 1.93–1.100 cleanups with `[workspace.lints.cargo]` (#1318).
 - Bindings & CLI: `exarch-python` acquires the GIL once per error conversion (#1316), `exarch-cli` uses saturating counters and `ExtractionReport::total_items()` (#1315), and `exarch-node` crate docs point to `bug-ops/exarch` (#1319).
 - CI & Dependencies: added `pnpm audit` and `pip-audit` to the security workflow (#1322), hash-pinned `pip-audit` in `crates/exarch-python/uv.lock` (`ci-audit` group) (#1324), added weekly `npm` Dependabot updates for `crates/exarch-node` (#1323), enabled Cargo 1.100's 7-day `global-min-publish-age` cooldown with overrides for `zip-drift` and `release` (#1321), and aligned `dependabot.yml`, `deny.toml`, and `ci.yml` comments (#1320).
 
 ### Fixed
 
+- Staging: an atomic extract of an archive with subdirectories under an owner-restricting umask reports the umask and always removes the staging directory (#1339) (#1347).
 - Staging: recover `0700` owner bits on freshly created staging directories under owner-restricting umasks (e.g. `0277`) and report the umask clearly when the directory cannot be opened (#1311), only classifying `unopenable_error` as a umask error when `0o077` group/other bits are clear (#1325).
 - Tests: made `test_create_tar_directory_mode_without_preserve_permissions` umask-independent (#1310), and gated `std::path::Path` under `#[cfg(feature = "encryption")]` in `sevenz_mode_and_ppmd_key` so integration tests compile with `--no-default-features` (#1326).
 

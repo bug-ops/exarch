@@ -3,11 +3,10 @@
 
 use super::links::LinkStorage;
 use super::links::link_storage;
-use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::copy::CopyBuffer;
 use crate::formats::common;
+use crate::formats::common::FileWrite;
 use crate::formats::common::ModeTiming;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
@@ -15,31 +14,16 @@ use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
-use crate::mark::MarkRun;
 use crate::security::fs_view::FsView;
-use crate::security::permissions::CreateMode;
-use crate::security::quota::QuotaPermit;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::path::Path;
 
-/// What a 7z file write consumes besides the entry's bytes and location: the
-/// scratch buffer, the quota permit, the mark and the progress callback.
-///
-/// The permit is held by value and the struct is not `Clone`, so one value
-/// authorizes exactly one write.
-pub(super) struct FileWrite<'a> {
-    pub(super) copy_buffer: &'a mut CopyBuffer,
-    pub(super) permit: QuotaPermit,
-    pub(super) marking: Option<&'a MarkRun>,
-    pub(super) mode: Option<CreateMode>,
-    pub(super) progress: &'a mut dyn ProgressCallback,
-}
-
 /// Writes `reader`'s bytes directly to `leaf` in `parent` (no temp file, no
-/// rename), consuming the [`QuotaPermit`] that authorized the write.
+/// rename), consuming the [`QuotaPermit`](crate::security::quota::QuotaPermit)
+/// that authorized the write.
 ///
 /// Used for the common case where nothing currently occupies `leaf`
 /// (issue #492): creates `leaf` itself through [`common::create_file`]
@@ -92,14 +76,8 @@ pub(super) fn write_file_direct(
     leaf: Leaf<'_>,
     write: FileWrite<'_>,
 ) -> Result<u64> {
-    let FileWrite {
-        copy_buffer,
-        permit,
-        marking,
-        mode,
-        progress,
-    } = write;
-    let (file, pending) = common::create_file(parent, leaf, mode, ModeTiming::of(marking))?;
+    let (file, pending) =
+        common::create_file(parent, leaf, write.mode, ModeTiming::of(write.marking))?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
     // since this branch only runs when nothing occupied `leaf` beforehand, it
@@ -108,22 +86,14 @@ pub(super) fn write_file_direct(
     // returning on both success and error, so `guard` never unlinks a
     // still-open handle (critical on Windows).
     let guard = TempFileGuard::new(parent, leaf);
-    let bytes_written = common::copy_and_finish_file(
-        reader,
-        file,
-        faults,
-        copy_buffer,
-        permit.into_admitted(),
-        pending,
-        marking,
-        progress,
-    )?;
+    let bytes_written = common::copy_and_finish_file(reader, file, faults, write, pending)?;
     guard.persist();
     Ok(bytes_written)
 }
 
 /// Writes `reader`'s bytes to `leaf` in `parent` via an atomic
-/// temp-file-then-rename, consuming the [`QuotaPermit`] that authorized the
+/// temp-file-then-rename, consuming the
+/// [`QuotaPermit`](crate::security::quota::QuotaPermit) that authorized the
 /// write.
 ///
 /// Used only when `leaf` has a pre-existing occupant being overwritten
@@ -211,18 +181,11 @@ pub(super) fn write_file_with_permit_using(
     write: FileWrite<'_>,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
-    let FileWrite {
-        copy_buffer,
-        permit,
-        marking,
-        mode,
-        progress,
-    } = write;
     let (temp, temp_file, pending) = common::create_temp_sibling_with(
         parent,
         leaf,
-        mode,
-        ModeTiming::of(marking),
+        write.mode,
+        ModeTiming::of(write.marking),
         &replace,
         next_candidate,
     )?;
@@ -231,16 +194,7 @@ pub(super) fn write_file_with_permit_using(
     // returning on both success and error, so neither the rename nor
     // `temp_guard`'s unwind cleanup ever races a still-open handle (Windows).
     let temp_guard = TempFileGuard::for_temp(parent, temp.clone());
-    let bytes_written = common::copy_and_finish_file(
-        reader,
-        temp_file,
-        faults,
-        copy_buffer,
-        permit.into_admitted(),
-        pending,
-        marking,
-        progress,
-    )?;
+    let bytes_written = common::copy_and_finish_file(reader, temp_file, faults, write, pending)?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 

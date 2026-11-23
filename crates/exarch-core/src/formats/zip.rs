@@ -2850,7 +2850,7 @@ mod tests {
     #[test]
     fn test_skip_duplicates_aggregates_single_warning() {
         const ENTRY_COUNT: usize = 30;
-        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("dup-{i}.txt")).collect();
+        let names: Vec<String> = Vec::from_fn(ENTRY_COUNT, |i| format!("dup-{i}.txt"));
         let entries: Vec<(&str, &[u8])> = names
             .iter()
             .map(|n| (n.as_str(), b"payload".as_slice()))
@@ -3031,7 +3031,7 @@ mod tests {
     fn test_disallowed_extension_aggregates_single_warning() {
         use crate::NoopProgress;
         const ENTRY_COUNT: usize = 30;
-        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("skip-{i}.exe")).collect();
+        let names: Vec<String> = Vec::from_fn(ENTRY_COUNT, |i| format!("skip-{i}.exe"));
         let entries: Vec<(&str, &[u8])> = names
             .iter()
             .map(|n| (n.as_str(), b"payload".as_slice()))

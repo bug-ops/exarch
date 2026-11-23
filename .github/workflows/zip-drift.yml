@@ -20,6 +20,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  floor-vs-cooldown:
+    name: manifest floors resolve under the cooldown
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      # Fails when a requirement floor is younger than .cargo/config.toml's
+      # global-min-publish-age, which breaks cargo update and cargo semver-checks.
+      - name: Resolve workspace and fuzz manifests under the cooldown
+        run: |
+          cargo update --dry-run
+          cargo update --dry-run --manifest-path fuzz/Cargo.toml
+
   latest-zip:
     name: exarch-core against the latest zip
     runs-on: ubuntu-latest

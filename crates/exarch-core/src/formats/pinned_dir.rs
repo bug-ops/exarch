@@ -300,7 +300,7 @@ impl EntryMode {
         clippy::useless_conversion,
         reason = "`st_mode` is `u16` on macOS and `u32` on Linux"
     )]
-    fn of_stat(stat: &rustix::fs::Stat) -> Self {
+    pub(crate) fn of_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
             bits: u32::from(stat.st_mode) & 0o7777,
             uid: Uid::from_raw(stat.st_uid),

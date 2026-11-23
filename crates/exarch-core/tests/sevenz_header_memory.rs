@@ -86,7 +86,7 @@ fn read_number(bytes: &[u8]) -> (u64, usize) {
 /// header limits.
 fn with_header_unpack_sizes(archive: &[u8], aes_out: usize, lzma_out: usize) -> Vec<u8> {
     let field = |at: usize| {
-        usize::try_from(u64::from_le_bytes(archive[at..at + 8].try_into().unwrap())).unwrap()
+        usize::try_from(u64::from_le_bytes(*archive[at..at + 8].as_array().unwrap())).unwrap()
     };
     let packed_len = field(12);
     let record_at = 32 + packed_len;

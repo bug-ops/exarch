@@ -341,7 +341,7 @@ fn a_small_skipped_entry_passes_an_integrity_decode() {
 fn a_metered_skipped_entry_does_not_meter_the_allowed_entries_after_it() {
     let noise = incompressible(FILE_LIMIT + FILE_LIMIT / 4);
     let zeros = vec![0u8; FILE_LIMIT];
-    let names: Vec<String> = (0..20).map(|i| format!("a{i}.txt")).collect();
+    let names: Vec<String> = Vec::from_fn(20, |i| format!("a{i}.txt"));
     let mut entries: Vec<(&str, &[u8])> = vec![("big.bin", &noise)];
     entries.extend(names.iter().map(|name| (name.as_str(), &zeros[..])));
     let tar = tar_of(&entries);

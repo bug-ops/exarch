@@ -125,6 +125,10 @@ cargo +nightly fmt --all
 cargo clippy --all-targets --all-features --workspace -- -D warnings
 # `.cargo/config.toml` sets `build.warnings = "deny"`, so WIP code with warnings fails
 # `cargo check`/`cargo test`; locally use `CARGO_BUILD_WARNINGS=warn` or `--config 'build.warnings="warn"'`
+# `cargo hack check --no-dev-deps` strips dev-dependencies, so `unused_workspace_dependencies`
+# fires for dev-only workspace deps; run it with `--config 'build.warnings="warn"'` too
+# Manifest version floors must be at least 7 days old (`global-min-publish-age`), else
+# `cargo update` and `cargo semver-checks` fail
 
 # Check documentation
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace
@@ -204,6 +208,13 @@ The script copies the tree into a `rust` container and prints a `probe:` line;
 trust the run only if it says `landlock enforced`. `--require` sets
 `EXARCH_REQUIRE_LANDLOCK=1`, so a kernel without Landlock fails instead of
 skipping. CI runs the same tests in the `test` job of `ci.yml`.
+
+After the tests, the script runs a non-root umask matrix: it extracts a flat and a nested
+archive as uid 65534 (via `setpriv`) under umasks 0277, 0177, 0377, 0477 and 0677. Root
+bypasses mode bits, so only this run exercises the staging umask handling. The flat archive
+and the nested archive under 0477 must extract. The nested archive under the other masks
+must exit nonzero, mention the umask in its error and leave no `.exarch-*` staging
+directory. Any case that deviates prints its log and makes the script exit nonzero.
 
 ### Test Fixtures
 

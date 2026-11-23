@@ -37,10 +37,9 @@ impl QuotaPermit {
         }
     }
 
-    /// Spends the permit, yielding the byte count it reserved, which is also
-    /// the write ceiling.
-    pub(crate) const fn into_bytes(self) -> u64 {
-        self.bytes.0
+    /// The size this permit reserved, without spending it.
+    pub(crate) const fn admitted(&self) -> AdmittedSize {
+        AdmittedSize(self.bytes.0)
     }
 
     /// Spends the permit, yielding a copyable view of the bytes it reserved
@@ -56,7 +55,7 @@ impl QuotaPermit {
 /// A read-only, copyable view handed to an [`EntrySink`](crate::EntrySink) so
 /// it can tell a size the quota tracker already charged from any other number.
 /// Only the pipeline can build one: the field is private and the sole
-/// constructor spends a permit.
+/// constructors take a permit.
 ///
 /// # Examples
 ///
@@ -344,7 +343,7 @@ mod tests {
 
         let permit = tracker.reserve(1234, &config).expect("within quota");
 
-        assert_eq!(permit.into_bytes(), 1234);
+        assert_eq!(permit.into_admitted().get(), 1234);
     }
 
     #[test]

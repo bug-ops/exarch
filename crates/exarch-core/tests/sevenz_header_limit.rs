@@ -51,7 +51,7 @@ fn simple_with_huge_header_dictionary() -> Vec<u8> {
     const LZMA_PROPS: [u8; 6] = [0x05, 0x5D, 0x00, 0x10, 0x00, 0x00];
     let mut bytes = fixture_bytes("simple.7z");
     let next_header =
-        usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().unwrap())).unwrap() + 32;
+        usize::try_from(u64::from_le_bytes(*bytes[12..20].as_array().unwrap())).unwrap() + 32;
     let at = bytes[next_header..]
         .windows(LZMA_PROPS.len())
         .position(|w| w == LZMA_PROPS)
@@ -218,7 +218,7 @@ fn with_next_header(packed: &[u8], record: &[u8]) -> Vec<u8> {
 /// The plain header of an archive written by `solid_copy_7z`.
 fn plain_header_of(archive: &[u8]) -> Vec<u8> {
     let field = |at: usize| {
-        usize::try_from(u64::from_le_bytes(archive[at..at + 8].try_into().unwrap())).unwrap()
+        usize::try_from(u64::from_le_bytes(*archive[at..at + 8].as_array().unwrap())).unwrap()
     };
     let start = 32 + field(12);
     archive[start..start + field(20)].to_vec()
@@ -269,7 +269,7 @@ fn the_decoded_header_size_is_held_to_the_limit_when_the_raw_header_is_small() {
         &dir,
         &stored_header_archive(&entry_count_only_header(0, 200 * 1024)),
     );
-    let record_len = u64::from_le_bytes(std::fs::read(&path).unwrap()[20..28].try_into().unwrap());
+    let record_len = u64::from_le_bytes(*std::fs::read(&path).unwrap()[20..28].as_array().unwrap());
     assert!(record_len < 100, "the raw header record stays tiny");
 
     assert!(!opens(&path, &config_with_memory(100 * KIB)));
@@ -315,7 +315,7 @@ fn plain_header_archive_of(size: usize) -> Option<Vec<u8>> {
                     raw.push(RawEntry::File("g", b"y"));
                 }
                 let bytes = solid_copy_7z(&raw);
-                let header = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
+                let header = u64::from_le_bytes(*bytes[20..28].as_array().unwrap());
                 (header == size as u64).then_some(bytes)
             })
         })
@@ -406,7 +406,7 @@ fn refused_entry_count_by_every_operation(
 }
 
 fn directories_archive(count: usize, encoded: bool) -> Vec<u8> {
-    let names: Vec<String> = (0..count).map(|i| format!("d{i}")).collect();
+    let names: Vec<String> = Vec::from_fn(count, |i| format!("d{i}"));
     let entries: Vec<RawEntry<'_>> = names.iter().map(|n| RawEntry::Dir(n)).collect();
     let archive = solid_copy_7z(&entries);
     if encoded {
@@ -663,7 +663,7 @@ fn a_header_with_an_encryption_coder_keeps_the_encrypted_archive_error() {
 }
 
 fn record_len_of(archive: &[u8]) -> usize {
-    usize::try_from(u64::from_le_bytes(archive[20..28].try_into().unwrap())).unwrap()
+    usize::try_from(u64::from_le_bytes(*archive[20..28].as_array().unwrap())).unwrap()
 }
 
 #[test]

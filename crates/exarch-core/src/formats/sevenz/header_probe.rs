@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn a_plain_header_declares_its_own_size() {
-        let size = u64::from_le_bytes(LARGE_FILE[20..28].try_into().unwrap());
+        let size = u64::from_le_bytes(*LARGE_FILE[20..28].as_array().unwrap());
         assert_eq!(probed(LARGE_FILE), DeclaredHeader::Plain { bytes: size });
     }
 
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn an_encoded_record_over_the_byte_limit_is_not_read() {
-        let size = u64::from_le_bytes(SIMPLE[20..28].try_into().unwrap());
+        let size = u64::from_le_bytes(*SIMPLE[20..28].as_array().unwrap());
         let at = |max| probe(&mut Cursor::new(SIMPLE), max);
         assert_eq!(at(size - 1), DeclaredHeader::Unrecognized);
         assert_matches!(at(size), DeclaredHeader::Encoded { .. });
@@ -1150,7 +1150,8 @@ mod tests {
             .iter()
             .map(|bytes| {
                 let offset =
-                    usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().unwrap())).unwrap();
+                    usize::try_from(u64::from_le_bytes(*bytes[12..20].as_array().unwrap()))
+                        .unwrap();
                 bytes[32 + offset]
             })
             .collect();
@@ -1168,7 +1169,7 @@ mod tests {
     /// checksums refreshed, so that only the header's content is wrong.
     fn with_mutated_header(bytes: &[u8], at: usize, value: u8) -> Vec<u8> {
         let mut out = bytes.to_vec();
-        let offset = usize::try_from(u64::from_le_bytes(out[12..20].try_into().unwrap())).unwrap();
+        let offset = usize::try_from(u64::from_le_bytes(*out[12..20].as_array().unwrap())).unwrap();
         let start = 32 + offset;
         let at = start + at % (out.len() - start);
         out[at] = value;
@@ -1261,7 +1262,7 @@ mod tests {
     #[test]
     fn a_header_over_the_byte_limit_is_not_read() {
         let bytes = padded_plain_archive(5000, 3);
-        let size = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
+        let size = u64::from_le_bytes(*bytes[20..28].as_array().unwrap());
         assert_eq!(
             read(&bytes, size - 1, MEMORY_KIB),
             HeaderEntries::NotApplicable

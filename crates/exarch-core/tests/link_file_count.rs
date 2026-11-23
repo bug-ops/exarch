@@ -36,7 +36,7 @@ const UNIX_EXTENSION: u32 = 0x8000;
 const S_IFLNK: u32 = 0o12_0000;
 
 fn link_names(count: usize) -> Vec<String> {
-    (0..count).map(|i| format!("link{i}")).collect()
+    Vec::from_fn(count, |i| format!("link{i}"))
 }
 
 fn tar_with_symlinks(count: usize) -> Vec<u8> {

@@ -779,8 +779,8 @@ fn crc32(bytes: &[u8]) -> u32 {
 
 /// Rewrites bytes of the archive's plain header and refreshes both CRCs.
 fn patch_header(bytes: &mut [u8], patch: impl FnOnce(&mut [u8])) {
-    let offset = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().unwrap())).unwrap();
-    let size = usize::try_from(u64::from_le_bytes(bytes[20..28].try_into().unwrap())).unwrap();
+    let offset = usize::try_from(u64::from_le_bytes(*bytes[12..20].as_array().unwrap())).unwrap();
+    let size = usize::try_from(u64::from_le_bytes(*bytes[20..28].as_array().unwrap())).unwrap();
     let header = 32 + offset..32 + offset + size;
     patch(&mut bytes[header.clone()]);
     let header_crc = crc32(&bytes[header]);
@@ -820,7 +820,7 @@ fn sevenz_unknown_coder_is_not_decodable() {
 
 /// Replaces the plain header (which ends the archive) and refreshes both CRCs.
 fn rewrite_header(bytes: &mut Vec<u8>, rewrite: impl FnOnce(&[u8]) -> Vec<u8>) {
-    let offset = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().unwrap())).unwrap();
+    let offset = usize::try_from(u64::from_le_bytes(*bytes[12..20].as_array().unwrap())).unwrap();
     let new_header = rewrite(&bytes[32 + offset..]);
     bytes.truncate(32 + offset);
     bytes.extend_from_slice(&new_header);

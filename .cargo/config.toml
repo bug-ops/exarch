@@ -5,5 +5,7 @@ warnings = "deny"
 # Rejects newly published crates during `cargo update` without affecting crates
 # already locked in Cargo.lock. Override for urgent security bumps or drift checks
 # via `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`.
+# Manifest floors must not be younger than the cooldown, or `cargo update` and
+# `cargo semver-checks` fail repo-wide; the zip-drift workflow checks this weekly.
 [registry]
 global-min-publish-age = "7 days"

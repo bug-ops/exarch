@@ -68,7 +68,6 @@ use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::CreateMode;
-use crate::security::quota::AdmittedSize;
 use crate::security::quota::QuotaPermit;
 use crate::selection::EntryShape;
 use crate::types::SafePath;
@@ -363,17 +362,13 @@ pub(crate) fn check_entry_name_limits(
 ///
 /// * `reader` - Source data stream
 /// * `safe_path` - Validated destination-relative path
-/// * `mode` - Sanitized Unix file mode, if any
-/// * `_permit` - Proof that this file's size was already reserved against the
-///   quota tracker; consumed by value and otherwise unused
 /// * `root` - Destination directory, pinned by an open handle
 /// * `report` - Extraction statistics (updated)
-/// * `expected_size` - Declared uncompressed size (if known); used for the
-///   quota pre-check and, per the security note above, enforced as a hard
-///   streaming ceiling and exact post-copy match
-/// * `copy_buffer` - Reusable buffer for I/O operations
 /// * `dirs` - Creates and vets the parent directories
 /// * `options` - Duplicate-handling policy for a pre-existing destination path
+/// * `write` - The [`FileWrite`]: its permit proves the size was reserved
+///   against the quota tracker and, per the security note above, is enforced as
+///   a hard streaming ceiling and exact post-copy match
 ///
 /// A skipped duplicate entry is recorded in `report.skipped`.
 ///
@@ -384,26 +379,30 @@ pub(crate) fn check_entry_name_limits(
 /// - Quota would be exceeded (checked before write)
 /// - File creation fails
 /// - I/O error during copy
-/// - `expected_size` is `Some` and the actual decompressed byte count exceeds
-///   or falls short of it (forged size metadata)
+/// - The actual decompressed byte count exceeds or falls short of the permit's
+///   size (forged size metadata)
 #[expect(
     clippy::too_many_arguments,
-    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+    reason = "the write context is bundled in FileWrite; the rest is the entry's location and run state"
 )]
 #[inline]
 pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
     faults: ReadFaults<'_>,
     safe_path: &SafePath<P>,
-    mode: Option<CreateMode>,
-    permit: QuotaPermit,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
-    copy_buffer: &mut CopyBuffer,
     dirs: DirWalker,
     options: SinkOptions,
-    progress: &mut dyn ProgressCallback,
+    write: FileWrite<'_>,
 ) -> Result<()> {
+    let FileWrite {
+        copy_buffer,
+        permit,
+        marking,
+        mode,
+        progress,
+    } = write;
     let duplicates = OccupantPolicy::of(options);
 
     let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
@@ -413,10 +412,8 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // guards report.bytes_written, a different quantity, against overflow.
     // Checked before any filesystem mutation so a rejected entry never
     // leaves a zero-byte file on disk (restores the pre-#446 ordering).
-    let expected_size = permit.into_admitted();
-    checked_add_bytes(report.bytes_written, expected_size.get())?;
+    checked_add_bytes(report.bytes_written, permit.admitted().get())?;
 
-    let marking = root.marking();
     let timing = ModeTiming::of(marking);
     let Some(OutputSlot {
         file: output_file,
@@ -442,11 +439,14 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
         reader,
         output_file,
         faults,
-        copy_buffer,
-        expected_size,
+        FileWrite {
+            copy_buffer,
+            permit,
+            marking,
+            mode,
+            progress: &mut *progress,
+        },
         pending,
-        marking,
-        &mut *progress,
     )?;
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
@@ -614,7 +614,7 @@ pub(crate) fn seal_output(
 const FILE_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Streams `reader` into `file` through a [`FILE_WRITE_BUFFER_BYTES`]-byte
-/// buffer, enforces `expected_size`, classifies read faults, flushes, seals
+/// buffer, enforces the permit's size, classifies read faults, flushes, seals
 /// the file (download-origin mark then pending mode), and closes `file` before
 /// returning.
 ///
@@ -625,40 +625,54 @@ const FILE_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
-/// `expected_size` is an [`AdmittedSize`] produced by spending a
-/// [`QuotaPermit`], enforced as a hard streaming ceiling and exact post-copy
-/// match by [`copy_cancellable`].
+/// The [`AdmittedSize`](crate::security::quota::AdmittedSize) of `write.permit`
+/// is enforced as a hard streaming ceiling and exact post-copy match by
+/// [`copy_cancellable`].
 ///
 /// # Errors
 ///
 /// Returns a classified error when reading, writing, size enforcement,
 /// cancellation, flushing, or mode application fails.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
-)]
 pub(crate) fn copy_and_finish_file<R: Read + ?Sized>(
     reader: &mut R,
     file: File,
     faults: ReadFaults<'_>,
-    copy_buffer: &mut CopyBuffer,
-    expected_size: AdmittedSize,
+    write: FileWrite<'_>,
     pending: PendingMode,
-    marking: Option<&MarkRun>,
-    progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
+    let FileWrite {
+        copy_buffer,
+        permit,
+        marking,
+        mode: _,
+        progress,
+    } = write;
     let mut writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_BYTES, file);
     let bytes_written = copy_cancellable(
         reader,
         &mut writer,
         copy_buffer,
-        Some(expected_size.get()),
+        permit.into_admitted(),
         progress,
     )
     .map_err(|error| faults.classify(error))?;
     writer.flush()?;
     drop(finish_written(writer, pending, marking)?);
     Ok(bytes_written)
+}
+
+/// What a file write consumes besides the entry's bytes and location: the
+/// scratch buffer, the quota permit, the mark, the creation mode and the
+/// progress callback.
+///
+/// The permit is held by value and the struct is not `Clone`, so one value
+/// authorizes exactly one write.
+pub(crate) struct FileWrite<'a> {
+    pub(crate) copy_buffer: &'a mut CopyBuffer,
+    pub(crate) permit: QuotaPermit,
+    pub(crate) marking: Option<&'a MarkRun>,
+    pub(crate) mode: Option<CreateMode>,
+    pub(crate) progress: &'a mut dyn ProgressCallback,
 }
 
 /// Flushes out `writer`'s file handle and seals it: the mark, then the mode.
@@ -1266,14 +1280,8 @@ pub(crate) fn copy_file_content_with_permit(
     permit: QuotaPermit,
     progress: &mut dyn ProgressCallback,
 ) -> Result<u64> {
-    copy_cancellable(
-        &mut from,
-        to,
-        copy_buffer,
-        Some(permit.into_bytes()),
-        progress,
-    )
-    .map_err(hardlink_target_changed)
+    copy_cancellable(&mut from, to, copy_buffer, permit.into_admitted(), progress)
+        .map_err(hardlink_target_changed)
 }
 
 #[cfg(test)]
@@ -1527,18 +1535,22 @@ mod tests {
 
         let mut reader = Cursor::new(b"test data");
 
+        let root = pinned(&dest);
         let result = extract_file_with_permit(
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
+            &root,
             &mut report,
-            &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut NoopProgress,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: root.marking(),
+                mode: Some(sanitized(0o644)),
+                progress: &mut NoopProgress,
+            },
         );
 
         // Should return QuotaExceeded with IntegerOverflow
@@ -1589,18 +1601,22 @@ mod tests {
 
         let mut reader = Cursor::new(b"test data");
 
+        let root = pinned(&dest);
         let result = extract_file_with_permit(
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
+            &root,
             &mut report,
-            &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut NoopProgress,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: root.marking(),
+                mode: Some(sanitized(0o644)),
+                progress: &mut NoopProgress,
+            },
         );
 
         assert!(result.is_err());
@@ -1637,18 +1653,22 @@ mod tests {
         let real_data = vec![0x41u8; 200 * 1024];
         let mut reader = Cursor::new(&real_data);
 
+        let root = pinned(&dest);
         let result = extract_file_with_permit(
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
+            &root,
             &mut report,
-            &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut NoopProgress,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: root.marking(),
+                mode: Some(sanitized(0o644)),
+                progress: &mut NoopProgress,
+            },
         );
 
         assert_matches!(
@@ -1684,18 +1704,22 @@ mod tests {
             let mut reader = Cursor::new(b"too short");
 
             let tap = SourceTap::default();
+            let root = pinned(&dest);
             let result = extract_file_with_permit(
                 &mut reader,
                 ReadFaults::new(family, Some(&tap)),
                 &safe_path,
-                Some(sanitized(0o644)),
-                permit,
-                &pinned(&dest),
+                &root,
                 &mut report,
-                &mut copy_buffer,
                 dirs,
                 SinkOptions::default(),
-                &mut NoopProgress,
+                FileWrite {
+                    copy_buffer: &mut copy_buffer,
+                    permit,
+                    marking: root.marking(),
+                    mode: Some(sanitized(0o644)),
+                    progress: &mut NoopProgress,
+                },
             );
 
             match family {
@@ -1748,18 +1772,22 @@ mod tests {
         let real_data = vec![0x41u8; 200 * 1024];
         let mut reader = Cursor::new(&real_data);
 
+        let root = pinned(&dest);
         let result = extract_file_with_permit(
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(sanitized(0o644)),
-            permit,
-            &pinned(&dest),
+            &root,
             &mut report,
-            &mut copy_buffer,
             dirs,
             SinkOptions::default().with_existing_files(crate::ExistingFiles::Overwrite),
-            &mut NoopProgress,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: root.marking(),
+                mode: Some(sanitized(0o644)),
+                progress: &mut NoopProgress,
+            },
         );
 
         assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
@@ -1997,18 +2025,22 @@ mod tests {
 
         let mut reader = Cursor::new(b"content");
 
+        let root = pinned(&dest);
         extract_file_with_permit(
             &mut reader,
             ReadFaults::new(ReadFamily::Tar, None),
             &safe_path,
-            Some(CreateMode::Exact(sanitized_mode)),
-            permit,
-            &pinned(&dest),
+            &root,
             &mut report,
-            &mut copy_buffer,
             dirs,
             SinkOptions::default(),
-            &mut NoopProgress,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: root.marking(),
+                mode: Some(CreateMode::Exact(sanitized_mode)),
+                progress: &mut NoopProgress,
+            },
         )
         .expect("extraction should succeed");
 
@@ -2334,11 +2366,14 @@ mod tests {
             &mut reader,
             file,
             ReadFaults::new(ReadFamily::SevenZ, None),
-            &mut copy_buffer,
-            permit.into_admitted(),
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                marking: None,
+                mode: None,
+                progress: &mut NoopProgress,
+            },
             pending,
-            None,
-            &mut NoopProgress,
         )
         .expect("exact copy should succeed");
         assert_eq!(written, 11);
@@ -2356,11 +2391,14 @@ mod tests {
             &mut over_reader,
             over_file,
             ReadFaults::new(ReadFamily::SevenZ, None),
-            &mut copy_buffer,
-            over_permit.into_admitted(),
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit: over_permit,
+                marking: None,
+                mode: None,
+                progress: &mut NoopProgress,
+            },
             over_pending,
-            None,
-            &mut NoopProgress,
         )
         .expect_err("overrun must fail");
         assert_matches!(err, ArchiveError::SecurityViolation { .. });

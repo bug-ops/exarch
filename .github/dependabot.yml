@@ -7,6 +7,9 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Same 7 days as .cargo/config.toml global-min-publish-age; security updates bypass it.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     ignore:
       # #854: a lone direct bump leaves two windows-sys versions and fails
@@ -39,6 +42,9 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Same 7 days as .cargo/config.toml global-min-publish-age; security updates bypass it.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
@@ -61,6 +67,9 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Same 7 days as .cargo/config.toml global-min-publish-age; security updates bypass it.
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "ci"
@@ -76,6 +85,9 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Same 7 days as .cargo/config.toml global-min-publish-age; security updates bypass it.
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "python"
@@ -90,6 +102,9 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Same 7 days as .cargo/config.toml global-min-publish-age; security updates bypass it.
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "node"

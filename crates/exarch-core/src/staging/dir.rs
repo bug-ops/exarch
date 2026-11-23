@@ -50,6 +50,13 @@ const CREATE_ATTEMPTS: usize = 16;
 #[cfg(unix)]
 const PRIVATE_STAGE_MODE: u32 = 0o700;
 
+/// Restores owner `0700` access while preserving any special mode bits
+/// (such as `S_ISGID` inherited from a shared-group parent directory).
+#[cfg(unix)]
+const fn restored_private_mode(mode: u32) -> u32 {
+    (mode & 0o7000) | PRIVATE_STAGE_MODE
+}
+
 /// Owner permission bits observed on a newly created staging directory.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +64,7 @@ enum CreatedOwnerBits {
     /// Owner has full `rwx` (`0o700`) access.
     Full,
     /// The process umask (or filesystem) withheld at least one owner bit;
-    /// carries the observed permission bits (`mode & 0o777`).
+    /// carries the observed permission bits (`mode & 0o7777`).
     Restricted(u32),
 }
 
@@ -194,7 +201,7 @@ impl VerifiedStage {
             clippy::useless_conversion,
             reason = "`st_mode` is `u16` on macOS and `u32` on Linux"
         )]
-        let perm = u32::from(stat.st_mode) & 0o777;
+        let perm = u32::from(stat.st_mode) & 0o7777;
         if perm & PRIVATE_STAGE_MODE == PRIVATE_STAGE_MODE {
             Ok(CreatedOwnerBits::Full)
         } else {
@@ -300,7 +307,7 @@ fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io:
                 && status.mode.uid().get() == rustix::process::geteuid().as_raw()
                 && status.mode.bits() & PRIVATE_STAGE_MODE != PRIVATE_STAGE_MODE
         })
-        .map(|status| status.mode.bits() & 0o777);
+        .map(|status| status.mode.bits() & 0o7777);
     let _ = parent.remove_dir(name.as_leaf());
     stripped_mode.map_or(error, umask_error)
 }
@@ -503,7 +510,7 @@ impl StagingDir {
         };
         if let CreatedOwnerBits::Restricted(mode) = owner_bits
             && let Err(chmod_err) =
-                dir.set_permissions(std::fs::Permissions::from_mode(PRIVATE_STAGE_MODE))
+                dir.set_permissions(std::fs::Permissions::from_mode(restored_private_mode(mode)))
         {
             let error = if chmod_err.kind() == io::ErrorKind::PermissionDenied {
                 umask_error(mode)
@@ -539,7 +546,9 @@ impl StagingDir {
         let CreatedOwnerBits::Restricted(mode) = owner_bits else {
             return Err(refuse(open_error));
         };
-        if let Err(chmod_err) = handle.chmod(&std::fs::Permissions::from_mode(PRIVATE_STAGE_MODE)) {
+        if let Err(chmod_err) = handle.chmod(&std::fs::Permissions::from_mode(
+            restored_private_mode(mode),
+        )) {
             // On Linux without `/proc`, `chmod` on an `O_PATH` handle fails
             // with `NotFound`; either way the restricted umask prevented
             // recovery.
@@ -1405,5 +1414,52 @@ mod tests {
         let archive = work.join("test.tar");
         make_flat_tar(&archive);
         run_in_umask("0777", TEST_NAME, &work, &archive, 0o000);
+    }
+
+    fn claim_preserving_setgid(restricted_mode: u32) {
+        let temp = TempDir::new().unwrap();
+        let (pin, parent) = pin_of(&temp);
+        let name = LeafBuf::random(STAGING_PREFIX);
+        pin.make_private_dir(name.as_leaf()).unwrap();
+        let at = parent.join(&name);
+        let _ = rustix::fs::chown(&at, None, Some(rustix::process::getgid()));
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(restricted_mode)).unwrap();
+        let before = std::fs::metadata(&at).unwrap().permissions().mode() & 0o7777;
+        if before != restricted_mode {
+            return;
+        }
+
+        let stage = StagingDir::claim(Rc::clone(&pin), StagingSite::at(&parent), name).unwrap();
+        let after = std::fs::metadata(stage.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(after, 0o2700);
+        assert!(stage.discard().is_none());
+    }
+
+    #[test]
+    fn owner_bit_recovery_preserves_setgid_on_opened_stage() {
+        claim_preserving_setgid(0o2500);
+        assert!(umask_error(0o2500).to_string().contains("2500"));
+    }
+
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+    ))]
+    #[test]
+    fn owner_bit_recovery_preserves_setgid_on_restricted_stage() {
+        let restricted = if cfg!(any(target_os = "linux", target_os = "android")) {
+            0o2100
+        } else {
+            0o2400
+        };
+        claim_preserving_setgid(restricted);
     }
 }

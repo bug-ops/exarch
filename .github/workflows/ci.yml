@@ -36,7 +36,9 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
+      python_deps: ${{ steps.filter.outputs.python_deps }}
       node: ${{ steps.filter.outputs.node }}
+      node_deps: ${{ steps.filter.outputs.node_deps }}
       ci: ${{ steps.filter.outputs.ci }}
       docs: ${{ steps.filter.outputs.docs }}
       skills: ${{ steps.filter.outputs.skills }}
@@ -62,11 +64,17 @@ jobs:
               - 'crates/exarch-core/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+            python_deps:
+              - 'crates/exarch-python/pyproject.toml'
+              - 'crates/exarch-python/uv.lock'
             node:
               - 'crates/exarch-node/**'
               - 'crates/exarch-core/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+            node_deps:
+              - 'crates/exarch-node/package.json'
+              - 'crates/exarch-node/pnpm-lock.yaml'
             ci:
               - '.github/workflows/**'
               - '.github/labeler.yml'
@@ -213,8 +221,6 @@ jobs:
     needs: changes
     if: |
       needs.changes.outputs.rust == 'true' ||
-      needs.changes.outputs.python == 'true' ||
-      needs.changes.outputs.node == 'true' ||
       needs.changes.outputs.ci == 'true' ||
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop' ||
@@ -223,12 +229,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run cargo-deny
-        if: |
-          needs.changes.outputs.rust == 'true' ||
-          needs.changes.outputs.ci == 'true' ||
-          github.ref == 'refs/heads/main' ||
-          github.ref == 'refs/heads/develop' ||
-          github.event_name == 'schedule'
         uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2
         with:
           log-level: warn
@@ -250,9 +250,29 @@ jobs:
           command: check
           command-arguments: advisories
 
+  # Binding dependency security audit (Node/Python). Deliberately outside
+  # ci-success so dev/test dependency advisories surface on binding-dependency
+  # PRs and weekly schedules without blocking ci-success on unrelated PRs.
+  binding-security:
+    name: Binding Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    needs: changes
+    if: |
+      needs.changes.outputs.node_deps == 'true' ||
+      needs.changes.outputs.python_deps == 'true' ||
+      needs.changes.outputs.ci == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Set up Node.js
         if: |
-          needs.changes.outputs.node == 'true' ||
+          needs.changes.outputs.node_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||
@@ -263,7 +283,7 @@ jobs:
 
       - name: Set up pnpm
         if: |
-          needs.changes.outputs.node == 'true' ||
+          needs.changes.outputs.node_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||
@@ -274,7 +294,7 @@ jobs:
 
       - name: Run pnpm audit (exarch-node)
         if: |
-          needs.changes.outputs.node == 'true' ||
+          needs.changes.outputs.node_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||
@@ -284,7 +304,7 @@ jobs:
 
       - name: Set up Python
         if: |
-          needs.changes.outputs.python == 'true' ||
+          needs.changes.outputs.python_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||
@@ -295,18 +315,18 @@ jobs:
 
       - name: Install uv
         if: |
-          needs.changes.outputs.python == 'true' ||
+          needs.changes.outputs.python_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||
           github.event_name == 'schedule'
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: 0.13.7
 
       - name: Run pip-audit (exarch-python)
         if: |
-          needs.changes.outputs.python == 'true' ||
+          needs.changes.outputs.python_deps == 'true' ||
           needs.changes.outputs.ci == 'true' ||
           github.ref == 'refs/heads/main' ||
           github.ref == 'refs/heads/develop' ||

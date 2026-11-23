@@ -36,11 +36,10 @@ use super::le::le16;
 use super::le::le32;
 use super::zip::ZipMethod;
 use super::zip_reuse::Capture;
-use super::zip_structure::CDFH_SIGNATURE;
-use super::zip_structure::EOCD_SIGNATURE;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
-use super::zip_structure::ZIP64_END_SIGNATURE;
+use super::zip_structure::Signature;
+use super::zip_structure::find_signature;
 use crate::ArchiveError;
 use crate::HiddenRegion;
 use crate::Malformation;
@@ -313,27 +312,6 @@ enum Decoded<R> {
     },
 }
 
-/// Kind of streaming-reader record signature found by [`holds_reader_record`].
-#[derive(Debug, Clone, Copy)]
-enum ReaderRecord {
-    LocalHeader,
-    DirectoryOrEnd,
-}
-
-/// Finds the first signature in `bytes` that a streaming reader acts on.
-fn find_reader_record(bytes: &[u8]) -> Option<(usize, ReaderRecord)> {
-    bytes
-        .array_windows::<4>()
-        .enumerate()
-        .find_map(|(index, sig)| match *sig {
-            LFH_SIGNATURE => Some((index, ReaderRecord::LocalHeader)),
-            CDFH_SIGNATURE | EOCD_SIGNATURE | ZIP64_END_SIGNATURE => {
-                Some((index, ReaderRecord::DirectoryOrEnd))
-            }
-            _ => None,
-        })
-}
-
 /// Whether the `compressed` bytes at `data_start` hold a record a streaming
 /// reader resuming inside the data would act on, judged on the real bytes
 /// including those behind the declared end, so a record that starts inside the
@@ -366,17 +344,17 @@ pub(super) fn holds_reader_record<R: Read + Seek>(
     search_chunks(
         &mut Sequential(&mut data),
         &plan,
-        find_reader_record,
+        find_signature,
         |_, hit| {
             if hit.offset >= compressed {
                 return Ok(Flow::Stop);
             }
             match hit.kind {
-                ReaderRecord::DirectoryOrEnd => {
+                Signature::Stray(_) => {
                     found = true;
                     Ok(Flow::Stop)
                 }
-                ReaderRecord::LocalHeader => match hit.bytes.first_chunk::<LFH_FIXED_LEN>() {
+                Signature::LocalHeader => match hit.bytes.first_chunk::<LFH_FIXED_LEN>() {
                     Some(header) if is_reachable_header(header) => {
                         found = true;
                         Ok(Flow::Stop)
@@ -619,6 +597,9 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
 
+    use super::super::zip_structure::CDFH_SIGNATURE;
+    use super::super::zip_structure::EOCD_SIGNATURE;
+    use super::super::zip_structure::ZIP64_END_SIGNATURE;
     use super::*;
 
     fn deflate(payload: &[u8]) -> Vec<u8> {

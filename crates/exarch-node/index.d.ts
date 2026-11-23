@@ -1041,11 +1041,17 @@ export declare class SecurityConfig {
    * with `kdf_cost_exceeded` once the total passes the budget), so encrypted
    * 7z operations with different keys that run at the same time can make
    * each other fail. 7z operations of one process take turns only during the
-   * key set-up of each encrypted block and while an encrypted header is read.
+   * key set-up of each encrypted block and while an encrypted header is
+   * read.
    *
-   * A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives the outer key again after every inner operation, so with the default budget and 7-Zip's power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for such pipelines.
+   * A pipeline that extracts an encrypted 7z from inside an encrypted 7z
+   * derives the outer key again after every inner operation, so with the
+   * default budget and 7-Zip's power 19 it is refused after 256 outer
+   * blocks; raise `max_kdf_work` for such pipelines.
    *
-   * Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives.
+   * Blocks that combine several coders in a layout that is not a plain chain
+   * (such as BCJ2 with several AES coders) are charged for every AES coder,
+   * so the budget is reached sooner for such archives.
    *
    * Default: 2^27.
    *

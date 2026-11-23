@@ -22,7 +22,8 @@ use std::io::Read;
 use std::path::Path;
 
 /// Writes `reader`'s bytes directly to `leaf` in `parent` (no temp file, no
-/// rename), consuming the [`QuotaPermit`] that authorized the write.
+/// rename), consuming the [`QuotaPermit`](crate::security::quota::QuotaPermit)
+/// that authorized the write.
 ///
 /// Used for the common case where nothing currently occupies `leaf`
 /// (issue #492): creates `leaf` itself through [`common::create_file`]
@@ -91,7 +92,8 @@ pub(super) fn write_file_direct(
 }
 
 /// Writes `reader`'s bytes to `leaf` in `parent` via an atomic
-/// temp-file-then-rename, consuming the [`QuotaPermit`] that authorized the
+/// temp-file-then-rename, consuming the
+/// [`QuotaPermit`](crate::security::quota::QuotaPermit) that authorized the
 /// write.
 ///
 /// Used only when `leaf` has a pre-existing occupant being overwritten

@@ -48,6 +48,9 @@ Issues = "https://github.com/bug-ops/exarch/issues"
 release = ["maturin==1.16.0"]
 # Bundled into musllinux wheels inside the build container only (release.yml).
 release-musl = ["patchelf==0.19.3.0"]
+# CI dependency vulnerability scanner (binding-security job in ci.yml); kept in
+# its own group so its transitive tree stays out of the dev/release environments.
+ci-audit = ["pip-audit==2.10.1"]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.0",

@@ -8,7 +8,6 @@
 
 use std::assert_matches;
 use std::io::Cursor;
-use std::path::Path;
 
 use exarch_core::ExtractRequest;
 use exarch_core::MemoryEntry;
@@ -322,9 +321,9 @@ fn a_skipped_duplicate_keeps_the_first_files_mode() {
 
 #[cfg(feature = "encryption")]
 mod ppmd_key {
+    use std::path::Path;
     use std::sync::Arc;
 
-    use super::Path;
     use super::TempDir;
     use exarch_core::ArchiveError;
     use exarch_core::DecompressionBudget;

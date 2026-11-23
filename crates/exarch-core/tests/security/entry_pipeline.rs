@@ -210,14 +210,16 @@ fn sevenz_refuses_alias_spellings_of_banned_components() {
             extract_sevenz(&[RawEntry::File(&entry, b"x")], &sevenz_config()),
             &entry,
         );
-        assert_target_banned(
-            extract_sevenz(
-                &[RawEntry::Link("link", entry.as_bytes())],
-                &sevenz_config(),
-            ),
-            "Symlink",
-            &entry,
-        );
+        if cfg!(unix) {
+            assert_target_banned(
+                extract_sevenz(
+                    &[RawEntry::Link("link", entry.as_bytes())],
+                    &sevenz_config(),
+                ),
+                "Symlink",
+                &entry,
+            );
+        }
     }
 }
 
@@ -236,14 +238,16 @@ fn symlink_targets_with_alias_spellings_are_refused_in_every_format() {
             "Symlink",
             &target,
         );
-        assert_target_banned(
-            extract_sevenz(
-                &[RawEntry::Link("link", target.as_bytes())],
-                &sevenz_config(),
-            ),
-            "Symlink",
-            &target,
-        );
+        if cfg!(unix) {
+            assert_target_banned(
+                extract_sevenz(
+                    &[RawEntry::Link("link", target.as_bytes())],
+                    &sevenz_config(),
+                ),
+                "Symlink",
+                &target,
+            );
+        }
     }
 }
 

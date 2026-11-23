@@ -2674,7 +2674,7 @@ mod tests {
             hint(&["x", "d/y"]),
             "--force does not replace x, d/y; remove them or choose another destination."
         );
-        let many: Vec<String> = (0..15).map(|i| format!("f{i:02}")).collect();
+        let many: Vec<String> = Vec::from_fn(15, |i| format!("f{i:02}"));
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         let text = hint(&many);
         assert!(text.contains("f09") && !text.contains("f10"), "{text}");

@@ -9,7 +9,6 @@ mod sevenz_patch;
 
 use std::assert_matches;
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,7 +52,7 @@ fn files_in_memory(
 fn files_by_callback(
     archive: &str,
     request: &MemoryExtractRequest,
-) -> Result<BTreeMap<PathBuf, Vec<u8>>, CallbackError<Infallible>> {
+) -> Result<BTreeMap<PathBuf, Vec<u8>>, CallbackError<!>> {
     let reader = ArchiveReader::from_bytes(fixture_bytes(archive), None).unwrap();
     let mut files = BTreeMap::new();
     extract_reader_to_callback(

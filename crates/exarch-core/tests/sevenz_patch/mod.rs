@@ -38,7 +38,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 fn le_u64(bytes: &[u8]) -> usize {
-    usize::try_from(u64::from_le_bytes(bytes.try_into().unwrap())).unwrap()
+    usize::try_from(u64::from_le_bytes(*bytes.as_array().unwrap())).unwrap()
 }
 
 /// Range of the next header (the plain header, or the plain description of an

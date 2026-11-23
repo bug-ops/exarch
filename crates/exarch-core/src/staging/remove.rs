@@ -23,8 +23,13 @@ use rustix::fs::FileType;
 use rustix::fs::Stat;
 use rustix::io::Errno;
 
+use super::adopt::DirMode;
 use super::dir::list_entries;
+use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityKey;
+use crate::formats::pinned_dir::EntryMode;
+use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::VettedDir;
 use crate::formats::pinned_dir::open_directory_at;
 
 /// The deepest levels, which keep their descriptor open.
@@ -81,6 +86,12 @@ pub(super) trait Visit {
 
     /// Called for an entry of `dir` that is not a directory.
     fn leaf(&mut self, dir: &File, name: &OsStr, stat: &Stat, trail: Trail<'_>) -> Outcome;
+
+    /// Whether a directory the owner's mode keeps the walk out of is given
+    /// the owner's access back before the walk retries it.
+    fn restores_owner_access(&self) -> bool {
+        false
+    }
 }
 
 /// Whether an entry handed to [`Visit::leaf`] is gone.
@@ -102,9 +113,14 @@ impl Outcome {
 #[derive(Default)]
 struct Plain {
     error: Option<io::Error>,
+    restoring: bool,
 }
 
 impl Visit for Plain {
+    fn restores_owner_access(&self) -> bool {
+        self.restoring
+    }
+
     fn enter(&mut self, _dir: &File) -> Enter {
         Enter::Descend
     }
@@ -160,11 +176,11 @@ impl Walk {
         name: &OsStr,
         visit: &mut impl Visit,
     ) -> io::Result<Enter> {
-        let child = open_directory_at(parent, name)?;
+        let child = retry_restoring(visit, parent, name, || open_directory_at(parent, name))?;
         if visit.enter(&child) == Enter::Keep {
             return Ok(Enter::Keep);
         }
-        let pending = list_entries(&child)?;
+        let pending = retry_restoring(visit, parent, name, || list_entries(&child))?;
         self.levels.push(Level {
             name: name.to_os_string(),
             identity: identity_of(&child)?,
@@ -260,12 +276,79 @@ impl Walk {
     }
 }
 
-/// Unlinks everything below `dir` it may. Says whether nothing was left.
+/// Runs `attempt` and, when the owner's mode refused it and `visit` allows,
+/// gives the directory `name` of `parent` the owner's access back and runs it
+/// once more. The first error is kept when the access cannot be restored.
+fn retry_restoring<T>(
+    visit: &impl Visit,
+    parent: &File,
+    name: &OsStr,
+    attempt: impl Fn() -> io::Result<T>,
+) -> io::Result<T> {
+    match attempt() {
+        Err(e)
+            if visit.restores_owner_access()
+                && e.kind() == io::ErrorKind::PermissionDenied
+                && restore_owner_access(parent, name).is_ok() =>
+        {
+            attempt()
+        }
+        other => other,
+    }
+}
+
+/// Gives the directory `name` of `parent` the owner's read, write and search
+/// access, when it is a directory of this process's user, through a descriptor
+/// on the entry that is checked against the one just stat'ed.
+fn restore_owner_access(parent: &File, name: &OsStr) -> io::Result<()> {
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+        || stat.st_uid != rustix::process::geteuid().as_raw()
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let (_, leaf) = Leaf::split(std::path::Path::new(name)).map_err(|_| not_found())?;
+    let mode = DirMode::of_destination(EntryMode::of_stat(&stat)).restored_private();
+    let by_handle = VettedDir::reopen_at(parent)?.set_dir_mode(
+        leaf,
+        FileIdentity::Known(IdentityKey::of_stat(&stat)?),
+        &mode.permissions(),
+    );
+    match by_handle {
+        // No descriptor can be opened on a directory whose mode grants the
+        // owner nothing, so the entry is changed by name. `SYMLINK_NOFOLLOW`
+        // makes a swapped-in link harmless, and the identity is compared
+        // again afterwards because the name is not pinned to the directory.
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            rustix::fs::chmodat(parent, name, mode.as_raw_mode(), AtFlags::SYMLINK_NOFOLLOW)?;
+            let after = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+            if IdentityKey::of_stat(&after)? == IdentityKey::of_stat(&stat)? {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a staged directory was replaced during removal",
+                ))
+            }
+        }
+        other => other,
+    }
+}
+
+/// Unlinks everything below `dir` it may, first giving the owner's access back
+/// to a directory its own mode keeps the removal out of: the tree is one the
+/// run made. Says whether nothing was left.
 ///
-/// A directory the removal cannot open, list or empty and an entry it cannot
-/// unlink are left in place. Symlinks are unlinked, never followed.
+/// A directory the removal cannot empty and an entry it cannot unlink are left
+/// in place. Symlinks are unlinked, never followed.
 pub(super) fn remove_children(dir: &File) -> bool {
-    walk(dir, &mut Plain::default())
+    walk(
+        dir,
+        &mut Plain {
+            restoring: true,
+            ..Plain::default()
+        },
+    )
 }
 
 /// [`remove_children`] that reports why something was left: the first
@@ -376,6 +459,45 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn directories_without_owner_access_are_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o000, 0o100, 0o200, 0o300, 0o400, 0o600] {
+            let temp = TempDir::new().unwrap();
+            let sub = temp.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::write(sub.join("f"), b"x").unwrap();
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(mode)).unwrap();
+            let root = File::open(temp.path()).unwrap();
+
+            let emptied = remove_children(&root);
+
+            assert!(emptied, "mode {mode:04o}");
+            assert!(is_empty(&root), "mode {mode:04o}");
+        }
+    }
+
+    #[test]
+    fn checked_removal_does_not_change_the_mode_of_a_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let sub = temp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let root = File::open(temp.path()).unwrap();
+
+        let outcome = remove_children_checked(&root);
+
+        assert!(outcome.is_err());
+        assert_eq!(
+            std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
+            0
+        );
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     fn is_empty(dir: &File) -> bool {
@@ -510,14 +632,15 @@ mod tests {
         let root = File::open(temp.path()).unwrap();
         let locked = temp.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("f"), b"x").unwrap();
         std::fs::write(temp.path().join("gone"), b"x").unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let listable = std::fs::read_dir(&locked).is_ok();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let enforced = std::fs::remove_file(locked.join("f")).is_err();
 
         let removed = remove_children(&root);
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
-        if !listable {
+        if enforced {
             assert!(!removed);
             assert!(locked.exists());
         }

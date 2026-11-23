@@ -304,7 +304,7 @@ fn empty_members_after_the_end_marker_stop_at_the_base_allowance() {
 fn many_members_before_the_end_marker_are_refused_too() {
     for (name, encode) in BLOCK_CODECS.iter().take(2) {
         let temp = TempDir::new().unwrap();
-        let names: Vec<String> = (0..8).map(|i| format!("f{i}.txt")).collect();
+        let names: Vec<String> = Vec::from_fn(8, |i| format!("f{i}.txt"));
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let archive = write(&temp, name, &split_members(&refs, *encode));
         let err = list_archive(&archive, &with_base(3)).unwrap_err();
@@ -353,7 +353,7 @@ fn the_largest_base_admits_every_member_without_overflow() {
 fn xz_and_zstd_are_not_governed_by_the_member_allowance() {
     for (name, encode) in [("a.tar.xz", xz as Encode), ("a.tar.zst", zstd)] {
         let temp = TempDir::new().unwrap();
-        let names: Vec<String> = (0..8).map(|i| format!("f{i}.txt")).collect();
+        let names: Vec<String> = Vec::from_fn(8, |i| format!("f{i}.txt"));
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let archive = write(&temp, name, &split_members(&refs, encode));
         assert_eq!(

@@ -163,7 +163,7 @@ proptest! {
     ) {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default(); // max_path_depth = 32
-        let components: Vec<String> = (0..depth).map(|i| format!("d{i}")).collect();
+        let components: Vec<String> = Vec::from_fn(depth, |i| format!("d{i}"));
         let path = PathBuf::from(components.join("/"));
         let result = SafePath::validate(&path, &dest, &config);
         prop_assert!(result.is_err(), "excessive depth should be rejected");
@@ -211,7 +211,7 @@ proptest! {
     ) {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default(); // max_path_depth = 32
-        let components: Vec<String> = (0..depth).map(|i| format!("d{i}")).collect();
+        let components: Vec<String> = Vec::from_fn(depth, |i| format!("d{i}"));
         let path = PathBuf::from(components.join("/"));
         let result = SafePath::validate(&path, &dest, &config);
         prop_assert!(result.is_ok());
@@ -587,7 +587,7 @@ proptest! {
         let link_path = if link_depth == 0 {
             PathBuf::from("link")
         } else {
-            let components: Vec<String> = (0..link_depth).map(|i| format!("d{i}")).collect();
+            let components: Vec<String> = Vec::from_fn(link_depth, |i| format!("d{i}"));
             PathBuf::from(components.join("/") + "/link")
         };
 

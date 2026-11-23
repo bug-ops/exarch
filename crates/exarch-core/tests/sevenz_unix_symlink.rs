@@ -1131,7 +1131,7 @@ fn mark_stream_less(bytes: &[u8], file: usize) -> Vec<u8> {
         crc.sum().to_le_bytes()
     };
     let field = |at: usize| {
-        usize::try_from(u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())).unwrap()
+        usize::try_from(u64::from_le_bytes(*bytes[at..at + 8].as_array().unwrap())).unwrap()
     };
     let start = 32 + field(12);
     let header = &bytes[start..start + field(20)];

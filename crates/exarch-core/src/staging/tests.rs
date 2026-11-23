@@ -1207,7 +1207,7 @@ fn an_extraction_error_removes_the_staging_directory_on_every_path() {
     }
 }
 
-/// Plants a directory the staging removal cannot enter, so removal fails.
+/// Plants a directory the staging removal cannot unlink from, so removal fails.
 fn lock_inside_staging(parent: &Path) -> Action {
     let parent = parent.to_path_buf();
     Box::new(move || {
@@ -1215,7 +1215,7 @@ fn lock_inside_staging(parent: &Path) -> Action {
             let locked = staging.join("locked");
             std::fs::create_dir(&locked).unwrap();
             std::fs::write(locked.join("f"), b"x").unwrap();
-            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
         }
     })
 }
@@ -1224,8 +1224,8 @@ fn removal_is_enforced(parent: &Path) -> bool {
     let probe = parent.join("probe_locked");
     std::fs::create_dir(&probe).unwrap();
     std::fs::write(probe.join("f"), b"x").unwrap();
-    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let enforced = std::fs::read_dir(&probe).is_err();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let enforced = std::fs::remove_file(probe.join("f")).is_err();
     std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::remove_dir_all(&probe).unwrap();
     enforced

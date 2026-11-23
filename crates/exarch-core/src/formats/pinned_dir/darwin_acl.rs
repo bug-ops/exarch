@@ -130,9 +130,5 @@ pub(crate) fn store(file: &File, filesec: &[u8]) -> io::Result<()> {
             0,
         )
     };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    (result == 0).ok_or_else(io::Error::last_os_error)
 }

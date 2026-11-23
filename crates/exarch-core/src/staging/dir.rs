@@ -10,8 +10,6 @@
 use std::io;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -25,6 +23,8 @@ use super::acl::Inheritance;
 use super::acl::ParentAcl;
 use super::adopt::Adoption;
 #[cfg(unix)]
+use super::adopt::DirMode;
+#[cfg(unix)]
 use super::io_context;
 use crate::ArchiveError;
 use crate::DestinationStep;
@@ -36,6 +36,8 @@ use crate::StagingLeftover;
 use crate::formats::file_identity::FileIdentity;
 use crate::formats::file_identity::IdentityCheck;
 use crate::formats::output_root::StagedOutput;
+#[cfg(unix)]
+use crate::formats::pinned_dir::EntryMode;
 use crate::formats::pinned_dir::LeafBuf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::run_record::RecordBudget;
@@ -45,18 +47,6 @@ use crate::security::fs_view::Occupant;
 
 const CREATE_ATTEMPTS: usize = 16;
 
-/// Owner read, write, and search permission bits required for a private
-/// staging directory.
-#[cfg(unix)]
-const PRIVATE_STAGE_MODE: u32 = 0o700;
-
-/// Restores owner `0700` access while preserving any special mode bits
-/// (such as `S_ISGID` inherited from a shared-group parent directory).
-#[cfg(unix)]
-const fn restored_private_mode(mode: u32) -> u32 {
-    (mode & 0o7000) | PRIVATE_STAGE_MODE
-}
-
 /// Owner permission bits observed on a newly created staging directory.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +54,8 @@ enum CreatedOwnerBits {
     /// Owner has full `rwx` (`0o700`) access.
     Full,
     /// The process umask (or filesystem) withheld at least one owner bit;
-    /// carries the observed permission bits (`mode & 0o7777`).
-    Restricted(u32),
+    /// carries the observed mode.
+    Restricted(DirMode),
 }
 
 /// What a new staging directory is made to resemble, which fixes the order of
@@ -190,22 +180,18 @@ impl VerifiedStage {
         if stat.st_uid != rustix::process::geteuid().as_raw() {
             return refuse("is owned by another user");
         }
-        if stat.st_mode & 0o077 != 0 {
+        let mode = DirMode::of_destination(EntryMode::of_stat(&stat));
+        if !mode.is_owner_only() {
             return refuse("is accessible to other users");
         }
         #[cfg(target_os = "macos")]
         if !acl::only_inherited_entries(dir) {
             return refuse("carries an access control entry it did not inherit");
         }
-        #[allow(
-            clippy::useless_conversion,
-            reason = "`st_mode` is `u16` on macOS and `u32` on Linux"
-        )]
-        let perm = u32::from(stat.st_mode) & 0o7777;
-        if perm & PRIVATE_STAGE_MODE == PRIVATE_STAGE_MODE {
+        if mode.owner_has_full_access() {
             Ok(CreatedOwnerBits::Full)
         } else {
-            Ok(CreatedOwnerBits::Restricted(perm))
+            Ok(CreatedOwnerBits::Restricted(mode))
         }
     }
 
@@ -283,13 +269,14 @@ pub(super) fn list_entries(dir: &impl std::os::fd::AsFd) -> io::Result<Vec<std::
 /// when a freshly created `0700` staging directory cannot be used because
 /// the umask stripped owner bits.
 #[cfg(unix)]
-fn umask_error(mode: u32) -> io::Error {
+fn umask_error(mode: DirMode) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "the process umask removed owner permissions from the staging directory \
-             (created with mode {mode:04o}); set a umask that keeps owner read, write, \
-             and execute access (for example `umask 077` or `umask 022`) and retry"
+            "the process umask removed owner permissions from the directories it creates \
+             (they get mode {:04o}); set a umask that keeps owner read, write, and execute \
+             access (for example `umask 077` or `umask 022`) and retry",
+            mode.as_u32()
         ),
     )
 }
@@ -298,10 +285,6 @@ fn umask_error(mode: u32) -> io::Error {
 /// owner permissions from our freshly created staging directory, removes the
 /// empty directory best-effort, and returns the most informative error.
 #[cfg(unix)]
-#[expect(
-    clippy::verbose_bit_mask,
-    reason = "octal mask 0o077 expresses the Unix group/world permission bits directly"
-)]
 fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io::Error {
     let stripped_mode = (error.kind() == io::ErrorKind::PermissionDenied)
         .then(|| parent.status(name.as_leaf()).ok().flatten())
@@ -309,10 +292,9 @@ fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io:
         .filter(|status| {
             status.occupant == Occupant::Directory
                 && status.mode.uid().get() == rustix::process::geteuid().as_raw()
-                && status.mode.bits() & 0o077 == 0
-                && status.mode.bits() & PRIVATE_STAGE_MODE != PRIVATE_STAGE_MODE
         })
-        .map(|status| status.mode.bits() & 0o7777);
+        .map(|status| DirMode::of_destination(status.mode))
+        .filter(|mode| mode.is_owner_only() && !mode.owner_has_full_access());
     let _ = parent.remove_dir(name.as_leaf());
     stripped_mode.map_or(error, umask_error)
 }
@@ -514,8 +496,7 @@ impl StagingDir {
             }
         };
         if let CreatedOwnerBits::Restricted(mode) = owner_bits
-            && let Err(chmod_err) =
-                dir.set_permissions(std::fs::Permissions::from_mode(restored_private_mode(mode)))
+            && let Err(chmod_err) = dir.set_permissions(mode.restored_private().permissions())
         {
             let error = if chmod_err.kind() == io::ErrorKind::PermissionDenied {
                 umask_error(mode)
@@ -551,9 +532,7 @@ impl StagingDir {
         let CreatedOwnerBits::Restricted(mode) = owner_bits else {
             return Err(refuse(open_error));
         };
-        if let Err(chmod_err) = handle.chmod(&std::fs::Permissions::from_mode(
-            restored_private_mode(mode),
-        )) {
+        if let Err(chmod_err) = handle.chmod(&mode.restored_private().permissions()) {
             // On Linux without `/proc`, `chmod` on an `O_PATH` handle fails
             // with `NotFound`; either way the restricted umask prevented
             // recovery.
@@ -943,6 +922,42 @@ impl StagingDir {
         }
     }
 
+    /// Names the process umask as the cause of a bare permission refusal
+    /// when it leaves the directories the extraction creates without owner
+    /// access, which no entry of the archive can then be written into.
+    ///
+    /// Any other error, and a refusal under a umask that keeps owner access,
+    /// is returned unchanged.
+    #[cfg(unix)]
+    pub(super) fn explaining_umask(&self, error: ArchiveError) -> ArchiveError {
+        match error {
+            ArchiveError::PartialExtraction(partial) => {
+                let (cause, report, writes) = partial.into_parts();
+                ArchiveError::PartialExtraction(crate::Partial::new(
+                    self.explaining_umask(cause),
+                    report,
+                    writes,
+                ))
+            }
+            ArchiveError::Io(refusal) if refusal.kind() == io::ErrorKind::PermissionDenied => {
+                match Self::probe_dir_mode(&self.pin) {
+                    Ok(mode) if !mode.owner_has_full_access() => {
+                        ArchiveError::Io(umask_error(mode))
+                    }
+                    Ok(_) | Err(_) => ArchiveError::Io(refusal),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Platforms without Unix modes have no umask to explain.
+    #[cfg(not(unix))]
+    #[expect(clippy::unused_self, reason = "keeps the call sites platform-neutral")]
+    pub(super) const fn explaining_umask(&self, error: ArchiveError) -> ArchiveError {
+        error
+    }
+
     #[cfg(unix)]
     fn remove_tree(&self) {
         self.reset_private();
@@ -1273,6 +1288,26 @@ mod tests {
         std::fs::write(path, builder.into_inner().unwrap()).unwrap();
     }
 
+    fn make_nested_tar(path: &Path) {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_size(0);
+        dir.set_mode(0o755);
+        dir.set_cksum();
+        builder
+            .append_data(&mut dir, "sub/", std::io::empty())
+            .unwrap();
+        let mut file = tar::Header::new_gnu();
+        file.set_size(5);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder
+            .append_data(&mut file, "sub/hello.txt", &b"hello"[..])
+            .unwrap();
+        std::fs::write(path, builder.into_inner().unwrap()).unwrap();
+    }
+
     fn run_in_umask(umask: &str, test_name: &str, dir: &Path, archive: &Path, expected_mode: u32) {
         let output = std::process::Command::new("sh")
             .args([
@@ -1443,6 +1478,149 @@ mod tests {
         run_in_umask("0777", TEST_NAME, &work, &archive, 0o000);
     }
 
+    #[test]
+    fn atomic_extract_with_subdirectory_under_owner_restricting_umask_explains_and_cleans_up() {
+        const TEST_NAME: &str = "staging::dir::tests::atomic_extract_with_subdirectory_under_owner_restricting_umask_explains_and_cleans_up";
+
+        if let Some(dir) = std::env::var_os(UMASK_CHILD_DIR) {
+            let parent = PathBuf::from(dir);
+            let archive = PathBuf::from(std::env::var_os(UMASK_CHILD_ARCHIVE).unwrap());
+            let out = parent.join("out");
+
+            let error = crate::ExtractRequest::new(&crate::SecurityConfig::default())
+                .with_options(
+                    crate::ExtractionOptions::default().with_staging(crate::Staging::Atomic),
+                )
+                .extract(&archive, &out)
+                .unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("umask"),
+                "expected umask explanation: {message}"
+            );
+            assert_eq!(staging_names(&parent), Vec::<std::ffi::OsString>::new());
+            assert!(!out.exists());
+            return;
+        }
+
+        for umask in ["0177", "0277", "0227", "0127", "0377", "0677"] {
+            let temp = TempDir::new().unwrap();
+            let work = temp.path().canonicalize().unwrap();
+            let archive = work.join("test.tar");
+            make_nested_tar(&archive);
+            run_in_umask(umask, TEST_NAME, &work, &archive, 0o000);
+        }
+    }
+
+    #[test]
+    fn atomic_extract_with_subdirectory_succeeds_under_umask_0477() {
+        const TEST_NAME: &str =
+            "staging::dir::tests::atomic_extract_with_subdirectory_succeeds_under_umask_0477";
+
+        if let Some(dir) = std::env::var_os(UMASK_CHILD_DIR) {
+            let parent = PathBuf::from(dir);
+            let archive = PathBuf::from(std::env::var_os(UMASK_CHILD_ARCHIVE).unwrap());
+            let out = parent.join("out");
+
+            crate::ExtractRequest::new(&crate::SecurityConfig::default())
+                .with_options(
+                    crate::ExtractionOptions::default().with_staging(crate::Staging::Atomic),
+                )
+                .extract(&archive, &out)
+                .unwrap();
+
+            assert_eq!(staging_names(&parent), Vec::<std::ffi::OsString>::new());
+            for dir in [out.join("sub"), out.clone()] {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            std::fs::set_permissions(
+                out.join("sub/hello.txt"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(out.join("sub/hello.txt")).unwrap(),
+                "hello"
+            );
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let work = temp.path().canonicalize().unwrap();
+        let archive = work.join("test.tar");
+        make_nested_tar(&archive);
+        run_in_umask("0477", TEST_NAME, &work, &archive, 0o300);
+    }
+
+    #[test]
+    fn explaining_umask_keeps_the_report_and_writes_of_a_partial_extraction() {
+        const TEST_NAME: &str = "staging::dir::tests::explaining_umask_keeps_the_report_and_writes_of_a_partial_extraction";
+
+        if let Some(dir) = std::env::var_os(UMASK_CHILD_DIR) {
+            let parent = PathBuf::from(dir);
+            let pin = Rc::new(VettedDir::open_path(&parent).unwrap());
+            let stage = StagingDir::create(pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+            let report = crate::ExtractionReport {
+                directories_created: 3,
+                ..crate::ExtractionReport::default()
+            };
+            let refusal = io::Error::new(io::ErrorKind::PermissionDenied, "original");
+            let partial = ArchiveError::PartialExtraction(crate::Partial::new(
+                ArchiveError::Io(refusal),
+                report,
+                crate::PartialWrites::RolledBack,
+            ));
+
+            let ArchiveError::PartialExtraction(explained) = stage.explaining_umask(partial) else {
+                panic!("the partial extraction was unwrapped");
+            };
+
+            assert!(explained.cause().to_string().contains("umask"));
+            assert_eq!(explained.report().directories_created, 3);
+            assert_eq!(explained.writes(), crate::PartialWrites::RolledBack);
+            assert!(stage.discard().is_none());
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let work = temp.path().canonicalize().unwrap();
+        run_in_umask("0177", TEST_NAME, &work, &work.join("unused"), 0o600);
+    }
+
+    #[test]
+    fn a_permission_refusal_is_left_alone_under_a_umask_that_keeps_owner_access() {
+        const TEST_NAME: &str = "staging::dir::tests::a_permission_refusal_is_left_alone_under_a_umask_that_keeps_owner_access";
+
+        if let Some(dir) = std::env::var_os(UMASK_CHILD_DIR) {
+            let parent = PathBuf::from(dir);
+            let pin = Rc::new(VettedDir::open_path(&parent).unwrap());
+            let stage = StagingDir::create(pin, StagingSite::at(&parent), Seed::Absent).unwrap();
+
+            let refusal = io::Error::new(io::ErrorKind::PermissionDenied, "original");
+            let error = stage.explaining_umask(ArchiveError::Io(refusal));
+
+            assert_eq!(error.to_string(), "I/O error: original");
+            assert!(stage.discard().is_none());
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let work = temp.path().canonicalize().unwrap();
+        run_in_umask("0022", TEST_NAME, &work, &work.join("unused"), 0o755);
+    }
+
+    #[test]
+    fn restoring_owner_access_keeps_group_and_sticky_bits_and_drops_setuid() {
+        let mode = DirMode::of_destination(EntryMode::for_test(
+            0o7000,
+            crate::formats::pinned_dir::Uid::from_raw(0),
+            crate::formats::pinned_dir::Gid::from_raw(0),
+        ));
+
+        assert_eq!(mode.restored_private().as_u32(), 0o3700);
+    }
+
     fn claim_preserving_setgid(restricted_mode: u32) {
         let temp = TempDir::new().unwrap();
         let (pin, parent) = pin_of(&temp);
@@ -1469,7 +1647,15 @@ mod tests {
     #[test]
     fn owner_bit_recovery_preserves_setgid_on_opened_stage() {
         claim_preserving_setgid(0o2500);
-        assert!(umask_error(0o2500).to_string().contains("2500"));
+        assert!(
+            umask_error(DirMode::of_destination(EntryMode::for_test(
+                0o2500,
+                crate::formats::pinned_dir::Uid::from_raw(0),
+                crate::formats::pinned_dir::Gid::from_raw(0),
+            )))
+            .to_string()
+            .contains("2500")
+        );
     }
 
     #[cfg(any(

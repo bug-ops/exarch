@@ -20,8 +20,6 @@ use super::lzma2::DecodeKnobs;
 use super::verify::entries_uncovered_by_block_crc;
 use super::verify::payload_by_block;
 #[cfg(unix)]
-use super::write::FileWrite;
-#[cfg(unix)]
 use super::write::write_file_direct;
 #[cfg(unix)]
 use super::write::write_file_with_permit;
@@ -40,6 +38,8 @@ use crate::UnverifiedReason;
 use crate::copy::CopyBuffer;
 use crate::error::KindSource;
 use crate::error::NativeKind;
+#[cfg(unix)]
+use crate::formats::common::FileWrite;
 #[cfg(unix)]
 use crate::formats::common::MAX_TEMP_FILE_CREATE_ATTEMPTS;
 #[cfg(unix)]
@@ -1451,7 +1451,7 @@ fn test_allowed_extensions_filters_out_disallowed() {
 #[test]
 fn test_disallowed_extension_aggregates_single_warning() {
     const ENTRY_COUNT: usize = 30;
-    let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("skip-{i}.exe")).collect();
+    let names: Vec<String> = Vec::from_fn(ENTRY_COUNT, |i| format!("skip-{i}.exe"));
     let entries: Vec<(&str, &[u8])> = names
         .iter()
         .map(|n| (n.as_str(), b"payload".as_slice()))
@@ -1658,7 +1658,7 @@ fn compressed_solid_copies(copies: usize) -> Vec<u8> {
             b"0123456789abcdef"[(state % 16) as usize]
         })
         .collect();
-    let names: Vec<String> = (0..copies).map(|i| format!("copy{i}/main.rs")).collect();
+    let names: Vec<String> = Vec::from_fn(copies, |i| format!("copy{i}/main.rs"));
     let entries: Vec<(&str, &[u8])> = names
         .iter()
         .map(|n| (n.as_str(), source.as_slice()))
@@ -2292,7 +2292,7 @@ fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
 #[test]
 fn test_skip_duplicates_aggregates_single_warning() {
     const ENTRY_COUNT: usize = 30;
-    let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("dup-{i}.txt")).collect();
+    let names: Vec<String> = Vec::from_fn(ENTRY_COUNT, |i| format!("dup-{i}.txt"));
     let entries: Vec<(&str, &[u8])> = names
         .iter()
         .map(|n| (n.as_str(), b"payload".as_slice()))

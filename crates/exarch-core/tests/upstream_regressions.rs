@@ -168,7 +168,7 @@ fn aes_ctr_tamper_of_an_existing_force_target_is_refused_and_keeps_the_target() 
     let mut at = 0;
     let (name, ciphertext) = loop {
         assert_eq!(&bytes[at..at + 4], b"PK\x03\x04");
-        let compressed = u32::from_le_bytes(bytes[at + 18..at + 22].try_into().unwrap());
+        let compressed = u32::from_le_bytes(*bytes[at + 18..at + 22].as_array().unwrap());
         let name_len = usize::from(u16::from_le_bytes([bytes[at + 26], bytes[at + 27]]));
         let extra = usize::from(u16::from_le_bytes([bytes[at + 28], bytes[at + 29]]));
         let data = at + 30 + name_len + extra;

@@ -689,7 +689,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             reader,
             &mut file,
             &mut self.copy_buffer,
-            Some(staged.size.get()),
+            staged.size,
             &mut *tally.progress,
         )
         .map_err(|error| faults.classify(error))?;

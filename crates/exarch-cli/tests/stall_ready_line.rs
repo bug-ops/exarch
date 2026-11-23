@@ -12,7 +12,7 @@ use common::write_tar;
 use tempfile::TempDir;
 
 fn archive_with_entries(dir: &TempDir, count: usize) -> std::path::PathBuf {
-    let names: Vec<String> = (0..count).map(|i| format!("f{i}")).collect();
+    let names: Vec<String> = Vec::from_fn(count, |i| format!("f{i}"));
     let members: Vec<Member<'_>> = names.iter().map(|name| Member::File(name)).collect();
     let archive = dir.path().join("m.tar");
     write_tar(&archive, &members);

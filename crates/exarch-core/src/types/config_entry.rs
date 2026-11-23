@@ -362,6 +362,8 @@ impl fmt::Display for PathComponentName {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -478,15 +480,13 @@ mod tests {
     fn component_refuses_a_name_made_only_of_ignorable_code_points() {
         for raw in ["\u{200c}", "\u{feff}\u{200d}", "\u{202a}\u{206f}"] {
             let err = PathComponentName::try_from(raw).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    ArchiveError::InvalidConfiguration {
-                        setting: ConfigSetting::BannedPathComponent,
-                        problem: ConfigProblem::Empty
-                    }
-                ),
-                "{raw:?}: {err:?}"
+            assert_matches!(
+                err,
+                ArchiveError::InvalidConfiguration {
+                    setting: ConfigSetting::BannedPathComponent,
+                    problem: ConfigProblem::Empty
+                },
+                "{raw:?}"
             );
         }
         assert!(PathComponentName::try_from("a\u{200c}").is_ok());

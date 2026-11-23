@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
 - Permissions: extraction clears the sticky bit of regular files in every format, so a TAR file with the sticky bit extracts like ZIP and 7z, and `verify` reports a stored sticky bit on a TAR regular file as `InvalidPermissions` like setuid and setgid (#1309).
 - Permissions: `extract` honors the permission policy: without `--preserve-permissions` a file gets its archive mode minus the umask, with it the exact sanitized archive mode, in TAR, ZIP and 7z (#1312).
-- Core API: `Violation::LinkTargetBannedComponent` carries a `LinkKind` and its message names the link kind (#TBD).
+- Core API: `Violation::LinkTargetBannedComponent` carries a `LinkKind` and its message names the link kind (#1348).
 - ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits of ZIP files and the mode of 7z files, so `verify --strict` can exit 3 on archives that passed before (#1312).
 
 ### Changed
@@ -41,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Staging: an atomic extract of an archive with subdirectories under an owner-restricting umask reports the umask and always removes the staging directory (#1339) (#1347).
-- Paths: banned path components match with Unicode normalization and case folding, ignoring characters HFS+ skips, a banned name made only of such characters is refused as empty, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink (#TBD).
-- 7z: concurrent encrypted operations in one process are charged for the key derivations they cause against `max_kdf_work`, so a key replaced by another operation is charged again, and concurrent operations with different keys can fail with `KdfCostExceeded` partway through; a refusal stays in force for the rest of the operation, and blocks with several AES coders on a non-linear layout are charged per coder, a pipeline that extracts an encrypted 7z from inside another needs a higher `max_kdf_work` (#TBD).
+- Paths: banned path components match with Unicode normalization and case folding, ignoring characters HFS+ skips, a banned name made only of such characters is refused as empty, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink (#1348).
+- 7z: concurrent encrypted operations in one process are charged for the key derivations they cause against `max_kdf_work`, so a key replaced by another operation is charged again, and concurrent operations with different keys can fail with `KdfCostExceeded` partway through; a refusal stays in force for the rest of the operation, and blocks with several AES coders on a non-linear layout are charged per coder, a pipeline that extracts an encrypted 7z from inside another needs a higher `max_kdf_work` (#1348).
 - Staging: recover `0700` owner bits on freshly created staging directories under owner-restricting umasks (e.g. `0277`) and report the umask clearly when the directory cannot be opened (#1311), only classifying `unopenable_error` as a umask error when `0o077` group/other bits are clear (#1325).
 - Tests: made `test_create_tar_directory_mode_without_preserve_permissions` umask-independent (#1310), and gated `std::path::Path` under `#[cfg(feature = "encryption")]` in `sevenz_mode_and_ppmd_key` so integration tests compile with `--no-default-features` (#1326).
 

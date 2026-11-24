@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- TAR: opt-in `tar_sparse` / `--tar-sparse expand` extracts old GNU sparse entries, counting the real size against the size quotas, and refuses sparse maps that readers parse differently; PAX sparse records stay refused (#1349).
+- TAR: opt-in `tar_sparse` / `--tar-sparse expand` extracts old GNU sparse entries, counting the real size against the size quotas, and refuses sparse maps that readers parse differently; PAX sparse records stay refused (#1349, #1372).
 
 ### Breaking
 
-- Core API: `TarAmbiguity::SparseMap`, `SparseMapDefect`, `TarSparsePolicy` and new `TarHeaderField` variants for the sparse policy; `SecurityConfig` gains a `tar_sparse` field (#1349).
-- 7z: archives whose AES coders in one block declare different key parameters, or whose encrypted header has several AES coders, are refused; 7-Zip does not write them (#1351, #1352).
+- Core API: `TarAmbiguity::SparseMap`, `SparseMapDefect`, `TarSparsePolicy` and new `TarHeaderField` variants for the sparse policy; `SecurityConfig` gains a `tar_sparse` field (#1349, #1372).
+- 7z: archives whose AES coders in one block declare different key parameters, or whose encrypted header has several AES coders, are refused; 7-Zip does not write them (#1351, #1352, #1372).
 - Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#1306).
 - Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
 - Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - 7z: one KDF charge walk serves admission and the runtime check, and the encrypted header is read before any key is derived (#1363).
-- 7z: each operation derives its own AES keys and hands them to the decoder in raw-key form, so the process-wide key slot and the AES turn are gone and operations no longer wait for or evict each other (#1351, #1352).
-- Core: one shared poisoned-lock recovery helper per crate replaces the duplicated `lock().unwrap_or_else(PoisonError::into_inner)` calls (#1362).
+- 7z: each operation derives its own AES keys and hands them to the decoder in raw-key form, so the process-wide key slot and the AES turn are gone and operations no longer wait for or evict each other (#1351, #1352, #1372).
+- Core: one shared poisoned-lock recovery helper per crate replaces the duplicated `lock().unwrap_or_else(PoisonError::into_inner)` calls (#1362, #1372).
 - Core: one landing check for banned path components, typed owner and mode predicates for staging trust checks, and `FileWrite` drops its unused mode and marking (#1363).
 - CLI: tar ambiguity refusals get a hint that matches the refusal, in place of "may be corrupted" (#1363).
 - Dependencies: zstd 0.14.5 (libzstd 1.6.0) in both lockfiles, fixing CVE-2026-124851 (#1363).

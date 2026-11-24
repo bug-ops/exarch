@@ -1764,6 +1764,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per Literal alias of the stub file"
+    )]
     fn test_pyi_literal_aliases_match_core_enums() {
         use exarch_core::ArchiveType;
         use exarch_core::CheckStatus;
@@ -1783,6 +1787,7 @@ mod tests {
         use exarch_core::SecurityViolationSubCode;
         use exarch_core::SkipKind;
         use exarch_core::SubCode;
+        use exarch_core::TarSparsePolicy;
         use exarch_core::UnverifiedReason;
         use exarch_core::VerificationStatus;
         use exarch_core::ZipConsistencyPolicy;
@@ -1818,6 +1823,7 @@ mod tests {
                 ZipConsistencyPolicy::ALL,
                 ZipConsistencyPolicy::as_str,
             ),
+            literal_line("_TarSparse", TarSparsePolicy::ALL, TarSparsePolicy::as_str),
             literal_line("_RepeatedPaths", RepeatedPaths::ALL, RepeatedPaths::as_str),
             literal_line("_PartialWrites", PartialWrites::ALL, PartialWrites::as_str),
             literal_line("_PolicySetting", PolicySetting::ALL, PolicySetting::as_str),

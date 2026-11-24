@@ -115,3 +115,5 @@ These fixtures ensure that exarch:
 **Purpose:** password handling of #1023 (`test_encrypted_archives.py`)
 
 **Contents:** `hello.txt` ("hello encrypted\n") and `dir/inner.txt` ("inner payload\n"). `encrypted-aes256.zip` is WinZip AES-256; `encrypted-header.7z` is non-solid with an encrypted header and content. The password of both is `correct-horse`. Copies of `aes256.zip` and `header.7z` in `crates/exarch-core/tests/data/encryption`.
+
+`encrypted-content-plain-header.7z` (copy of the core fixture of the same name, password `exarch`) holds `a.txt` and `b.txt` in two blocks behind a readable header. It is the second password of the concurrent-extraction test of #1352.

@@ -9,9 +9,7 @@ use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
-use super::turn_gate::TurnGate;
 use crate::ParallelDecode;
-use crate::encryption::kdf::AesTurn;
 use crate::formats::bounded_read::read_prefix;
 use crate::formats::source_fault::is_sevenz_checksum;
 use sevenz_rust2::BlockDecoder;
@@ -97,7 +95,7 @@ fn handover_violation() -> sevenz_rust2::Error {
 
 /// Decodes one block through sevenz-rust2's `BlockDecoder`, checking each
 /// entry's CRC here so a mismatch does not end the block (see
-/// [`SevenZHeader::unchecked_crc_archive`]).
+/// [`SevenZHeader::decode_archive`]).
 ///
 /// When it drains an entry after the callback, the decoder repeats a checksum
 /// mismatch the callback already saw, as a plain I/O error that has lost its
@@ -112,24 +110,16 @@ fn sequential_block<R: Read + Seek>(
     source: &mut R,
     header: &SevenZHeader,
     block_index: BlockIndex,
-    password: &sevenz_rust2::Password,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
-    // The turn covers the decoder set-up, where an AES key is derived. The
-    // gate gives it up before the decoder first calls the source when the key
-    // is derived before that; otherwise it is given up before the first entry
-    // reaches user code.
-    let turn = RefCell::new(
-        (header.is_block_encrypted(block_index) && block_has_streams(header, block_index))
-            .then(AesTurn::acquire),
-    );
-    if let Some(held) = turn.borrow_mut().as_mut()
-        && let Err(error) = header.enter_aes_block(held, block_index, password)
-    {
-        // The set-up already recorded this block's key; no decoder is built.
-        held.forget_slot_key();
-        return Err(sevenz_rust2::Error::from(error));
-    }
+    let decoded = header.decode_archive();
+    // A block the decoder builds nothing for needs no key, so none is derived.
+    let none = sevenz_rust2::Password::empty();
+    let password = if block_has_streams(header, block_index) {
+        decoded.block_password(block_index)?
+    } else {
+        &none
+    };
     let mismatch = RefCell::new(None);
     let callback_failed = Cell::new(false);
     let last_entry = Cell::new(0);
@@ -137,47 +127,31 @@ fn sequential_block<R: Read + Seek>(
         .rev()
         .find(|&i| header.files().get(i).is_some_and(|file| file.has_stream));
     let mut next_file = header.block_first_file(block_index);
-    let mut gate = TurnGate::new(source, &turn, header.aes_coder_leads_block(block_index));
-    let result = BlockDecoder::new(
-        1,
-        block_index.get(),
-        header.unchecked_crc_archive(),
-        password,
-        &mut gate,
-    )
-    .for_each_entries(&mut |_, reader| {
-        drop(turn.borrow_mut().take());
-        let index = next_file;
-        let file = header.files().get(index).ok_or_else(handover_violation)?;
-        next_file = next_file.saturating_add(1);
-        last_entry.set(index);
-        let below = FailureTap {
-            inner: reader,
-            entry: index,
-            arms: true,
-            mismatch: &mismatch,
-        };
-        let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
-            Box::new(CrcChecked::new(below, file.size, file.crc))
-        } else {
-            Box::new(below)
-        };
-        let mut tapped = FailureTap {
-            inner: entry.as_mut(),
-            entry: index,
-            arms: last_streamed == Some(index),
-            mismatch: &mismatch,
-        };
-        each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
-    });
-    if let Some(held) = turn.borrow_mut().as_mut()
-        && result.is_err()
-    {
-        // The decoder was never built, so the key it would have derived is
-        // not the one the slot holds.
-        held.forget_slot_key();
-    }
-    drop(turn);
+    let result = BlockDecoder::new(1, block_index.get(), decoded.archive(), password, source)
+        .for_each_entries(&mut |_, reader| {
+            let index = next_file;
+            let file = header.files().get(index).ok_or_else(handover_violation)?;
+            next_file = next_file.saturating_add(1);
+            last_entry.set(index);
+            let below = FailureTap {
+                inner: reader,
+                entry: index,
+                arms: true,
+                mismatch: &mismatch,
+            };
+            let mut entry: Box<dyn Read + '_> = if file.has_stream && file.has_crc {
+                Box::new(CrcChecked::new(below, file.size, file.crc))
+            } else {
+                Box::new(below)
+            };
+            let mut tapped = FailureTap {
+                inner: entry.as_mut(),
+                entry: index,
+                arms: last_streamed == Some(index),
+                mismatch: &mismatch,
+            };
+            each(file, &mut tapped).inspect_err(|_| callback_failed.set(true))
+        });
     match result {
         Err(sevenz_rust2::Error::Io(e, _))
             if !callback_failed.get()
@@ -218,7 +192,6 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
-    let password = header.block_password();
     let archive = header.archive();
     let span = block_span(header, block_index);
     let (first, count) = (span.start, span.len());
@@ -231,13 +204,20 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
         _ => None,
     };
     let Some((stream, lookahead)) = plan else {
-        return sequential_block(source, header, block_index, &password, each);
+        return sequential_block(source, header, block_index, each);
     };
 
     // The dry run fails exactly as the sequential path would on a coder graph
-    // or property it rejects, before any thread starts.
-    BlockDecoder::new(1, block_index.get(), archive, &password, &mut *source)
-        .for_each_entries(&mut |_, _| Ok(false))?;
+    // or property it rejects, before any thread starts. A parallel block holds
+    // one LZMA2 coder, so it never needs a key.
+    BlockDecoder::new(
+        1,
+        block_index.get(),
+        archive,
+        &sevenz_rust2::Password::empty(),
+        &mut *source,
+    )
+    .for_each_entries(&mut |_, _| Ok(false))?;
     let block = header.block(block_index);
 
     with_parallel_reader(&mut *source, stream, knobs, lookahead.get(), |reader| {
@@ -409,150 +389,4 @@ pub(super) fn skip_payload(file: &sevenz_rust2::ArchiveEntry, reader: &mut dyn R
 
 pub(super) fn is_sevenz_payload(file: &sevenz_rust2::ArchiveEntry) -> bool {
     file.has_stream && file.size > 0
-}
-
-#[cfg(test)]
-#[cfg(feature = "encryption")]
-mod tests {
-    use super::super::header::HeaderLimit;
-    use super::super::header::open_sevenz_header;
-    use super::*;
-    use crate::encryption::Credentials;
-    use sevenz_rust2::ArchiveEntry;
-    use sevenz_rust2::ArchiveWriter;
-    use sevenz_rust2::EncoderMethod;
-    use sevenz_rust2::encoder_options::AesEncoderOptions;
-    use std::io::Cursor;
-    use std::io::SeekFrom;
-    use std::sync::Arc;
-
-    struct TurnWatchingSource {
-        inner: Cursor<Vec<u8>>,
-        calls_under_turn: usize,
-        calls_outside_turn: usize,
-    }
-
-    impl TurnWatchingSource {
-        fn note(&mut self) {
-            if AesTurn::held_by_current_thread() {
-                self.calls_under_turn += 1;
-            } else {
-                self.calls_outside_turn += 1;
-            }
-        }
-    }
-
-    impl Read for TurnWatchingSource {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.note();
-            self.inner.read(buf)
-        }
-    }
-
-    impl Seek for TurnWatchingSource {
-        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-            self.note();
-            self.inner.seek(to)
-        }
-    }
-
-    fn aes() -> sevenz_rust2::EncoderConfiguration {
-        let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
-        options.num_cycles_power = 8;
-        options.into()
-    }
-
-    /// What decoding the only block of an archive made with `methods` showed.
-    struct Decoded {
-        aes_leads: bool,
-        body: Vec<u8>,
-        calls_outside_turn: usize,
-        calls_under_turn: usize,
-    }
-
-    fn decode_with(methods: Vec<sevenz_rust2::EncoderConfiguration>) -> Decoded {
-        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
-        writer.set_encrypt_header(false);
-        writer.set_content_methods(methods);
-        let mut entry = ArchiveEntry::new_file("a");
-        entry.has_stream = true;
-        entry.size = 4;
-        writer
-            .push_archive_entry(entry, Some(Cursor::new(b"data".to_vec())))
-            .unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-        let credentials = Credentials::new(Some(Arc::new(
-            crate::Password::new(b"pw".to_vec()).unwrap(),
-        )));
-        let header = open_sevenz_header(
-            &mut Cursor::new(bytes.clone()),
-            HeaderLimit::UNLIMITED,
-            &credentials,
-        )
-        .unwrap();
-        let block = header.block_indices().next().unwrap();
-        let mut source = TurnWatchingSource {
-            inner: Cursor::new(bytes),
-            calls_under_turn: 0,
-            calls_outside_turn: 0,
-        };
-        let mut body = Vec::new();
-
-        decode_block_entries(
-            &mut source,
-            &header,
-            block,
-            ParallelDecode::Sequential,
-            DecodeKnobs::new(1024, 1),
-            &mut |_, reader| {
-                reader.read_to_end(&mut body)?;
-                Ok(true)
-            },
-        )
-        .unwrap();
-
-        Decoded {
-            aes_leads: header.aes_coder_leads_block(block),
-            body,
-            calls_outside_turn: source.calls_outside_turn,
-            calls_under_turn: source.calls_under_turn,
-        }
-    }
-
-    #[test]
-    fn decoding_an_aes_block_runs_no_source_code_under_the_turn() {
-        let decoded = decode_with(vec![aes(), EncoderMethod::COPY.into()]);
-
-        assert!(decoded.aes_leads);
-        assert_eq!(decoded.body, b"data");
-        assert!(decoded.calls_outside_turn > 0, "the source was read");
-        assert_eq!(decoded.calls_under_turn, 0);
-    }
-
-    #[test]
-    fn an_aes_block_over_lzma2_reads_the_source_outside_the_turn() {
-        let decoded = decode_with(vec![aes(), EncoderMethod::LZMA2.into()]);
-
-        assert!(decoded.aes_leads);
-        assert_eq!(decoded.body, b"data");
-        assert!(decoded.calls_outside_turn > 0, "the source was read");
-        assert_eq!(decoded.calls_under_turn, 0);
-    }
-
-    #[test]
-    fn layouts_without_a_leading_aes_coder_keep_the_turn_during_set_up() {
-        for methods in [
-            vec![EncoderMethod::COPY.into(), aes()],
-            vec![aes(), aes(), EncoderMethod::COPY.into()],
-        ] {
-            let decoded = decode_with(methods);
-
-            assert!(!decoded.aes_leads);
-            assert_eq!(decoded.body, b"data");
-            assert!(
-                decoded.calls_under_turn > 0,
-                "the set-up calls the source under the turn"
-            );
-        }
-    }
 }

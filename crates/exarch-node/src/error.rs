@@ -376,6 +376,9 @@ pub enum ConfigSetting {
     /// `zip_consistency`.
     #[napi(value = "zip_consistency")]
     ZipConsistency,
+    /// `tar_sparse`.
+    #[napi(value = "tar_sparse")]
+    TarSparse,
     /// `repeated_paths`.
     #[napi(value = "repeated_paths")]
     RepeatedPaths,
@@ -736,6 +739,7 @@ mirror_from_core!(
         ParallelDecodeMemory,
         ExcludePattern,
         ZipConsistency,
+        TarSparse,
         RepeatedPaths,
         PathModel,
         ArchiveFormat,
@@ -1996,6 +2000,7 @@ mod tests {
             ParallelDecodeMemory,
             ExcludePattern,
             ZipConsistency,
+            TarSparse,
             RepeatedPaths,
             PathModel,
             ArchiveFormat,

@@ -12,6 +12,7 @@
 | `--allow-symlinks` / `--allow-hardlinks` | off | As `extract`; pass the ones you will extract with. |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | off | As `extract`. An include matching nothing, and a hardlink to an unselected target, are `HIGH` issues. No per-entry rows, so no `disposition`. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Structural findings become issues under `enforce`. |
+| `--tar-sparse <refuse\|expand>` | refuse | TAR only. Under `expand` a sparse entry is verified without generating its holes: only the archived bytes are read, and a truncated or corrupt payload fails the run. See [formats.md](formats.md). |
 | `--repeated-paths <keep-first\|refuse>` | keep-first | Under `refuse` a repeated landing is a `HIGH` `Security Policy` issue (`sub_code` `REPEATED_PATH`, `relaxable_by` `repeated_paths`), also for a ZIP name repeat under both `--zip-consistency` policies (there it replaces the `Duplicate Entry` finding). |
 | `--sandbox`, `--password-file` / `--password-fd` / `--password-prompt` | as `extract` | See [extract.md](extract.md). |
 | `--parallel-decode-memory`, `--max-files`, `--max-total-size`, `--max-file-size`, `--max-compression-ratio`, `--allow-solid-archives` | as `list` | File count and total size fail with `QuotaExceeded` past the cap. |

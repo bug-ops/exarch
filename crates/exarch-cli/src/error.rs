@@ -9,6 +9,7 @@
 //! keeps them exact.
 
 use crate::cli::RepeatedPathsArg;
+use crate::cli::TarSparseArg;
 use crate::cli::ZipConsistencyArg;
 use crate::cli::default_banned_components_text;
 use crate::cli::solid_ratio_text;
@@ -1129,6 +1130,8 @@ fn tar_ambiguity_context(
 enum TarRefusalNature {
     /// A sparse construct the reader does not extract; other tools may.
     Unsupported,
+    /// A GNU sparse entry that `--tar-sparse expand` reads.
+    SparseOptIn,
     /// Structurally valid, but readers disagree on what it means.
     Ambiguous,
     /// A global PAX header over the metadata limit, which only the Rust API
@@ -1143,7 +1146,8 @@ enum TarRefusalNature {
 impl TarRefusalNature {
     fn of(ambiguity: &TarAmbiguity) -> Self {
         match ambiguity {
-            TarAmbiguity::SparseEntry | TarAmbiguity::UnsupportedRecord { .. } => Self::Unsupported,
+            TarAmbiguity::SparseEntry => Self::SparseOptIn,
+            TarAmbiguity::UnsupportedRecord { .. } => Self::Unsupported,
             TarAmbiguity::GlobalTooLarge { .. } => Self::MetadataLimit,
             TarAmbiguity::OversizedRecord { .. }
             | TarAmbiguity::DuplicateRecord { .. }
@@ -1157,7 +1161,8 @@ impl TarRefusalNature {
             | TarAmbiguity::NonZeroPadding
             | TarAmbiguity::NonRegularPayload { .. }
             | TarAmbiguity::DirectoryNamedPayload { .. }
-            | TarAmbiguity::ExtensionBeforeLabel { .. } => Self::Ambiguous,
+            | TarAmbiguity::ExtensionBeforeLabel { .. }
+            | TarAmbiguity::SparseMap { .. } => Self::Ambiguous,
             TarAmbiguity::MalformedRecord
             | TarAmbiguity::EmptyKey
             | TarAmbiguity::InvalidSize
@@ -1188,6 +1193,23 @@ fn tar_ambiguity_hint(op: Operation, ambiguity: &TarAmbiguity) -> String {
                 "A global PAX header is larger than the TAR metadata limit; the archive is not \
                  necessarily damaged. {}",
                 relaxation_hint(op, Some(PolicySetting::MaxTarMetadataBytes))
+            );
+        }
+        TarRefusalNature::SparseOptIn => {
+            let opt_in = op.accepts(Flag::TarSparse).then(|| {
+                format!(
+                    " Use {} {} to read it as a regular file of its real size (holes are \
+                     written as zeros and count against the size limits); a map that tools \
+                     read differently stays refused.",
+                    Flag::TarSparse.long(),
+                    TarSparseArg::Expand.value_name()
+                )
+            });
+            return format!(
+                "The archive is well formed but holds a GNU sparse entry, which is refused \
+                 by default.{} Otherwise extract it with another tool you trust, or ask the \
+                 producer to re-create it.",
+                opt_in.unwrap_or_default()
             );
         }
         TarRefusalNature::Unsupported => (
@@ -1695,12 +1717,9 @@ mod tests {
         use exarch_core::TarExtensionKind;
 
         let ambiguous_key = || "path".to_owned();
-        let sparse = [
-            TarAmbiguity::SparseEntry,
-            TarAmbiguity::UnsupportedRecord {
-                key: ambiguous_key(),
-            },
-        ];
+        let sparse = [TarAmbiguity::UnsupportedRecord {
+            key: ambiguous_key(),
+        }];
         let ambiguous = [
             TarAmbiguity::DuplicateRecord {
                 key: ambiguous_key(),
@@ -1715,6 +1734,9 @@ mod tests {
             TarAmbiguity::ExtensionBeforeLabel {
                 kind: TarExtensionKind::Pax,
             },
+            TarAmbiguity::SparseMap {
+                defect: exarch_core::SparseMapDefect::PartialSlot,
+            },
         ];
         let malformed = [
             TarAmbiguity::ChecksumMismatch,
@@ -1727,6 +1749,14 @@ mod tests {
             },
         ];
         for op in [Operation::List, Operation::Verify, Operation::Extract] {
+            let msg = full_text(&convert_error(
+                op,
+                ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry),
+                Path::new("a.tar"),
+            ));
+            assert!(msg.contains("GNU sparse entry"), "{msg}");
+            assert!(msg.contains("--tar-sparse expand"), "{msg}");
+            assert!(!msg.contains("corrupted"), "{msg}");
             for (group, nature, other_tool) in [
                 (&sparse[..], "not supported", true),
                 (&ambiguous[..], "ambiguous", false),

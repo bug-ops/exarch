@@ -79,6 +79,8 @@ closed_enum! {
         ExcludePattern => "exclude_pattern",
         /// The ZIP structure policy.
         ZipConsistency => "zip_consistency",
+        /// The old GNU sparse TAR entry policy.
+        TarSparse => "tar_sparse",
         /// The repeated-landing policy of an extraction.
         RepeatedPaths => "repeated_paths",
         /// The path model of a sink extraction.
@@ -149,6 +151,7 @@ impl ConfigSetting {
             Self::ParallelDecodeMemory => "parallel decode memory",
             Self::ExcludePattern => "exclude pattern",
             Self::ZipConsistency => "zip consistency",
+            Self::TarSparse => "tar sparse policy",
             Self::RepeatedPaths => "repeated paths",
             Self::PathModel => "path model",
             Self::ArchiveFormat => "archive format",

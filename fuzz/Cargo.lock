@@ -244,6 +244,7 @@ dependencies = [
  "lzma-rust2",
  "rustix",
  "sevenz-rust2",
+ "sha2",
  "smallvec",
  "tar",
  "tempfile",

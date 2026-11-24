@@ -28,6 +28,7 @@ use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::Staging as CoreStaging;
 use exarch_core::StoredTargets as CoreStoredTargets;
 use exarch_core::StripComponents;
+use exarch_core::TarSparsePolicy as CoreTarSparse;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::positive_from_f64;
 use napi::Env;
@@ -117,6 +118,41 @@ mirror_from_core!(
     CorePolicy,
     "ZIP consistency policy",
     [Enforce, Ignore]
+);
+
+/// How old GNU sparse (`S`) TAR entries are handled.
+///
+/// `refuse` (the default, also for `SecurityConfig.permissive()`) rejects every
+/// GNU sparse entry. `expand` reads one as a regular file of its real size,
+/// holes written as zeros, when `bsdtar`, Python `tarfile` and the `tar` crate
+/// read its map the same way; other maps, a PAX `size` record on a sparse
+/// entry and the PAX sparse forms stay refused. The real size counts against
+/// `maxFileSize` and `maxTotalSize` and against nothing else, because a TAR
+/// entry has no compressed size to take a ratio against, and the file takes
+/// its full size on disk. Listing, verifying and skipping an entry read only
+/// its archived bytes.
+// Values must equal `exarch_core::TarSparsePolicy::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TarSparsePolicy {
+    /// Reject GNU sparse entries.
+    #[napi(value = "refuse")]
+    Refuse,
+    /// Read GNU sparse entries as regular files of their real size.
+    #[napi(value = "expand")]
+    Expand,
+}
+
+mirror_into_core!(
+    TarSparsePolicy => CoreTarSparse,
+    [Refuse, Expand]
+);
+
+mirror_from_core!(
+    TarSparsePolicy,
+    CoreTarSparse,
+    "TAR sparse policy",
+    [Refuse, Expand]
 );
 
 /// How an archive that names one landing twice is handled.
@@ -533,22 +569,24 @@ impl SecurityConfig {
         self
     }
 
+    /// Sets how old GNU sparse (`S`) TAR entries are handled.
+    #[napi(js_name = "withTarSparse")]
+    pub fn with_tar_sparse(&mut self, policy: TarSparsePolicy) -> &Self {
+        self.inner.tar_sparse = policy.into();
+        self
+    }
+
     /// Sets the most SHA-256 rounds of key derivation one operation may
     /// perform.
     ///
-    /// Charged for the keys an archive needs before any encrypted block is
-    /// decoded, and again when another 7z operation of the process replaced
-    /// the cached key with a different one in between (the operation then fails
-    /// with `kdf_cost_exceeded` once the total passes the budget), so encrypted
-    /// 7z operations with different keys that run at the same time can make
-    /// each other fail. 7z operations of one process take turns only during the
-    /// key set-up of each encrypted block and while an encrypted header is
-    /// parsed from bytes already read.
-    ///
-    /// A pipeline that extracts an encrypted 7z from inside an encrypted 7z
-    /// derives the outer key again after every inner operation, so with the
-    /// default budget and 7-Zip's power 19 it is refused after 256 outer
-    /// blocks; raise `max_kdf_work` for such pipelines.
+    /// Each 7z operation derives its AES keys itself and keeps them only for
+    /// that operation, so concurrent operations neither share keys nor wait on
+    /// each other. Admission charges one derivation for every change of key
+    /// parameters in archive order, and the derivations an operation performs
+    /// never exceed that charge (an operation over the budget fails with
+    /// `kdf_cost_exceeded`). A block whose AES coders declare different key
+    /// parameters is refused as an unsupported coder, and an encrypted header
+    /// with more than one AES coder as unreadable.
     ///
     /// Blocks that combine several coders in a layout that is not a plain chain
     /// (such as BCJ2 with several AES coders) are charged for every AES coder,
@@ -905,6 +943,13 @@ impl SecurityConfig {
     #[napi(getter, ts_return_type = "ZipConsistencyPolicy | (string & {})")]
     pub fn get_zip_consistency(&self) -> String {
         self.inner.zip_consistency.as_str().to_owned()
+    }
+
+    /// How old GNU sparse TAR entries are handled. A policy newer than this
+    /// binding is reported as core's token.
+    #[napi(getter, ts_return_type = "TarSparsePolicy | (string & {})")]
+    pub fn get_tar_sparse(&self) -> String {
+        self.inner.tar_sparse.as_str().to_owned()
     }
 
     /// How an archive that names one landing twice is handled. A policy newer
@@ -2901,6 +2946,38 @@ mod tests {
             .map(|p| format!("'{}'", p.as_str()))
             .collect();
         let expected = format!("export type ZipConsistencyPolicy = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_tar_sparse_defaults_to_refuse_and_round_trips() {
+        let mut config = SecurityConfig::new();
+        assert_eq!(config.get_tar_sparse(), "refuse");
+        assert_eq!(SecurityConfig::permissive().get_tar_sparse(), "refuse");
+
+        config.with_tar_sparse(TarSparsePolicy::Expand);
+        assert_eq!(config.get_tar_sparse(), "expand");
+    }
+
+    #[test]
+    fn test_tar_sparse_policy_covers_every_core_variant() {
+        for core in CoreTarSparse::ALL {
+            let policy = TarSparsePolicy::try_from(*core).unwrap();
+            assert_eq!(CoreTarSparse::from(policy), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_tar_sparse_union_matches_core() {
+        let values: Vec<_> = CoreTarSparse::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type TarSparsePolicy = {}", values.join(" | "));
         let dts = include_str!("../index.d.ts");
         assert!(
             dts.lines().any(|l| l == expected),

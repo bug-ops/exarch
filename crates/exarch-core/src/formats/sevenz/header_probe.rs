@@ -28,6 +28,7 @@ use super::SIGNATURE_HEADER_SIZE;
 use super::admit;
 use super::header::SEVENZ_MAGIC;
 use super::prefetched::PrefetchedHeader;
+use super::raw_key::AesSite;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
 use crate::encryption::kdf;
@@ -198,21 +199,24 @@ impl From<io::Error> for FetchFailure {
 /// An encrypted header read into memory, with the key it declares.
 ///
 /// The key mode and parameters are read from the same record bytes that
-/// `bytes` serves to the parser, so what is admitted is what is parsed.
+/// `bytes` serves to the parser, so what is admitted is what is parsed. `site`
+/// is set exactly when `params` is: where the AES properties sit, for the
+/// raw-key patch.
 #[derive(Debug)]
 pub(super) struct EncryptedHeader {
     pub(super) bytes: PrefetchedHeader,
     pub(super) mode: KeyMode,
     pub(super) params: Option<AesParams>,
+    pub(super) site: Option<AesSite>,
 }
 
 /// Reads the byte ranges sevenz-rust2 reads to open the encrypted header of
 /// the archive in `source`: the signature header, the encoded-header record
 /// and the packed header.
 ///
-/// The key derivation of an encrypted header runs under the process-wide
-/// [`AesTurn`](crate::encryption::kdf::AesTurn); reading these ranges first
-/// keeps the caller's `Read`/`Seek` code out of it. The record and the size
+/// Reading these ranges first keeps the caller's `Read`/`Seek` code out of the
+/// header's key derivation and lets the key be handed over in raw-key mode (see
+/// [`EncryptedHeader::into_raw_key`]). The record and the size
 /// the header decodes to are held to `max_bytes`, the packed header to the
 /// decoded size plus one AES block (to the cap plus one AES block when the
 /// header has other coders), and the record and packed header together to
@@ -235,7 +239,11 @@ pub(super) fn prefetch_encoded_header<R: Read + Seek>(
     source.seek(SeekFrom::Start(at))?;
     let record_bytes = read_bounded(&mut *source, size)?;
     let record = EncodedRecord::parse(&record_bytes).ok_or(FetchFailure::Unmodelled)?;
-    let (mode, params) = aes_header_key(&record).ok_or(FetchFailure::Unmodelled)?;
+    let (mode, declared) = aes_header_key(&record).ok_or(FetchFailure::Unmodelled)?;
+    let params = declared.map(|(params, _)| params);
+    let properties_at = declared
+        .and_then(|(_, properties)| record_bytes.subslice_range(properties))
+        .and_then(|range| at.checked_add(u64::try_from(range.start).ok()?));
     let (pack_pos, pack_size, unpacked) = (
         record.pack_pos,
         record.pack_size,
@@ -267,6 +275,11 @@ pub(super) fn prefetch_encoded_header<R: Read + Seek>(
             .with_part(pack_start, pack_size, packed),
         mode,
         params,
+        site: properties_at.map(|properties_at| AesSite {
+            properties_at,
+            record_at: at,
+            record_len: size,
+        }),
     })
 }
 
@@ -384,8 +397,11 @@ fn decode_header<R: Read + Seek>(
     max_bytes: u64,
     memory_kib: usize,
 ) -> Result<Vec<u8>, Stop> {
-    if let Some((key, params)) = aes_header_key(record) {
-        return Err(Stop::Refused(Refusal::Encrypted(key, params)));
+    if let Some((key, declared)) = aes_header_key(record) {
+        return Err(Stop::Refused(Refusal::Encrypted(
+            key,
+            declared.map(|(params, _)| params),
+        )));
     }
     let decoded = record.decoded().ok_or(Stop::Unmodelled)?;
     let coder = record.coders.first().copied().ok_or(Stop::Unmodelled)?;
@@ -419,10 +435,13 @@ fn decode_header<R: Read + Seek>(
     }
 }
 
+/// The parameters of an AES coder and the properties bytes they were read from.
+type DeclaredAes<'a> = (AesParams, &'a [u8]);
+
 /// The key an encoded-header record declares, or `None` when none of its
 /// coders is AES: its mode, and its parameters when the header has exactly one
 /// AES coder with a derived key.
-fn aes_header_key(record: &EncodedRecord<'_>) -> Option<(KeyMode, Option<AesParams>)> {
+fn aes_header_key<'a>(record: &EncodedRecord<'a>) -> Option<(KeyMode, Option<DeclaredAes<'a>>)> {
     let mut aes = record.coders.iter().filter(|coder| coder.id == METHOD_AES);
     let first = aes.next()?;
     let raw_key = std::iter::once(first)
@@ -439,10 +458,10 @@ fn aes_header_key(record: &EncodedRecord<'_>) -> Option<(KeyMode, Option<AesPara
         .filter(|coder| coder.id == METHOD_AES)
         .count()
         == 1;
-    let params = (only_aes && record.chain_complete && key == KeyMode::Derived)
-        .then(|| AesParams::parse(first.properties))
+    let declared = (only_aes && record.chain_complete && key == KeyMode::Derived)
+        .then(|| AesParams::parse(first.properties).map(|params| (params, first.properties)))
         .flatten();
-    Some((key, params))
+    Some((key, declared))
 }
 
 /// Whether the chain from the packed stream `start`, following the bind pairs

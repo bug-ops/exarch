@@ -1,7 +1,7 @@
-//! Key derivation of password-protected 7z operations is charged against
-//! `max_kdf_work` as performed, also when other operations in the process
-//! (on other threads, or nested in an entry callback) replace the shared
-//! derived key in between.
+//! Each password-protected 7z operation derives and keeps its own keys, so
+//! what other operations do in between (on other threads, or nested in an
+//! entry callback, under any key) neither costs it a derivation nor refuses
+//! it: `max_kdf_work` bounds the derivations of one operation only.
 
 #![cfg(feature = "encryption")]
 
@@ -9,12 +9,7 @@ use std::error::Error;
 use std::io::Cursor;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
-use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
@@ -37,14 +32,6 @@ use sevenz_rust2::encoder_options::AesEncoderOptions;
 type TestResult = Result<(), Box<dyn Error>>;
 
 const POWER: u8 = 10;
-const WAIT: Duration = Duration::from_secs(30);
-
-/// The tests share the process-wide key slot, so they run one at a time.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// A non-solid archive: one AES block per file, all under one key salt.
 fn archive(salt: u8, power: u8, files: usize) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -161,104 +148,11 @@ fn expect_kdf_refusal(result: Result<usize, Box<dyn Error>>) -> TestResult {
     }
 }
 
-/// Runs a nested operation of another key on this thread.
-fn nested_here(salt: u8, power: u8) -> std::io::Result<()> {
-    let bytes =
-        archive_filled(salt, power, 1, 99).map_err(|e| std::io::Error::other(e.to_string()))?;
-    extract(bytes, 1 << 27, |_| Ok(()))
-        .map(drop)
-        .map_err(|e| std::io::Error::other(e.to_string()))
-}
-
-/// Runs a nested operation of another key on a worker thread and waits for it.
-fn nested_elsewhere(salt: u8, power: u8) -> std::io::Result<()> {
-    let bytes =
-        archive_filled(salt, power, 1, 99).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let (done, finished) = mpsc::channel();
-    thread::spawn(move || {
-        let outcome = extract(bytes, 1 << 27, |_| Ok(())).map(drop);
-        let _ = done.send(outcome.map_err(|e| e.to_string()));
-    });
-    match finished.recv_timeout(WAIT) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(message)) => Err(std::io::Error::other(message)),
-        Err(_) => Err(std::io::Error::other(
-            "the nested operation did not finish while the outer one was in a callback",
-        )),
-    }
-}
-
 #[test]
 fn blocks_of_one_pair_are_charged_once_when_nothing_interleaves() -> TestResult {
-    let _serial = serial();
     let seen = extract(archive(1, POWER, 40)?, 1 << POWER, |_| Ok(()))?;
     assert_eq!(seen, 40);
     Ok(())
-}
-
-#[test]
-fn a_nested_operation_on_this_thread_is_charged_to_the_outer_one() -> TestResult {
-    let _serial = serial();
-    let interrupt_once = |salt, power| {
-        let mut done = false;
-        move |_: usize| {
-            if done {
-                return Ok(());
-            }
-            done = true;
-            nested_here(salt, power)
-        }
-    };
-    // One re-derivation after the interruption: admitted plus one repeat.
-    let seen = extract(archive(1, POWER, 3)?, 2 << POWER, interrupt_once(2, 4))?;
-    assert_eq!(seen, 3);
-    expect_kdf_refusal(extract(
-        archive(1, POWER, 3)?,
-        1 << POWER,
-        interrupt_once(2, 4),
-    ))
-}
-
-#[test]
-fn a_nested_operation_on_another_thread_finishes_and_is_charged() -> TestResult {
-    let _serial = serial();
-    let interrupt_once = |salt, power| {
-        let mut done = false;
-        move |_: usize| {
-            if done {
-                return Ok(());
-            }
-            done = true;
-            nested_elsewhere(salt, power)
-        }
-    };
-    let seen = extract(archive(1, POWER, 3)?, 2 << POWER, interrupt_once(2, 4))?;
-    assert_eq!(seen, 3);
-    expect_kdf_refusal(extract(
-        archive(1, POWER, 3)?,
-        1 << POWER,
-        interrupt_once(2, 4),
-    ))
-}
-
-/// An operation that sets up the key (salt, power, password) on this thread
-/// from inside the outer operation's first entry callback.
-fn interrupt_once_with(
-    salt: u8,
-    power: u8,
-    password: &'static str,
-) -> impl FnMut(usize) -> std::io::Result<()> {
-    let mut done = false;
-    move |_| {
-        if std::mem::replace(&mut done, true) {
-            return Ok(());
-        }
-        let bytes = archive_keyed(salt, power, 1, 99, password)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        extract_with(bytes, 1 << 27, password.as_bytes(), |_| Ok(()))
-            .map(drop)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-    }
 }
 
 /// Lists an archive with an encrypted header under (salt, POWER, "secret") on
@@ -282,77 +176,7 @@ fn list_header_once(salt: u8) -> impl FnMut(usize) -> std::io::Result<()> {
 }
 
 #[test]
-fn an_encrypted_header_under_the_same_key_costs_nothing_and_another_key_is_charged() -> TestResult {
-    let _serial = serial();
-    let alone = 1u64 << POWER;
-    let seen = extract(archive(1, POWER, 3)?, alone, list_header_once(1))?;
-    assert_eq!(seen, 3);
-    expect_kdf_refusal(extract(archive(1, POWER, 3)?, alone, list_header_once(2)))?;
-    let seen = extract(archive(1, POWER, 3)?, alone * 2, list_header_once(2))?;
-    assert_eq!(seen, 3);
-    Ok(())
-}
-
-#[test]
-fn only_a_different_key_is_charged_at_the_exact_budget() -> TestResult {
-    let _serial = serial();
-    // (salt, power, password, is a different key than the outer one)
-    let interrupters: [(u8, u8, &'static str, bool); 5] = [
-        (1, POWER, "secret", false),
-        (2, POWER, "secret", true),
-        (1, POWER, "another", true),
-        (1, POWER + 1, "secret", true),
-        (1, 4, "secret", true),
-    ];
-    for (salt, power, password, differs) in interrupters {
-        let alone = 1u64 << POWER;
-        let outcome = extract(
-            archive(1, POWER, 3)?,
-            alone,
-            interrupt_once_with(salt, power, password),
-        );
-        if differs {
-            expect_kdf_refusal(outcome)?;
-            let seen = extract(
-                archive(1, POWER, 3)?,
-                alone * 2,
-                interrupt_once_with(salt, power, password),
-            )?;
-            assert_eq!(seen, 3);
-        } else {
-            assert_eq!(outcome?, 3);
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn operations_with_the_same_key_cost_each_other_nothing() -> TestResult {
-    let _serial = serial();
-    let interrupt_once = |elsewhere: bool| {
-        let mut done = false;
-        move |_: usize| {
-            if done {
-                return Ok(());
-            }
-            done = true;
-            if elsewhere {
-                nested_elsewhere(1, POWER)
-            } else {
-                nested_here(1, POWER)
-            }
-        }
-    };
-    for elsewhere in [false, true] {
-        let seen = extract(archive(1, POWER, 3)?, 1 << POWER, interrupt_once(elsewhere))?;
-        assert_eq!(seen, 3);
-    }
-    Ok(())
-}
-
-#[test]
 fn threads_extracting_with_one_key_all_finish_within_one_derivation() -> TestResult {
-    let _serial = serial();
     let archives = (0u8..4)
         .map(|fill| archive_filled(1, POWER, 12, fill))
         .collect::<Result<Vec<_>, _>>()?;
@@ -389,47 +213,32 @@ fn threads_extracting_with_one_key_all_finish_within_one_derivation() -> TestRes
 }
 
 #[test]
-fn concurrent_operations_either_finish_or_are_refused_as_over_budget() -> TestResult {
-    let _serial = serial();
-    let archives = (1u8..=4)
-        .map(|salt| archive(salt, POWER, 12))
-        .collect::<Result<Vec<_>, _>>()?;
-    let outcomes: Vec<Result<usize, String>> = thread::scope(|scope| {
-        #[expect(
-            clippy::needless_collect,
-            reason = "every worker must start before the first join"
-        )]
-        let workers: Vec<_> = archives
-            .into_iter()
-            .map(|bytes| {
-                scope.spawn(move || {
-                    let mut last = Ok(0);
-                    for _ in 0..3 {
-                        last = extract(bytes.clone(), 1 << POWER, |_| Ok(())).map_err(|error| {
-                            if is_kdf_refusal(error.as_ref()) {
-                                String::new()
-                            } else {
-                                error.to_string()
-                            }
-                        });
-                        if last.is_err() {
-                            break;
-                        }
-                    }
-                    last
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap_or_else(|_| Err("panicked".into())))
-            .collect()
-    });
-    for outcome in outcomes {
-        match outcome {
-            Ok(seen) => assert_eq!(seen, 12),
-            Err(message) => assert!(message.is_empty(), "unexpected failure: {message}"),
-        }
+fn listing_an_encrypted_header_under_another_key_costs_the_outer_extraction_nothing() -> TestResult
+{
+    let alone = 1u64 << POWER;
+    for salt in [1, 2] {
+        let seen = extract(archive(1, POWER, 3)?, alone, list_header_once(salt))?;
+        assert_eq!(seen, 3);
     }
+    Ok(())
+}
+
+#[test]
+fn an_operation_over_its_own_budget_is_still_refused() -> TestResult {
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()))?;
+    writer.set_encrypt_header(false);
+    for (salt, name) in [(1u8, "a"), (2, "b")] {
+        let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("secret"));
+        options.salt = [salt; 16];
+        options.num_cycles_power = POWER;
+        writer.set_content_methods(vec![options.into(), EncoderMethod::COPY.into()]);
+        let mut entry = ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = 4;
+        writer.push_archive_entry(entry, Some(SourceReader::from(Cursor::new(vec![0u8; 4]))))?;
+    }
+    let bytes = writer.finish()?.into_inner();
+    expect_kdf_refusal(extract(bytes.clone(), 1 << POWER, |_| Ok(())))?;
+    assert_eq!(extract(bytes, 2 << POWER, |_| Ok(()))?, 2);
     Ok(())
 }

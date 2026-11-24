@@ -62,6 +62,7 @@ Common flags (full table, grammar, and edge cases: [references/extract.md](refer
 | `--allow-symlinks` / `--allow-hardlinks` | off | Allow links that resolve inside the destination. |
 | `--allow-absolute-paths` / `--allow-world-writable` / `--allow-solid-archives` | off | Relax the matching default-deny check. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP structural ambiguity check. |
+| `--tar-sparse <refuse\|expand>` | refuse | TAR only. `expand` reads an old GNU sparse (`S`) entry as a regular file of its real size, holes written as zeros; also on `list` and `verify`. See [references/formats.md](references/formats.md). |
 | `--repeated-paths <keep-first\|refuse>` | keep-first | Whether an archive naming a path twice keeps the first copy or fails `SecurityViolation` (`REPEATED_PATH`). Also on `list` and `verify`. |
 | `--sandbox <off\|best-effort\|require>` | off | Confine the process with Linux Landlock; also on `list` and `verify`, refused by `create`. `require` exits `1` (`SandboxNotEnforced`) unless fully enforced, and never combines with `--atomic`. See [references/extract.md](references/extract.md). |
 | `--banned-component <C>` | `.git .ssh .gnupg .aws .kube .docker .env` | **Replaces** the default list, never appends (see below). |
@@ -85,7 +86,7 @@ Grammar, zip-ratio warning, name collisions, refused outputs (7z and ZIP-family 
 
 ### list `<ARCHIVE>`
 
-Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--destination <DIR>`, `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency`, `--repeated-paths`, `--sandbox`, password and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
+Flags: `-l/--long`, `-H/--human-readable` (requires `-l`), `--read-link-targets` (7z), `--destination <DIR>`, `--allow-symlinks`, `--allow-hardlinks`, plus the quota, selection, `--zip-consistency`, `--tar-sparse`, `--repeated-paths`, `--sandbox`, password and `--allow-solid-archives` flags of `extract`. Exceeding a quota fails with `QuotaExceeded`; it never truncates. Details and JSON fields: [references/list.md](references/list.md).
 
 ### verify `<ARCHIVE>`
 

@@ -16,7 +16,6 @@ use std::io::SeekFrom;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::PoisonError;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -26,6 +25,7 @@ use crate::ArchiveError;
 use crate::Malformation;
 use crate::Violation;
 use crate::copy::CopyError;
+use crate::sync::lock_unpoisoned;
 
 /// The decoder family that reads an entry's bytes, which decides how a failed
 /// read is classified.
@@ -372,7 +372,7 @@ pub(crate) struct FaultSlot(Arc<Mutex<Option<RecordedFault>>>);
 
 impl FaultSlot {
     fn lock(&self) -> MutexGuard<'_, Option<RecordedFault>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_unpoisoned(&self.0)
     }
 
     /// Remembers `error` unless a fault is already held or it is a retry

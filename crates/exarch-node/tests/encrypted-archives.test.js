@@ -150,6 +150,26 @@ describe('encrypted archives', () => {
     assert.throws(() => listArchiveBytes(data, null, null, null, null, Buffer.alloc(0)));
   });
 
+  it('concurrent 7z operations with different passwords each succeed (#1352)', async () => {
+    const fixtures = path.join(__dirname, 'fixtures');
+    const jobs = [
+      [path.join(fixtures, 'encrypted-header.7z'), 'correct-horse'],
+      [path.join(fixtures, 'encrypted-content-plain-header.7z'), 'exarch'],
+    ];
+    // The encrypted-header archive adds a fixed header reserve of 2**24 to the budget.
+    const config = new SecurityConfig().withMaxKdfWork(2 ** 24 + 2 ** 21);
+
+    const reports = await Promise.all(
+      [...Array(80).keys()].map((i) => {
+        const [archive, secret] = jobs[i % 2];
+        const out = path.join(tempDir, `out-${i}`);
+        return extractArchive(archive, out, config, null, Buffer.from(secret));
+      })
+    );
+
+    assert.ok(reports.every((report) => report.filesExtracted === 2));
+  });
+
   it('refuses a string password', () => {
     assert.throws(() =>
       extractArchiveSync(ARCHIVES[0], path.join(tempDir, 'out'), null, null, 'correct-horse')

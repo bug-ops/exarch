@@ -21,6 +21,12 @@ closed_enum! {
         Size => "size",
         /// The `chksum` field.
         Checksum => "checksum",
+        /// A GNU sparse map `offset` field.
+        SparseOffset => "sparse offset",
+        /// A GNU sparse map `numbytes` field.
+        SparseLength => "sparse length",
+        /// The GNU sparse `realsize` field.
+        RealSize => "real size",
     }
 }
 
@@ -58,6 +64,38 @@ impl TarNonRegularKind {
             other if other.as_byte() == b'V' => Some(Self::VolumeLabel),
             _ => None,
         }
+    }
+}
+
+closed_enum! {
+    /// What is wrong with the map of an old GNU sparse entry that
+    /// [`TarSparsePolicy::Expand`](crate::TarSparsePolicy) refuses.
+    ///
+    /// The map is accepted only when `bsdtar`, Python `tarfile` and the `tar`
+    /// crate read it to the same bytes; each variant names one rule it breaks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SparseMapDefect;
+    ///
+    /// assert_eq!(SparseMapDefect::PartialSlot.to_string(), "partial slot");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum SparseMapDefect {
+        /// A map slot has only one of its two fields set.
+        PartialSlot => "partial slot",
+        /// A used slot follows an unused one.
+        SlotAfterEnd => "slot after the end of the map",
+        /// An extended flag is neither zero nor one.
+        ExtendedFlag => "invalid extended flag",
+        /// The extension chain does not match the extended flags.
+        ExtensionChain => "extension chain mismatch",
+        /// A used slot in an extension block has a zero offset.
+        ZeroOffsetExtension => "zero offset in an extension block",
+        /// A zero-length slot is not the last one.
+        InteriorZeroLength => "zero-length slot before the end",
     }
 }
 
@@ -246,7 +284,9 @@ pub enum TarAmbiguity {
         kind: TarExtensionKind,
     },
 
-    /// A GNU sparse entry.
+    /// A GNU sparse entry, which
+    /// [`TarSparsePolicy::Refuse`](crate::TarSparsePolicy) (the default)
+    /// rejects.
     SparseEntry,
 
     /// A header field is not a plain octal or base-256 number.
@@ -309,6 +349,14 @@ pub enum TarAmbiguity {
         /// The kind of extension header.
         kind: TarExtensionKind,
     },
+
+    /// The map of a GNU sparse entry breaks a rule that
+    /// [`TarSparsePolicy::Expand`](crate::TarSparsePolicy) enforces: readers
+    /// would interpret it differently, or it is malformed.
+    SparseMap {
+        /// What is wrong with the map.
+        defect: SparseMapDefect,
+    },
 }
 
 impl std::fmt::Display for TarAmbiguity {
@@ -347,7 +395,9 @@ impl std::fmt::Display for TarAmbiguity {
                 "extension header {} lacks a ustar or GNU magic",
                 kind.entry_type_name()
             ),
-            Self::SparseEntry => f.write_str("GNU sparse entries are not supported"),
+            Self::SparseEntry => {
+                f.write_str("GNU sparse entries are refused unless tar_sparse is expand")
+            }
             Self::NonCanonicalNumber { field } => write!(
                 f,
                 "header {field} field is not a plain octal or base-256 number"
@@ -385,6 +435,7 @@ impl std::fmt::Display for TarAmbiguity {
             Self::ExtensionBeforeLabel { kind } => {
                 write!(f, "a {kind} header precedes a volume label")
             }
+            Self::SparseMap { defect } => write!(f, "GNU sparse map: {defect}"),
         }
     }
 }

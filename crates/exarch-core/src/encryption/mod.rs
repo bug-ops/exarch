@@ -101,14 +101,16 @@ impl Credentials {
             reason = "without the feature there is no password to read, but callers are the same"
         )
     )]
-    pub(crate) fn sevenz_secret(&self) -> Result<Option<sevenz_rust2::Password>, UnusablePassword> {
+    pub(crate) fn sevenz_secret(&self) -> Result<Option<kdf::SevenZSecret>, UnusablePassword> {
         #[cfg(feature = "encryption")]
         {
             let Some(password) = self.password.as_deref() else {
                 return Ok(None);
             };
             let text = std::str::from_utf8(password.expose()).map_err(|_| UnusablePassword)?;
-            Ok(Some(sevenz_rust2::Password::new(text)))
+            Ok(Some(kdf::SevenZSecret::new(sevenz_rust2::Password::new(
+                text,
+            ))))
         }
         #[cfg(not(feature = "encryption"))]
         {

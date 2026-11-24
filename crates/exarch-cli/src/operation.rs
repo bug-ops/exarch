@@ -59,6 +59,7 @@ impl Operation {
             | Flag::AllowHardlinks
             | Flag::AllowSolidArchives
             | Flag::ZipConsistency
+            | Flag::TarSparse
             | Flag::RepeatedPaths
             | Flag::PasswordFile
             | Flag::Sandbox
@@ -110,6 +111,7 @@ closed_list! {
         Sandbox => "--sandbox",
         RepeatedPaths => "--repeated-paths",
         StripComponents => "--strip-components",
+        TarSparse => "--tar-sparse",
         ZipConsistency => "--zip-consistency",
     }
 }

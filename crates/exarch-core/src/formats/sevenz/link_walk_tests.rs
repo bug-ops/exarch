@@ -251,34 +251,33 @@ fn a_link_without_data_has_an_empty_target() {
 
 #[cfg(feature = "encryption")]
 #[test]
-fn a_kdf_refusal_in_the_link_walk_is_reported_as_the_refusal() {
+fn a_link_walk_derives_each_key_once_and_only_for_the_blocks_it_reads() {
     use super::header::open_sevenz_header;
-    use crate::EncryptionRefusal;
     use crate::Password;
-    use crate::Violation;
     use crate::encryption::Credentials;
-    use crate::encryption::kdf::AesTurn;
-    use crate::encryption::kdf::SlotWatch;
     use sevenz_rust2::encoder_options::AesEncoderOptions;
     use std::sync::Arc;
 
-    let mut turn = AesTurn::acquire();
-    let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
-    options.salt = [1; 16];
-    options.num_cycles_power = 10;
     let mut archive = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
     archive.set_encrypt_header(false);
-    archive.set_content_methods(vec![
-        options.into(),
-        EncoderConfiguration::new(EncoderMethod::COPY),
-    ]);
-    for (name, data) in [("a", &b"first"[..]), ("b", &b"second"[..])] {
+    for (salt, name, data) in [
+        (1u8, "a", &b"first"[..]),
+        (1, "b", &b"second"[..]),
+        (2, "c", &b"third"[..]),
+    ] {
+        let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
+        options.salt = [salt; 16];
+        options.num_cycles_power = 4;
+        archive.set_content_methods(vec![
+            options.into(),
+            EncoderConfiguration::new(EncoderMethod::COPY),
+        ]);
         archive
             .push_archive_entry(entry(name, data), Some(Cursor::new(data.to_vec())))
             .unwrap();
     }
     let bytes = archive.finish().unwrap().into_inner();
-    let config = SecurityConfig::default().with_max_kdf_work(crate::non_zero!(1 << 10));
+    let config = SecurityConfig::default();
     let credentials = Credentials::new(Some(Arc::new(Password::new(b"pw".to_vec()).unwrap())));
     let header = open_sevenz_header(
         &mut Cursor::new(&bytes),
@@ -287,34 +286,28 @@ fn a_kdf_refusal_in_the_link_walk_is_reported_as_the_refusal() {
     )
     .unwrap();
     let compression = sevenz_entry_compression(&header, bytes.len() as u64).unwrap();
-    let password = header.block_password();
-    let mut other_operation = SlotWatch::default();
-    let mut calls = 0;
+    let derived = || crate::encryption::kdf::DERIVATIONS.with(std::cell::Cell::get);
+    let before = derived();
 
-    let result = walk_sevenz_links(
+    let mut targets = 0;
+    walk_sevenz_links(
         &header,
         &mut Cursor::new(bytes),
         &compression,
         &config,
         &table(&[0, 1]),
         &mut |_, _| {
-            calls += 1;
-            if calls == 1 {
-                other_operation.enter_block(&mut turn, [&[11u8, 0][..]], password.as_slice());
-            }
+            targets += 1;
             Ok(())
         },
-    );
+    )
+    .unwrap();
 
-    assert_matches!(
-        result,
-        Err(ArchiveError::SecurityViolation {
-            kind: Violation::Encrypted {
-                reason: EncryptionRefusal::KdfCostExceeded,
-                ..
-            },
-            ..
-        })
+    assert_eq!(targets, 2);
+    assert_eq!(
+        derived(),
+        before + 1,
+        "the third block's key is never derived"
     );
 }
 

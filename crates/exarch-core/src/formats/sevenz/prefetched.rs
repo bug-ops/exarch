@@ -49,16 +49,41 @@ impl PrefetchedHeader {
         });
         self
     }
+
+    /// The `len` bytes held at `start`, or `None` when no range holds them
+    /// all.
+    pub(super) fn bytes_at(&self, start: u64, len: u64) -> Option<&[u8]> {
+        let part = self.part_at(start)?;
+        let from = usize::try_from(start.checked_sub(part.start)?).ok()?;
+        let to = from.checked_add(usize::try_from(len).ok()?)?;
+        part.bytes.get(from..to)
+    }
+
+    /// Overwrites the bytes held at `start` with `data`; `None` when no range
+    /// holds all of them.
+    pub(super) fn write_at(&mut self, start: u64, data: &[u8]) -> Option<()> {
+        let index = self
+            .parts
+            .iter()
+            .position(|part| (part.start..part.declared_end).contains(&start))?;
+        let part = self.parts.get_mut(index)?;
+        let from = usize::try_from(start.checked_sub(part.start)?).ok()?;
+        let to = from.checked_add(data.len())?;
+        part.bytes.get_mut(from..to)?.copy_from_slice(data);
+        Some(())
+    }
+
+    fn part_at(&self, position: u64) -> Option<&Part> {
+        self.parts
+            .iter()
+            .find(|part| (part.start..part.declared_end).contains(&position))
+    }
 }
 
 impl Read for PrefetchedHeader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let position = self.position;
-        let part = self
-            .parts
-            .iter()
-            .find(|part| (part.start..part.declared_end).contains(&position));
-        let Some(part) = part else {
+        let Some(part) = self.part_at(position) else {
             return if position >= self.length {
                 Ok(0)
             } else {
@@ -115,6 +140,21 @@ mod tests {
         view.read_exact(&mut two).unwrap();
         assert_eq!(two, [9, 9]);
         assert!(view.seek(SeekFrom::Current(-1000)).is_err());
+    }
+
+    #[test]
+    fn bytes_are_read_and_overwritten_where_a_range_holds_them() {
+        let mut view = archive();
+        assert_eq!(view.bytes_at(1, 2), Some(&[2, 3][..]));
+        assert_eq!(view.bytes_at(2, 3), None, "past the delivered bytes");
+        assert_eq!(view.bytes_at(20, 1), None, "outside every range");
+        assert_eq!(view.write_at(1, &[7, 8]), Some(()));
+        assert_eq!(view.bytes_at(0, 4), Some(&[1, 7, 8, 4][..]));
+        assert_eq!(view.write_at(3, &[0, 0]), None);
+        assert_eq!(view.bytes_at(0, 4), Some(&[1, 7, 8, 4][..]));
+        let mut buf = [0u8; 4];
+        view.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, [1, 7, 8, 4]);
     }
 
     #[test]

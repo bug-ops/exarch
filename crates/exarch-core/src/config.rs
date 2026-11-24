@@ -427,6 +427,53 @@ closed_enum! {
 }
 
 closed_enum! {
+    /// How old GNU sparse (`S`) TAR entries are handled.
+    ///
+    /// Readers disagree on some sparse maps, so `Refuse` (the default,
+    /// also for [`SecurityConfig::permissive`]) rejects every sparse entry.
+    /// `Expand` lists, verifies and extracts an old GNU sparse entry as a
+    /// regular file of its real size, with the holes read as zeros, and only
+    /// when its map is one that `bsdtar`, Python `tarfile` and the `tar` crate
+    /// read to the same bytes. A map with an empty field in a used slot, a used
+    /// slot after an unused one, an extended flag other than 0 or 1, a chain
+    /// that does not match its flags, a number that is not plain octal or
+    /// base-256, a zero offset in an extension block, or a zero length before
+    /// the last slot is refused as `TarAmbiguity::SparseMap` or
+    /// `TarAmbiguity::NonCanonicalNumber`. A PAX `size` record on a sparse
+    /// entry and the PAX sparse forms (`GNU.sparse.*`, `SCHILY.realsize`,
+    /// `SUN.holesdata`) stay refused under both policies.
+    ///
+    /// Under `Expand` the real size counts against `max_file_size` and
+    /// `max_total_size`, and against nothing else: a TAR entry carries no
+    /// compressed size, so there is no compression-ratio check on the
+    /// expansion. Extraction writes the zero-filled holes, so the file takes
+    /// its full real size on disk. Listing, verifying and skipping an entry
+    /// read only its archived bytes, so their cost follows the archive and not
+    /// the holes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::TarSparsePolicy;
+    ///
+    /// assert_eq!(SecurityConfig::default().tar_sparse, TarSparsePolicy::Refuse);
+    /// let expanding = SecurityConfig::default().with_tar_sparse(TarSparsePolicy::Expand);
+    /// assert_eq!(expanding.tar_sparse.as_str(), "expand");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum TarSparsePolicy {
+        /// Reject GNU sparse entries
+        #[default]
+        Refuse => "refuse",
+
+        /// Expand GNU sparse entries into zero-filled regular files
+        Expand => "expand",
+    }
+}
+
+closed_enum! {
     /// How an archive that names one landing more than once is handled.
     ///
     /// Archive formats let a later entry reuse the name of an earlier one, and
@@ -1057,6 +1104,15 @@ pub struct SecurityConfig {
     /// entry (left by in-place updaters), are rejected under `Enforce`.
     pub zip_consistency: ZipConsistencyPolicy,
 
+    /// How old GNU sparse (`S`) TAR entries are handled.
+    ///
+    /// Default: [`TarSparsePolicy::Refuse`], including for
+    /// [`SecurityConfig::permissive`]. [`TarSparsePolicy::Expand`] reads old
+    /// GNU sparse entries as regular files of their real size, bounded only by
+    /// [`max_file_size`](Self::max_file_size) and
+    /// [`max_total_size`](Self::max_total_size).
+    pub tar_sparse: TarSparsePolicy,
+
     /// How an archive that names one landing twice is handled.
     ///
     /// Default: [`RepeatedPaths::KeepFirst`], including for
@@ -1077,28 +1133,17 @@ pub struct SecurityConfig {
     /// derivation is a fixed 1000 PBKDF2 iterations per entry and is bounded
     /// by [`max_file_count`](Self::max_file_count) instead.
     ///
-    /// The budget bounds the derivations the operation performs. 7z keeps one
-    /// derived key per process, so a key that another 7z operation of the
-    /// process (on another thread, or started from an entry callback) replaced
-    /// with a different one in between is derived again; that work is charged
-    /// when the block starts and the operation fails with `KdfCostExceeded`
-    /// once the total passes the budget. Operations that use the same password
-    /// and key parameters cost each other nothing, but encrypted 7z operations
-    /// with different keys that run at the same time can make each other fail
-    /// this way. They take turns during the key set-up of each encrypted block
-    /// and while an encrypted header is parsed from bytes already read, never
-    /// while entries are processed. A refusal of this kind applies to every
-    /// later encrypted block of the operation. A pipeline that extracts an
-    /// encrypted 7z from inside an encrypted 7z derives the outer key again
-    /// after every inner operation, so with the default budget and 7-Zip's
-    /// power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for
-    /// such pipelines.
+    /// Each 7z operation derives its AES keys itself and keeps them only for
+    /// that operation, so concurrent operations neither share keys nor wait on
+    /// each other. Admission charges one derivation for every change of key
+    /// parameters in archive order, and the derivations an operation performs
+    /// never exceed that charge. A block whose AES coders declare different key
+    /// parameters is refused as an unsupported coder, and an encrypted header
+    /// with more than one AES coder as unreadable.
     ///
     /// Blocks that combine several coders in a layout that is not a plain chain
     /// (such as BCJ2 with several AES coders) are charged for every AES coder,
     /// so the budget is reached sooner for such archives.
-    /// Users of `sevenz-rust2` outside `exarch` in the same process are not
-    /// accounted for.
     ///
     /// Default: 2^27 (134,217,728 rounds), including for
     /// [`SecurityConfig::permissive`]. Exposed by both bindings, not by the
@@ -1127,6 +1172,7 @@ impl Default for SecurityConfig {
     /// - `compressed_member_allowance`: 10,000
     /// - `parallel_decode`: `Bounded` at 128 MiB
     /// - `zip_consistency`: `Enforce`
+    /// - `tar_sparse`: `Refuse`
     /// - `repeated_paths`: `KeepFirst`
     /// - `max_kdf_work`: 2^27
     fn default() -> Self {
@@ -1147,6 +1193,7 @@ impl Default for SecurityConfig {
             compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
+            tar_sparse: TarSparsePolicy::Refuse,
             repeated_paths: RepeatedPaths::KeepFirst,
             max_kdf_work: DEFAULT_MAX_KDF_WORK,
         }
@@ -1734,6 +1781,24 @@ impl SecurityConfig {
     #[inline]
     pub fn with_zip_consistency(mut self, policy: ZipConsistencyPolicy) -> Self {
         self.zip_consistency = policy;
+        self
+    }
+
+    /// Sets how old GNU sparse (`S`) TAR entries are handled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::TarSparsePolicy;
+    ///
+    /// let config = SecurityConfig::default().with_tar_sparse(TarSparsePolicy::Expand);
+    /// assert_eq!(config.tar_sparse, TarSparsePolicy::Expand);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_tar_sparse(mut self, policy: TarSparsePolicy) -> Self {
+        self.tar_sparse = policy;
         self
     }
 
@@ -2968,6 +3033,33 @@ mod tests {
     fn test_max_kdf_work_defaults_to_two_to_the_27th() {
         assert_eq!(SecurityConfig::default().max_kdf_work.get(), 1 << 27);
         assert_eq!(SecurityConfig::permissive().max_kdf_work.get(), 1 << 27);
+    }
+
+    #[test]
+    fn test_tar_sparse_defaults_to_refuse_and_the_setter_applies() {
+        assert_eq!(
+            SecurityConfig::default().tar_sparse,
+            TarSparsePolicy::Refuse
+        );
+        assert_eq!(
+            SecurityConfig::permissive().tar_sparse,
+            TarSparsePolicy::Refuse
+        );
+        let config = SecurityConfig::default().with_tar_sparse(TarSparsePolicy::Expand);
+        assert_eq!(config.tar_sparse, TarSparsePolicy::Expand);
+    }
+
+    #[test]
+    fn test_tar_sparse_policy_parses_its_string_forms() {
+        use crate::ClosedEnum as _;
+
+        assert_eq!(TarSparsePolicy::NAMES, &["refuse", "expand"]);
+        assert_eq!(
+            TarSparsePolicy::parse_for(ConfigSetting::TarSparse, "expand").unwrap(),
+            TarSparsePolicy::Expand
+        );
+        assert!(TarSparsePolicy::parse_for(ConfigSetting::TarSparse, "x").is_err());
+        assert_eq!(ConfigSetting::TarSparse.as_str(), "tar_sparse");
     }
 
     #[test]

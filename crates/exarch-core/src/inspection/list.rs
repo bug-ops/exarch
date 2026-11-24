@@ -56,6 +56,7 @@ use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar::tar_node;
+use crate::formats::tar_extension_headers::SkipPlan;
 use crate::formats::tar_metadata_limit::CheckedTarEntry;
 use crate::formats::tar_metadata_limit::SkipLimits;
 use crate::formats::tar_metadata_limit::TarReadBudget;
@@ -453,7 +454,8 @@ fn list_tar_entries<R: std::io::Read>(
     })?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let mut entry = entry_result?.check(config.max_tar_metadata_bytes.get())?;
+        let mut entry =
+            entry_result?.check(config.max_tar_metadata_bytes.get(), config.tar_sparse)?;
 
         entry.settle(|entry| -> Result<()> {
             // Skip TAR metadata entries (PAX headers, GNU long names/links)
@@ -605,7 +607,8 @@ fn tar_link_target<R: Read>(entry: &tar::Entry<'_, R>, list_mode: ListMode) -> R
 /// continue past it, and a report over the entries read so far would let
 /// security look fine for entries that were never inspected. Listing already
 /// decodes every entry through the guard's drain, so no entry is charged to
-/// the budget.
+/// the budget. A sparse entry that `tar_sparse` admits is recorded as verified
+/// without being read: its archived bytes are decoded when `tar` skips them.
 fn verify_tar_payload<R: Read>(
     pass: &mut IntegrityPass<'_>,
     slot: Slot,
@@ -613,6 +616,12 @@ fn verify_tar_payload<R: Read>(
     source: &TapSource,
     path: &Path,
 ) -> Result<()> {
+    // A sparse entry is not read through `tar::Entry`, which would generate its
+    // holes: `tar` skips its archived bytes on the way to the next header, and
+    // a decode failure there fails the operation.
+    if matches!(entry.skip_plan(), SkipPlan::TarSkip { .. }) {
+        return pass.record(slot, path, DecodeOutcome::Verified);
+    }
     let declared = entry.size();
     let faults = ReadFaults::of_tar(source);
     match pass.decode_with_faults(slot, &mut **entry, declared, Charge::Free, faults) {

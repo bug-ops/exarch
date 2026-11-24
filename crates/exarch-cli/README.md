@@ -151,6 +151,7 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--allow-solid-archives` | false | Allow solid 7z archives (multiple files compressed as one block) |
 | `--zip-consistency` | enforce | `enforce` rejects ZIP archives whose local and central headers disagree, that repeat a name, overlap entries or hide records; `ignore` keeps the central directory interpretation (also accepted by `list` and `verify`) |
+| `--tar-sparse` | refuse | `refuse` rejects old GNU sparse TAR entries; `expand` reads one as a regular file of its real size, holes written as zeros (the file takes its full size on disk), when `bsdtar`, Python `tarfile` and the `tar` crate read its map the same way. The real size counts against `--max-file-size` and `--max-total-size` and against nothing else, because a TAR entry has no compressed size to take a ratio against. Other maps, a PAX `size` record on a sparse entry and PAX sparse forms stay refused. Also accepted by `list` and `verify` |
 | `--parallel-decode-memory` | 128M | Memory for decoding independent LZMA2 runs of a 7z block ahead on worker threads (K/M/G/T suffixes), or `off` to decode on one thread (also accepted by `verify`). A stock 7-Zip archive has 64 MiB runs and needs about 100 MiB per extra concurrent run; archives with small runs need far less |
 | `--decode-reuse` | memory | Where ZIP structure-check output is kept so compressed entries are not decoded twice: `off`, `memory` (up to 256 MiB) or `temp-file` (up to 256 MiB in an unnamed temporary file). No effect with `--zip-consistency ignore` |
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives; the umask (022 by default) removes the bit again unless `--preserve-permissions` is set |
@@ -206,7 +207,7 @@ exarch list --password-prompt backup.7z
 
 A password for an archive that is not encrypted is ignored. Without a password, `list` shows a ZIP's entries (encrypted entries are not decrypted; `verify --check-integrity` reports them as unverified with reason `encrypted`), and `extract` refuses with `SECURITY_VIOLATION` / `ENCRYPTED` before it writes anything. A wrong password and tampered data are different errors (`wrong_password`, `authentication_failed`, `wrong_password_or_corrupt`); a 7z password that is not UTF-8 text is refused as `unusable_password`. `list -l` marks every encrypted entry `(encrypted)` and `list --json -l` carries `"encrypted": true|false` on every entry, with or without a password. ZipCrypto, the legacy ZIP cipher, and 7z raw-key mode are refused as too weak. Solid 7z archives stay refused whether or not they are encrypted.
 
-Key derivation is bounded: a 7z may not cost more than `max_kdf_work` (default 2^27 SHA-256 rounds, a library setting with no CLI flag). The last 7z key stays in process memory until the process exits (an upstream behavior of `sevenz-rust2`).
+Key derivation is bounded: a 7z may not cost more than `max_kdf_work` (default 2^27 SHA-256 rounds, a library setting with no CLI flag). 7z keys are held per operation (the 32-byte keys are zeroized on drop); the raw `sevenz_rust2::Password` copies inside the decode view are not wiped.
 
 ## Create Command
 
@@ -281,6 +282,7 @@ exarch list [OPTIONS] <ARCHIVE>
 | `--read-link-targets` | Read 7z symlink targets, which decodes the blocks that hold them; without it a 7z link shows `(target not read)` |
 | `--destination <DIR>` | Destination `extract` would write to. Only matters together with a selection flag, and only on a volume without file ids (Windows), where a repeated name spelled differently is previewed as `[refused]` instead of `duplicate`; elsewhere it only checks that the path resolves. Nothing is created |
 | `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
+| `--tar-sparse` | `refuse` (default) rejects old GNU sparse TAR entries; `expand` lists them with their real size. Listing an entry reads only its archived bytes |
 | `--include`, `--exclude`, `--strip-components`, `--flatten` | Preview what `extract` would do: each entry is annotated `[lands at <path>]` or `[skipped: <kind>]`, and `--json` adds a `disposition` per entry |
 | `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |
 | `--repeated-paths`, `--sandbox`, `--password-file`, `--password-fd`, `--password-prompt` | Same as `extract` |
@@ -328,6 +330,7 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 | `--allow-hardlinks` | Allow hardlinks that resolve within the extraction directory (same as `extract`) |
 | `--allow-solid-archives` | Allow solid 7z archives during verification |
 | `--zip-consistency` | `enforce` (default) reports ZIP structure that different readers interpret differently as issues; `ignore` raises no structural issue |
+| `--tar-sparse` | `refuse` (default) rejects old GNU sparse TAR entries; `expand` verifies them as regular files of their real size, reading only their archived bytes |
 | `--parallel-decode-memory` | Memory for decoding 7z LZMA2 runs ahead on worker threads with `--check-integrity` (default 128M, K/M/G/T suffixes), or `off` (same as `extract`) |
 | `--repeated-paths`, `--sandbox`, `--password-file`, `--password-fd`, `--password-prompt` | Same as `extract` |
 | `--json` | Output results in JSON format |

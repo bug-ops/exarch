@@ -12,7 +12,6 @@ use std::io::Read;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -43,6 +42,7 @@ use crate::abort::Detach;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::report::ArchiveType;
+use crate::utils::lock_unpoisoned;
 
 /// Turns the `data` argument into `undefined` (bytes) or `{ next, close }`.
 ///
@@ -131,17 +131,11 @@ impl StreamShared {
     }
 
     fn record(&self, err: napi::Error) {
-        self.failure
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(err);
+        lock_unpoisoned(&self.failure).get_or_insert(err);
     }
 
     fn take_failure(&self) -> Option<napi::Error> {
-        self.failure
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        lock_unpoisoned(&self.failure).take()
     }
 
     /// Closes the iterator once and waits for it, unless the signal fires

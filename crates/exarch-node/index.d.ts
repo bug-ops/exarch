@@ -1031,23 +1031,20 @@ export declare class SecurityConfig {
   withMaxSolidCompressionRatio(ratio: number): this
   /** Sets how ZIP archives with ambiguous structure are handled. */
   withZipConsistency(policy: ZipConsistencyPolicy): this
+  /** Sets how old GNU sparse (`S`) TAR entries are handled. */
+  withTarSparse(policy: TarSparsePolicy): this
   /**
    * Sets the most SHA-256 rounds of key derivation one operation may
    * perform.
    *
-   * Charged for the keys an archive needs before any encrypted block is
-   * decoded, and again when another 7z operation of the process replaced
-   * the cached key with a different one in between (the operation then fails
-   * with `kdf_cost_exceeded` once the total passes the budget), so encrypted
-   * 7z operations with different keys that run at the same time can make
-   * each other fail. 7z operations of one process take turns only during the
-   * key set-up of each encrypted block and while an encrypted header is
-   * parsed from bytes already read.
-   *
-   * A pipeline that extracts an encrypted 7z from inside an encrypted 7z
-   * derives the outer key again after every inner operation, so with the
-   * default budget and 7-Zip's power 19 it is refused after 256 outer
-   * blocks; raise `max_kdf_work` for such pipelines.
+   * Each 7z operation derives its AES keys itself and keeps them only for
+   * that operation, so concurrent operations neither share keys nor wait on
+   * each other. Admission charges one derivation for every change of key
+   * parameters in archive order, and the derivations an operation performs
+   * never exceed that charge (an operation over the budget fails with
+   * `kdf_cost_exceeded`). A block whose AES coders declare different key
+   * parameters is refused as an unsupported coder, and an encrypted header
+   * with more than one AES coder as unreadable.
    *
    * Blocks that combine several coders in a layout that is not a plain chain
    * (such as BCJ2 with several AES coders) are charged for every AES coder,
@@ -1273,6 +1270,11 @@ export declare class SecurityConfig {
    * than this binding is reported as core's token.
    */
   get zipConsistency(): ZipConsistencyPolicy | (string & {})
+  /**
+   * How old GNU sparse TAR entries are handled. A policy newer than this
+   * binding is reported as core's token.
+   */
+  get tarSparse(): TarSparsePolicy | (string & {})
   /**
    * How an archive that names one landing twice is handled. A policy newer
    * than this binding is reported as core's token.
@@ -1507,7 +1509,7 @@ export type BackupIdentity = 'verified' | 'unverified'
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
-export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'max_kdf_work' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'repeated_paths' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'max_kdf_work' | 'compressed_member_allowance' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_output_writer' | 'max_bytes' | 'parallel_decode_memory' | 'exclude_pattern' | 'zip_consistency' | 'tar_sparse' | 'repeated_paths' | 'path_model' | 'archive_format' | 'decode_reuse' | 'decode_reuse_limit' | 'skip_kind' | 'durability' | 'existing_files' | 'staging' | 'entry_selection' | 'entry_include' | 'entry_exclude' | 'strip_components' | 'stored_targets' | 'mark_propagation'
 
 /** Archive format that can be created: `ArchiveType` without `'SevenZ'`. */
 export type CreatableFormat = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip'
@@ -3134,6 +3136,21 @@ export type StoredTargets = 'skip' | 'read'
 
 /** The `kind` of a [`MemorySymlinkEntry`]. */
 export type SymlinkKind = 'symlink'
+
+/**
+ * How old GNU sparse (`S`) TAR entries are handled.
+ *
+ * `refuse` (the default, also for `SecurityConfig.permissive()`) rejects every
+ * GNU sparse entry. `expand` reads one as a regular file of its real size,
+ * holes written as zeros, when `bsdtar`, Python `tarfile` and the `tar` crate
+ * read its map the same way; other maps, a PAX `size` record on a sparse
+ * entry and the PAX sparse forms stay refused. The real size counts against
+ * `maxFileSize` and `maxTotalSize` and against nothing else, because a TAR
+ * entry has no compressed size to take a ratio against, and the file takes
+ * its full size on disk. Listing, verifying and skipping an entry read only
+ * its archived bytes.
+ */
+export type TarSparsePolicy = 'refuse' | 'expand'
 
 /** A creation warning of a kind newer than this binding. */
 export interface UnknownCreationWarning {

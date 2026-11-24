@@ -4497,7 +4497,7 @@ fn test_extract_cli_refuses_gnu_sparse_entry() {
             .assert()
             .failure()
             .stderr(predicate::str::contains(
-                "GNU sparse entries are not supported",
+                "GNU sparse entries are refused unless tar_sparse is expand",
             ));
     }
 }
@@ -5538,6 +5538,151 @@ fn test_zip_consistency_rejects_unknown_value() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("possible values: enforce, ignore"));
+}
+
+/// A TAR holding an old GNU sparse member `hole.bin` (5 stored bytes, real
+/// size 1000, a trailing hole) followed by a regular `after.txt`.
+fn create_sparse_tar(dir: &std::path::Path, slot_after_end: bool) -> PathBuf {
+    fn octal(value: u64) -> [u8; 12] {
+        let mut field = [0u8; 12];
+        field[..11].copy_from_slice(format!("{value:011o}").as_bytes());
+        field
+    }
+    fn seal(header: &mut [u8; 512]) {
+        header[148..156].fill(b' ');
+        let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    }
+    fn header(name: &str, typeflag: u8, size: u64) -> [u8; 512] {
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(&octal(size));
+        header[136..148].copy_from_slice(&octal(0));
+        header[156] = typeflag;
+        header[257..265].copy_from_slice(b"ustar  \0");
+        header
+    }
+
+    let mut sparse = header("hole.bin", b'S', 5);
+    sparse[386..398].copy_from_slice(&octal(0));
+    sparse[398..410].copy_from_slice(&octal(5));
+    // The trailing-hole slot, moved behind an unused one when `slot_after_end`.
+    let hole_at = if slot_after_end { 434 } else { 410 };
+    sparse[hole_at..hole_at + 12].copy_from_slice(&octal(1000));
+    sparse[hole_at + 12..hole_at + 24].copy_from_slice(&octal(0));
+    sparse[483..495].copy_from_slice(&octal(1000));
+    seal(&mut sparse);
+    let mut after = header("after.txt", b'0', 5);
+    seal(&mut after);
+
+    let mut bytes = sparse.to_vec();
+    bytes.extend_from_slice(b"hello");
+    bytes.resize(1024, 0);
+    bytes.extend_from_slice(&after);
+    bytes.extend_from_slice(b"after");
+    bytes.resize(2048, 0);
+    bytes.resize(2048 + 1024, 0);
+    let archive = dir.join("sparse.tar");
+    std::fs::write(&archive, bytes).expect("write tar");
+    archive
+}
+
+#[test]
+fn test_tar_sparse_flag_is_listed_in_help() {
+    for command in ["extract", "list", "verify"] {
+        exarch_cmd()
+            .arg(command)
+            .arg("--help")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--tar-sparse"));
+    }
+}
+
+#[test]
+fn test_tar_sparse_rejects_unknown_value() {
+    exarch_cmd()
+        .args(["list", "--tar-sparse", "off", "x.tar"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("possible values: refuse, expand"));
+}
+
+#[test]
+fn test_sparse_tar_is_refused_by_default_and_the_hint_names_the_flag() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_sparse_tar(temp.path(), false);
+    let out = temp.path().join("out");
+
+    for command in ["list", "verify"] {
+        exarch_cmd()
+            .arg(command)
+            .arg(&archive)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "GNU sparse entries are refused unless tar_sparse is expand",
+            ))
+            .stderr(predicate::str::contains("--tar-sparse expand"));
+    }
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--tar-sparse expand"));
+    assert!(!out.join("hole.bin").exists());
+}
+
+#[test]
+fn test_sparse_tar_expands_with_the_flag() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_sparse_tar(temp.path(), false);
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .args(["list", "--long", "--tar-sparse", "expand"])
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1000  hole.bin"));
+    exarch_cmd()
+        .args(["verify", "--tar-sparse", "expand"])
+        .arg(&archive)
+        .assert()
+        .success();
+    exarch_cmd()
+        .args(["extract", "--tar-sparse", "expand"])
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+
+    let content = std::fs::read(out.join("hole.bin")).expect("sparse member");
+    assert_eq!(content.len(), 1000);
+    assert_eq!(&content[..5], b"hello");
+    assert!(content[5..].iter().all(|&b| b == 0));
+    assert_eq!(std::fs::read(out.join("after.txt")).unwrap(), b"after");
+}
+
+#[test]
+fn test_sparse_tar_with_an_ambiguous_map_stays_refused_under_expand() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_sparse_tar(temp.path(), true);
+
+    exarch_cmd()
+        .args(["list", "--tar-sparse", "expand"])
+        .arg(&archive)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "GNU sparse map: slot after the end of the map",
+        ))
+        .stderr(predicate::str::contains("no option relaxes this refusal"));
 }
 
 #[test]

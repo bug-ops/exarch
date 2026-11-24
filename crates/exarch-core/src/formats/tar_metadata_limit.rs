@@ -74,27 +74,29 @@
 //! distinguishes the two purely by *where the bytes came from*, never by
 //! inspecting a header field.
 //!
-//! One known residual limitation, accepted (P3, tracked as a follow-up
-//! issue) rather than fixed here: a *legitimate* GNU sparse file with real
-//! holes larger than [`SYNTHETIC_PAD_CAP_BYTES`] (e.g. a multi-gigabyte
-//! sparse disk image, mostly zero-filled) looks identical to an attack from
-//! this module's perspective when such a file is skipped unread — both
-//! produce output with no corresponding read. This affects `list_archive`
-//! and `verify_archive` unconditionally (neither reads entry content at all,
-//! so *every* entry hits this), and affects `extract_archive`/
-//! `TarArchive::extract` whenever any pre-read skip causes the entry not to
-//! be read at all — currently two such paths: a `SecurityConfig` extension
-//! allowlist rejecting the entry (`ValidatorCore::screen_file_path_in`, see the
-//! "Cumulative synthetic-byte budget" section below) and `skip_duplicates`
-//! finding the destination path already exists
-//! (`common::extract_file_with_permit`, `formats/common.rs`) — both return
-//! before the entry's content is ever read. Only an extract call that
-//! actually reads the entry (no pre-read skip of any kind) is unaffected,
-//! since the guard's drain then finds nothing left to do.
-//! [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] below widens this same limitation
-//! across entries: an archive containing more than roughly a hundred such
-//! large-hole sparse entries, skipped unread by any of the paths above, is
-//! now also rejected, not just a single oversized one.
+//! # GNU sparse entries
+//!
+//! A GNU sparse entry is the one kind of entry whose drain can yield output
+//! that no input byte backs: the `tar` crate produces its holes from
+//! `io::repeat(0)`, so a `realsize` field up to `u64::MAX` costs nothing to
+//! declare. Such an entry never reaches the drain. Under
+//! [`TarSparsePolicy::Refuse`] [`TarEntryGuard::check`] refuses it. Under
+//! [`TarSparsePolicy::Expand`] the header check accepts only a map that every
+//! reader reads the same way and returns [`SkipPlan::TarSkip`] with the offset
+//! `end` of the next header, computed from the framing values the `tar` crate
+//! itself reports. An unread entry (listed, verified, or skipped by a filter,
+//! an allowlist or `skip_duplicates`) is then never read through the
+//! `tar::Entry`: on drop the guard only records how many bytes are left up to
+//! `end`, and the `tar` crate reads exactly those archived bytes when it skips
+//! to the next header. They bypass the metadata window and the synthetic
+//! counters, being entry data that real input backs, but not the skipped-entry
+//! meter: when the entry was admitted as `Metered`, every one of them is
+//! charged against the ratio bound like the payload of any skipped entry. The
+//! work follows the archived bytes and never the holes, whatever the limits.
+//! The window of the next entry starts at `end`, so its header must sit exactly
+//! there, and an exemption that `tar` did not use up fails as a
+//! `WindowMismatch`. The holes cost anything only where an entry is written,
+//! and there `max_file_size` and `max_total_size` bound them.
 //!
 //! # Cumulative synthetic-byte budget (issue #422)
 //!
@@ -145,6 +147,11 @@
 //! the change belongs somewhere else (e.g. `EntryValidator`, which runs after
 //! an entry is already fully framed by `tar` itself), not as a reason to add
 //! a peek here.
+//!
+//! The one framing value the guard takes from outside is `SkipPlan::TarSkip`'s
+//! `end`. The header check computes it from offsets and sizes the `tar` crate
+//! reports, and the guard only subtracts the byte count from it; no header is
+//! parsed here.
 
 use std::io;
 use std::io::Read;
@@ -153,7 +160,6 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -164,17 +170,21 @@ use super::bounded_read::invalid_data;
 use super::bounded_read::read_prefix;
 use super::source_fault::TapSource;
 use super::tar_extension_headers::PrecedingEntry;
+use super::tar_extension_headers::SkipPlan;
 use super::tar_extension_headers::check_entry_headers;
 use super::tar_extension_headers::check_trailing_headers;
 use crate::Limit;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::TarAmbiguity;
+use crate::TarSparsePolicy;
 use crate::Violation;
 use crate::ZipBombDetails;
 use crate::ZipBombScope;
 use crate::formats::io_marker::IoMarker;
 use crate::security::Compressed;
 use crate::security::Uncompressed;
+use crate::sync::lock_unpoisoned;
 
 /// Hard, non-configurable ceiling on how many *synthesized* bytes (drained
 /// output with no corresponding read from the underlying reader)
@@ -286,14 +296,21 @@ struct BudgetState {
     /// Whether the last checked entry was a global PAX header; accessed only
     /// through [`TarReadBudget::preceding`].
     after_global: AtomicBool,
+    /// Bytes of an unread sparse entry the `tar` crate is about to skip by
+    /// reading them. Set by [`TarEntryGuard`]'s drop, used up by
+    /// [`BudgetedReader`] while armed (see [`SkipPlan::TarSkip`]), and checked
+    /// to be zero by [`BudgetedEntries::next_entry`].
+    exempt: AtomicU64,
+    /// Whether the exempt bytes are charged to the skipped-entry meter.
+    exempt_metered: AtomicBool,
+    /// Lossy path of the sparse entry whose exempt bytes `tar` is skipping,
+    /// named in the error a failed skip raises.
+    exempt_path: Mutex<Option<String>>,
 }
 
 impl BudgetState {
     fn record(&self, bytes: &[u8]) {
-        self.window
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(bytes);
+        lock_unpoisoned(&self.window).extend_from_slice(bytes);
     }
 
     /// Raw archive bytes consumed so far; under an `Opaque` or
@@ -345,11 +362,7 @@ pub(crate) struct TarReadBudget(Arc<BudgetState>);
 impl TarReadBudget {
     /// Starts (or restarts) counting: `consumed = 0`, `allowance = limit`.
     fn arm(&self) {
-        self.0
-            .window
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        lock_unpoisoned(&self.0.window).clear();
         self.0.consumed.store(0, Ordering::Relaxed);
         self.0
             .allowance
@@ -368,11 +381,11 @@ impl TarReadBudget {
     /// The buffer goes back through [`return_window`](Self::return_window) so
     /// its capacity is reused by the next window.
     fn take_window(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.0.window.lock().unwrap_or_else(PoisonError::into_inner))
+        std::mem::take(&mut *lock_unpoisoned(&self.0.window))
     }
 
     fn return_window(&self, bytes: Vec<u8>) {
-        *self.0.window.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
+        *lock_unpoisoned(&self.0.window) = bytes;
     }
 
     fn preceding(&self) -> PrecedingEntry {
@@ -400,12 +413,42 @@ impl TarReadBudget {
         self.0.skip_trip.get().copied()
     }
 
+    /// Bytes `tar` is still to skip without a window or budget charge.
+    fn exempt(&self) -> u64 {
+        self.0.exempt.load(Ordering::Relaxed)
+    }
+
+    /// Exempts the next `bytes` read, charging them to the skipped-entry meter
+    /// when `metered`.
+    fn set_exempt(&self, bytes: u64, metered: bool) {
+        self.0.exempt_metered.store(metered, Ordering::Relaxed);
+        self.0.exempt.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Takes what is left of the exemption, leaving none.
+    fn take_exempt(&self) -> u64 {
+        self.0.exempt_metered.store(false, Ordering::Relaxed);
+        self.0.exempt.swap(0, Ordering::Relaxed)
+    }
+
+    /// Takes the path of the sparse entry whose data was being skipped.
+    fn take_exempt_path(&self) -> Option<String> {
+        lock_unpoisoned(&self.0.exempt_path).take()
+    }
+
     /// Classifies an error `tar` raised while reading toward the next entry.
-    fn classify(&self, e: &io::Error) -> crate::ArchiveError {
+    ///
+    /// `skipping` names the sparse entry whose data `tar` was skipping, so a
+    /// truncated or corrupt payload is attributed to it.
+    fn classify(&self, e: &io::Error, skipping: Option<&str>) -> crate::ArchiveError {
         budget_violation(e).unwrap_or_else(|| {
+            let detail = skipping.map_or_else(
+                || e.to_string(),
+                |path| format!("{e} (while skipping the data of sparse entry '{path}')"),
+            );
             self.prefer_fault(crate::ArchiveError::InvalidArchive(
                 crate::Malformation::TarEntryUnreadable {
-                    detail: e.to_string().into(),
+                    detail: detail.into(),
                 },
             ))
         })
@@ -596,6 +639,32 @@ pub(crate) struct BudgetedReader<R> {
     state: Arc<BudgetState>,
 }
 
+impl<R: Read> BudgetedReader<R> {
+    /// Passes up to `exempt` bytes of an unread sparse entry through, so the
+    /// `tar` crate can skip them (see [`SkipPlan::TarSkip`]).
+    ///
+    /// Never returns more than `exempt` bytes, so a skip that reads in larger
+    /// chunks cannot pull the next header through the exemption. The bytes
+    /// are not recorded in the window and not counted against the metadata
+    /// allowance; they are charged to the skipped-entry meter when the entry
+    /// was admitted as metered. A zero-length read (the input ended inside the
+    /// entry) is passed on, and `tar` fails the skip.
+    fn read_exempt(&mut self, buf: &mut [u8], exempt: u64) -> io::Result<usize> {
+        let want = usize::try_from(exempt).unwrap_or(usize::MAX).min(buf.len());
+        let (window, _) = buf.split_at_mut_checked(want).ok_or_else(invalid_data)?;
+        let filled = read_prefix(&mut self.inner, window)?;
+        let n = filled.len();
+        self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
+        let left = exempt.saturating_sub(n as u64);
+        self.state.exempt.store(left, Ordering::Relaxed);
+        self.state.meter_skipped(n)?;
+        if left == 0 {
+            self.state.metering.store(false, Ordering::Relaxed);
+        }
+        Ok(n)
+    }
+}
+
 impl<R: Read> Read for BudgetedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let allowance = self.state.allowance.load(Ordering::Relaxed);
@@ -604,6 +673,11 @@ impl<R: Read> Read for BudgetedReader<R> {
             self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
             self.state.meter_skipped(n)?;
             return Ok(n);
+        }
+
+        let exempt = self.state.exempt.load(Ordering::Relaxed);
+        if exempt > 0 {
+            return self.read_exempt(buf, exempt);
         }
 
         let consumed = self.state.consumed.load(Ordering::Relaxed);
@@ -686,6 +760,9 @@ pub(crate) fn budgeted_reader_with<R: Read>(
         cumulative_synthetic: AtomicU64::new(0),
         window: Mutex::new(Vec::new()),
         after_global: AtomicBool::new(false),
+        exempt: AtomicU64::new(0),
+        exempt_metered: AtomicBool::new(false),
+        exempt_path: Mutex::new(None),
     });
     let reader = BudgetedReader {
         inner,
@@ -743,9 +820,13 @@ impl<'a> MetadataWindow<'a> {
 pub(crate) struct TarEntryGuard<'a, 's, R: Read> {
     entry: tar::Entry<'a, BudgetedReader<R>>,
     window_start: u64,
+    /// `total_read` when iteration began, to turn it into an archive offset.
+    origin: u64,
     budget: TarReadBudget,
     abandoned: bool,
     skip_marked: bool,
+    /// How the entry's data is passed when nobody reads it; set by `check`.
+    skip: SkipPlan,
     _borrow: PhantomData<&'s mut ()>,
 }
 
@@ -814,28 +895,56 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
         outcome
     }
 
+    /// Leaves the unread rest of a sparse entry to the `tar` crate: the bytes
+    /// up to `end` become the exemption its next skip reads through.
+    ///
+    /// A guard that already read past `end` is abandoned instead, which makes
+    /// the next [`BudgetedEntries::next_entry`] refuse; that cannot happen for
+    /// a plan the header check produced.
+    fn hand_over_to_tar(&self, end: u64) {
+        let position = self.budget.total_read().saturating_sub(self.origin);
+        match end.checked_sub(position) {
+            Some(0) => {}
+            Some(rest) => {
+                let metered = self.budget.0.metering.load(Ordering::Relaxed);
+                let path = crate::bytes_text(&self.entry.path_bytes());
+                *lock_unpoisoned(&self.budget.0.exempt_path) = Some(path);
+                self.budget.set_exempt(rest, metered);
+            }
+            None => self.budget.0.abandoned.store(true, Ordering::Relaxed),
+        }
+    }
+
     /// Verifies the entry's headers and the bytes `tar` consumed to reach
     /// it, and unlocks the entry.
     ///
-    /// `metadata_limit` bounds how much of a global PAX header is read.
+    /// `metadata_limit` bounds how much of a global PAX header is read, and
+    /// `sparse` decides whether an old GNU sparse entry is refused or accepted
+    /// with a map every reader reads the same way.
     ///
     /// # Errors
     ///
     /// Returns [`crate::ArchiveError::InvalidArchive`] when the headers are
     /// ambiguous; the guard is then abandoned, as no further entry is read.
-    pub(crate) fn check(mut self, metadata_limit: u64) -> Result<CheckedTarEntry<'a, 's, R>> {
+    pub(crate) fn check(
+        mut self,
+        metadata_limit: u64,
+        sparse: TarSparsePolicy,
+    ) -> Result<CheckedTarEntry<'a, 's, R>> {
         let bytes = self.budget.take_window();
         let window = MetadataWindow::new(self.window_start, &bytes);
         let checked = check_entry_headers(
             &mut self.entry,
             &window,
             metadata_limit,
+            sparse,
             self.budget.preceding(),
         );
         self.budget.return_window(bytes);
         match checked {
             Ok(headers) => {
                 self.budget.set_preceding(headers.preceding);
+                self.skip = headers.skip;
                 Ok(CheckedTarEntry(self, headers.mtime))
             }
             Err(e) => {
@@ -925,6 +1034,11 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
         ) || kind.as_byte() == b'V'
     }
 
+    /// How the entry's data is passed when nobody reads it.
+    pub(crate) fn skip_plan(&self) -> SkipPlan {
+        self.0.skip
+    }
+
     /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
     pub(crate) fn abandon(&mut self) {
         self.0.abandon();
@@ -955,12 +1069,17 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// passes; a stream the caller already decoded (`TarArchive::new`) is
     /// never refused, because core cannot see its compression.
     ///
+    /// A sparse entry the header check accepted ([`SkipPlan::TarSkip`]) is
+    /// never read here, whatever its declared size: it is only marked, and its
+    /// archived bytes are skipped by the `tar` crate on the way to the next
+    /// header under the same bound, so the holes cost nothing.
+    ///
     /// # Errors
     ///
     /// Returns [`crate::ArchiveError::ZipBomb`] with
     /// [`ZipBombScope::SkippedEntries`] when the bound is exceeded.
     pub(crate) fn drain_skipped(&mut self, limits: &SkipLimits) -> Result<()> {
-        if self.mark_skipped(limits) == SkipAdmission::Admitted {
+        if self.mark_skipped(limits) == SkipAdmission::Admitted || self.0.skip != SkipPlan::Drain {
             return Ok(());
         }
         let Ok(()) = self.0.drain::<!>(|_| Ok(()));
@@ -1032,7 +1151,12 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
         if self.abandoned {
             return;
         }
-        let Ok(()) = self.drain::<!>(|_| Ok(()));
+        match self.skip {
+            SkipPlan::Drain => {
+                let Ok(()) = self.drain::<!>(|_| Ok(()));
+            }
+            SkipPlan::TarSkip { end } => self.hand_over_to_tar(end),
+        }
     }
 }
 
@@ -1131,31 +1255,49 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             self.poisoned = true;
             return Some(Err(crate::ArchiveError::ZipBomb(details)));
         }
-        self.budget.0.metering.store(false, Ordering::Relaxed);
+        let exempt = self.budget.exempt();
+        let metered = exempt > 0 && self.budget.0.exempt_metered.load(Ordering::Relaxed);
+        self.budget.0.metering.store(metered, Ordering::Relaxed);
         if let Some(err) = self.budget.cumulative_synthetic_violation() {
             self.poisoned = true;
-            return Some(Err(self.budget.classify(&err)));
+            return Some(Err(self.budget.classify(&err, None)));
         }
-        let start = self.budget.total_read().saturating_sub(self.origin);
+        // The exempt bytes are skipped before the next header, so the window
+        // of that header starts after them.
+        let start = self
+            .budget
+            .total_read()
+            .saturating_sub(self.origin)
+            .saturating_add(exempt);
         self.budget.arm();
         let result = self.entries.next();
         self.budget.disarm();
+        let leftover = self.budget.take_exempt();
+        let skipping = self.budget.take_exempt_path();
 
         match result {
+            Some(Err(e)) => {
+                self.poisoned = true;
+                Some(Err(self.budget.classify(&e, skipping.as_deref())))
+            }
+            _ if leftover > 0 => {
+                self.poisoned = true;
+                Some(Err(self
+                    .budget
+                    .prefer_fault(TarAmbiguity::WindowMismatch.into())))
+            }
             None => {
                 self.end_window_start = Some(start);
                 None
             }
-            Some(Err(e)) => {
-                self.poisoned = true;
-                Some(Err(self.budget.classify(&e)))
-            }
             Some(Ok(entry)) => Some(Ok(TarEntryGuard {
                 entry,
                 window_start: start,
+                origin: self.origin,
                 budget: self.budget.clone(),
                 abandoned: false,
                 skip_marked: false,
+                skip: SkipPlan::Drain,
                 _borrow: PhantomData,
             })),
         }
@@ -1182,6 +1324,9 @@ pub(crate) fn budgeted_tar_entries<R: Read>(
     let entries = archive.entries()?;
     Ok(BudgetedEntries::new(entries, budget))
 }
+
+#[cfg(test)]
+mod sparse_skip_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1280,7 +1425,7 @@ mod tests {
             .next_entry()
             .expect("one entry")
             .expect("no io error")
-            .check(4096)
+            .check(4096, TarSparsePolicy::Refuse)
             .unwrap();
         let mut content = Vec::new();
         guard.read_to_end(&mut content).unwrap();
@@ -1321,7 +1466,7 @@ mod tests {
             .next_entry()
             .expect("second entry must still be reachable")
             .expect("no io error")
-            .check(4096)
+            .check(4096, TarSparsePolicy::Refuse)
             .unwrap();
         let mut content = Vec::new();
         second_guard.read_to_end(&mut content).unwrap();
@@ -1353,7 +1498,7 @@ mod tests {
             1536
         );
         handle.return_window(window);
-        second.check(4096).unwrap();
+        second.check(4096, TarSparsePolicy::Refuse).unwrap();
     }
 
     #[test]
@@ -1412,7 +1557,12 @@ mod tests {
             ratio: 10.0,
         };
 
-        let mut entry = entries.next_entry().unwrap().unwrap().check(4096).unwrap();
+        let mut entry = entries
+            .next_entry()
+            .unwrap()
+            .unwrap()
+            .check(4096, TarSparsePolicy::Refuse)
+            .unwrap();
         assert_eq!(entry.mark_skipped(&limits), SkipAdmission::Metered);
         drop(entry);
 
@@ -1431,7 +1581,12 @@ mod tests {
         let mut archive = tar::Archive::new(reader);
         let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
 
-        let mut entry = entries.next_entry().unwrap().unwrap().check(4096).unwrap();
+        let mut entry = entries
+            .next_entry()
+            .unwrap()
+            .unwrap()
+            .check(4096, TarSparsePolicy::Refuse)
+            .unwrap();
         let failed = entry
             .settle(|_| Err::<(), _>(crate::ArchiveError::from(Violation::SymlinksUnsupported)));
         assert!(failed.is_err());

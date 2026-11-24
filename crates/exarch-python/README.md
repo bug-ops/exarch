@@ -138,7 +138,7 @@ is ignored; a 7z password that is not UTF-8 text raises it with
 data is encrypted, with or without a password. `SecurityConfig.max_kdf_work` bounds the key-derivation work of one
 7z operation. Zeroization across the binding boundary is best effort.
 
-**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation performs. `sevenz-rust2` keeps one derived key per process, so a key that another 7z operation of the process replaced with a different one in between is charged again, and the operation fails with `kdf_cost_exceeded` once the total passes the budget; encrypted 7z operations with different keys that run at the same time can therefore make each other fail. A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives the outer key again after every inner operation, so with the default budget and 7-Zip's power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for such pipelines. Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives. 7z operations of one process take turns only during the key set-up of each encrypted block and while an encrypted header is parsed from bytes already read.
+**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation performs. Each 7z operation derives its AES keys itself and keeps them only for that operation, so concurrent operations neither share keys nor wait on each other. Admission charges one derivation for every change of key parameters in archive order, and the derivations an operation performs never exceed that charge; an operation over the budget fails with `kdf_cost_exceeded`. A block whose AES coders declare different key parameters is refused as an unsupported coder, and an encrypted header with more than one AES coder as unreadable. Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives.
 
 ### Archives in Memory
 
@@ -355,6 +355,9 @@ config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 config = config.with_zip_consistency(
     "ignore"
 )  # ZIP structure policy: "enforce" (default) or "ignore"
+config = config.with_tar_sparse(
+    "expand"
+)  # Read old GNU sparse TAR entries as files of their real size; "refuse" (default) rejects them
 config = config.with_repeated_paths(
     "refuse"
 )  # Reject an archive that names one path twice; "keep_first" (default) keeps the first copy

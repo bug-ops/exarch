@@ -538,6 +538,14 @@ mod tests {
         bytes
     }
 
+    fn input() -> Vec<u8> {
+        std::process::id().to_le_bytes().to_vec()
+    }
+
+    fn other_input() -> Vec<u8> {
+        input().into_iter().map(|byte| !byte).collect()
+    }
+
     fn round_after(last: u8) -> u8 {
         last.checked_add(1).unwrap()
     }
@@ -598,11 +606,11 @@ mod tests {
         let other_pair = [20u8, 0];
         let mut mine = SlotWatch::default();
         let mut other = SlotWatch::default();
-        assert_eq!(mine.enter_block(&mut turn, [&same[..]], b"pw"), 0);
-        other.enter_block(&mut turn, [&other_pair[..]], b"pw");
-        assert_eq!(mine.enter_block(&mut turn, [&same[..]], b"pw"), 1 << 19);
-        other.enter_block(&mut turn, [&other_pair[..]], b"pw");
-        assert_eq!(mine.enter_block(&mut turn, [&other_pair[..]], b"pw"), 0);
+        assert_eq!(mine.enter_block(&mut turn, [&same[..]], &input()), 0);
+        other.enter_block(&mut turn, [&other_pair[..]], &input());
+        assert_eq!(mine.enter_block(&mut turn, [&same[..]], &input()), 1 << 19);
+        other.enter_block(&mut turn, [&other_pair[..]], &input());
+        assert_eq!(mine.enter_block(&mut turn, [&other_pair[..]], &input()), 0);
         assert_eq!(mine.repeated(), 1 << 19);
     }
 
@@ -612,11 +620,11 @@ mod tests {
         let same = [19u8, 0];
         let mut mine = SlotWatch::default();
         let mut other = SlotWatch::default();
-        assert_eq!(mine.enter_block(&mut turn, [&same[..]], b"pw"), 0);
-        other.enter_block(&mut turn, [&same[..]], b"pw");
-        assert_eq!(mine.enter_block(&mut turn, [&same[..]], b"pw"), 0);
-        other.enter_block(&mut turn, [&same[..]], b"other password");
-        assert_eq!(mine.enter_block(&mut turn, [&same[..]], b"pw"), 1 << 19);
+        assert_eq!(mine.enter_block(&mut turn, [&same[..]], &input()), 0);
+        other.enter_block(&mut turn, [&same[..]], &input());
+        assert_eq!(mine.enter_block(&mut turn, [&same[..]], &input()), 0);
+        other.enter_block(&mut turn, [&same[..]], &other_input());
+        assert_eq!(mine.enter_block(&mut turn, [&same[..]], &input()), 1 << 19);
     }
 
     #[test]
@@ -625,13 +633,13 @@ mod tests {
         let props = [19u8, 0];
         let params = AesParams::parse(&props);
         let mut mine = SlotWatch::default();
-        assert_eq!(mine.enter_block(&mut turn, [&props[..]], b"pw"), 0);
-        with_header_key(params, b"pw", || Ok::<(), ()>(())).unwrap();
-        assert_eq!(mine.enter_block(&mut turn, [&props[..]], b"pw"), 0);
-        with_header_key(params, b"pw", || Err::<(), ()>(())).unwrap_err();
-        assert_eq!(mine.enter_block(&mut turn, [&props[..]], b"pw"), 1 << 19);
-        with_header_key(None, b"pw", || Ok::<(), ()>(())).unwrap();
-        assert_eq!(mine.enter_block(&mut turn, [&props[..]], b"pw"), 1 << 19);
+        assert_eq!(mine.enter_block(&mut turn, [&props[..]], &input()), 0);
+        with_header_key(params, &input(), || Ok::<(), ()>(())).unwrap();
+        assert_eq!(mine.enter_block(&mut turn, [&props[..]], &input()), 0);
+        with_header_key(params, &input(), || Err::<(), ()>(())).unwrap_err();
+        assert_eq!(mine.enter_block(&mut turn, [&props[..]], &input()), 1 << 19);
+        with_header_key(None, &input(), || Ok::<(), ()>(())).unwrap();
+        assert_eq!(mine.enter_block(&mut turn, [&props[..]], &input()), 1 << 19);
     }
 
     #[test]
@@ -657,9 +665,12 @@ mod tests {
         let mut turn = AesTurn::acquire();
         let props = [19u8, 0];
         let mut probe = SlotWatch::default();
-        assert_eq!(probe.enter_block(&mut turn, [&props[..]], b"pw"), 0);
+        assert_eq!(probe.enter_block(&mut turn, [&props[..]], &input()), 0);
         SlotWatch::default().enter_unordered_block(&mut turn);
-        assert_eq!(probe.enter_block(&mut turn, [&props[..]], b"pw"), 1 << 19);
+        assert_eq!(
+            probe.enter_block(&mut turn, [&props[..]], &input()),
+            1 << 19
+        );
     }
 
     #[test]

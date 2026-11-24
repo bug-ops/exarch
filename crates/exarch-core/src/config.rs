@@ -137,7 +137,7 @@ closed_enum! {
         /// Replace the occupant where the kinds allow it, else fail.
         Overwrite => "overwrite",
 
-        /// Fail with [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+        /// Fail with [`ArchiveError::DestinationOccupied`]
         /// for an occupant the current run did not create.
         ///
         /// A file or symlink the run created itself (a later file, symlink or
@@ -191,7 +191,7 @@ closed_enum! {
         /// destination that does not exist or is empty; delete it on failure.
         ///
         /// A destination that holds content is refused with
-        /// [`ArchiveError::OutputExists`](crate::ArchiveError::OutputExists)
+        /// [`ArchiveError::OutputExists`]
         /// before anything is extracted, and one that is not a directory with
         /// [`ConfigProblem::NotADirectory`].
         /// A symlinked destination is resolved first, so the staging directory is
@@ -245,7 +245,7 @@ closed_enum! {
         /// The original is renamed aside only once extraction succeeded and
         /// removed after the staged tree is in place; if moving the staged tree
         /// fails the original is restored, and
-        /// [`ArchiveError::ReplaceFailed`](crate::ArchiveError::ReplaceFailed)
+        /// [`ArchiveError::ReplaceFailed`]
         /// says whether that worked. A backup that cannot be removed is reported
         /// as an [`ExtractionWarning::BackupCleanupFailed`](crate::ExtractionWarning::BackupCleanupFailed).
         /// A destination that does not exist is created as under `Atomic`.

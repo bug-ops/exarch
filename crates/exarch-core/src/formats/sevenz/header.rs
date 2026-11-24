@@ -1151,6 +1151,14 @@ mod tests {
                 .unwrap()
         }
 
+        fn first_salt() -> u8 {
+            std::process::id().to_le_bytes()[0]
+        }
+
+        fn second_salt() -> u8 {
+            !first_salt()
+        }
+
         fn aes(salt: u8) -> Coder {
             coder_with(EncoderMethod::ID_AES256_SHA256, &writer_block(salt))
         }
@@ -1189,7 +1197,11 @@ mod tests {
 
         #[test]
         fn admission_and_the_runtime_replay_charge_the_same_keys() {
-            let block = block_of(vec![aes(1), aes(1), aes(2)]);
+            let block = block_of(vec![
+                aes(first_salt()),
+                aes(first_salt()),
+                aes(second_salt()),
+            ]);
 
             for graph in [false, true] {
                 let mut visited = 0;
@@ -1225,12 +1237,12 @@ mod tests {
                 SevenZHeader::assume_checked(archive).aes_coder_leads_block(BlockIndex::first())
             };
             assert!(!leads(vec![]));
-            assert!(!leads(vec![aes(1)]));
+            assert!(!leads(vec![aes(first_salt())]));
         }
 
         #[test]
         fn the_walk_stops_at_the_first_refusal() {
-            let block = block_of(vec![aes(1), aes(2)]);
+            let block = block_of(vec![aes(first_salt()), aes(second_salt())]);
             let mut visited = 0;
             let result = charge_block_keys(&block, false, |_| {
                 visited += 1;
@@ -1245,8 +1257,8 @@ mod tests {
         /// covers.
         fn graph_blocks() -> Vec<Block> {
             vec![
-                block_of(vec![bcj2(), aes(1), aes(1)]),
-                block_of(vec![copy(), aes(1), aes(1)]),
+                block_of(vec![bcj2(), aes(first_salt()), aes(first_salt())]),
+                block_of(vec![copy(), aes(first_salt()), aes(first_salt())]),
             ]
         }
 
@@ -1271,12 +1283,12 @@ mod tests {
             for block in graph_blocks() {
                 assert!(walks_coder_graph(&block, 1));
             }
-            let ordered = block_of(vec![bcj2(), aes(1), aes(2)]);
+            let ordered = block_of(vec![bcj2(), aes(first_salt()), aes(second_salt())]);
             let salts: Vec<u8> = aes_coders_in_decode_order(&ordered, true)
                 .iter()
                 .map(|coder| coder.properties()[2])
                 .collect();
-            assert_eq!(salts, [1, 2]);
+            assert_eq!(salts, [first_salt(), second_salt()]);
         }
 
         #[test]
@@ -1286,7 +1298,7 @@ mod tests {
                 let mut graph = KdfRuns::new(NonZeroU64::MAX, false);
                 spent_by(&block, true, &mut graph);
                 assert_eq!(graph.spent(), 2 << POWER);
-                spent_by(&block_of(vec![aes(1)]), false, &mut graph);
+                spent_by(&block_of(vec![aes(first_salt())]), false, &mut graph);
                 assert_eq!(graph.spent(), 3 << POWER);
 
                 let mut chain = KdfRuns::new(NonZeroU64::MAX, false);

@@ -330,7 +330,7 @@ impl TryFrom<&str> for PathComponentName {
         }
         let folded = fold_name(value);
         if folded.is_empty() {
-            return Err(invalid(Self::SETTING, ConfigProblem::Empty));
+            return Err(invalid(Self::SETTING, ConfigProblem::OnlyIgnoredCharacters));
         }
         Ok(Self {
             name: value.into(),
@@ -484,9 +484,14 @@ mod tests {
                 err,
                 ArchiveError::InvalidConfiguration {
                     setting: ConfigSetting::BannedPathComponent,
-                    problem: ConfigProblem::Empty
+                    problem: ConfigProblem::OnlyIgnoredCharacters
                 },
                 "{raw:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "invalid configuration: banned path component must not consist only of \
+                 characters that file name comparison ignores"
             );
         }
         assert!(PathComponentName::try_from("a\u{200c}").is_ok());

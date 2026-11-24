@@ -291,6 +291,11 @@ impl EntryMode {
         self.gid
     }
 
+    /// Whether the entry belongs to the user this process runs as.
+    pub(crate) fn is_owned_by_caller(self) -> bool {
+        self.uid.get() == rustix::process::geteuid().as_raw()
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_test(bits: u32, uid: Uid, gid: Gid) -> Self {
         Self { bits, uid, gid }
@@ -1712,6 +1717,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    #[test]
+    fn an_entry_is_owned_by_the_caller_only_for_the_effective_uid() {
+        let own = rustix::process::geteuid().as_raw();
+        let mode = |uid: u32| EntryMode::for_test(0o700, Uid::from_raw(uid), Gid::from_raw(0));
+
+        assert!(mode(own).is_owned_by_caller());
+        assert!(!mode(own.wrapping_add(1)).is_owned_by_caller());
+        assert!(!mode(own.wrapping_add(1000)).is_owned_by_caller());
+    }
 
     #[test]
     fn both_file_type_mappings_agree_on_the_occupant() {

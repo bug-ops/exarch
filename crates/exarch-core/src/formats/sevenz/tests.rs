@@ -20,6 +20,8 @@ use super::lzma2::DecodeKnobs;
 use super::verify::entries_uncovered_by_block_crc;
 use super::verify::payload_by_block;
 #[cfg(unix)]
+use super::write::Destination;
+#[cfg(unix)]
 use super::write::write_file_direct;
 #[cfg(unix)]
 use super::write::write_file_with_permit;
@@ -470,13 +472,15 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
     let bytes_written = write_file_with_permit_using(
         &mut reader,
         ReadFaults::new(ReadFamily::Tar, None),
-        &parent,
-        leaf("real-output.txt"),
+        Destination {
+            parent: &parent,
+            leaf: leaf("real-output.txt"),
+            marking: None,
+        },
         ReplacePermit::for_test(),
         FileWrite {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(13),
-            marking: None,
             mode: None,
             progress: &mut NoopProgress,
         },
@@ -535,13 +539,15 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
     let result = write_file_with_permit_using(
         &mut reader,
         ReadFaults::new(ReadFamily::Tar, None),
-        &parent,
-        leaf("real-output.txt"),
+        Destination {
+            parent: &parent,
+            leaf: leaf("real-output.txt"),
+            marking: None,
+        },
         ReplacePermit::for_test(),
         FileWrite {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(13),
-            marking: None,
             mode: None,
             progress: &mut NoopProgress,
         },
@@ -581,12 +587,14 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
     let result = write_file_direct(
         &mut reader,
         ReadFaults::new(ReadFamily::Tar, None),
-        &pinned_at(temp.path()),
-        leaf("bomb.bin"),
+        Destination {
+            parent: &pinned_at(temp.path()),
+            leaf: leaf("bomb.bin"),
+            marking: None,
+        },
         FileWrite {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(50),
-            marking: None,
             mode: None,
             progress: &mut NoopProgress,
         },
@@ -632,13 +640,15 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
     let result = write_file_with_permit(
         &mut reader,
         ReadFaults::new(ReadFamily::Tar, None),
-        &pinned_at(temp.path()),
-        leaf("existing.bin"),
+        Destination {
+            parent: &pinned_at(temp.path()),
+            leaf: leaf("existing.bin"),
+            marking: None,
+        },
         ReplacePermit::for_test(),
         FileWrite {
             copy_buffer: &mut copy_buffer,
             permit: test_permit(50),
-            marking: None,
             mode: None,
             progress: &mut NoopProgress,
         },

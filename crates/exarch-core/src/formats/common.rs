@@ -399,7 +399,6 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     let FileWrite {
         copy_buffer,
         permit,
-        marking,
         mode,
         progress,
     } = write;
@@ -414,19 +413,22 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // leaves a zero-byte file on disk (restores the pre-#446 ordering).
     checked_add_bytes(report.bytes_written, permit.admitted().get())?;
 
-    let timing = ModeTiming::of(marking);
     let Some(OutputSlot {
         file: output_file,
-        pending,
+        copy,
         written_at,
     }) = open_output_slot(
         &parent,
         leaf,
         safe_path.as_path(),
-        mode,
+        FileWrite {
+            copy_buffer,
+            permit,
+            mode,
+            progress: &mut *progress,
+        },
         duplicates,
         root,
-        timing,
     )?
     else {
         return record_duplicate_skip(report, safe_path.as_path());
@@ -435,19 +437,7 @@ pub(crate) fn extract_file_with_permit<R: Read, P: ParentCheck>(
     // Removes the partial file when the copy aborts (forged `expected_size`);
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
     let guard = written_at.guard(&parent, leaf);
-    let bytes_written = copy_and_finish_file(
-        reader,
-        output_file,
-        faults,
-        FileWrite {
-            copy_buffer,
-            permit,
-            marking,
-            mode,
-            progress: &mut *progress,
-        },
-        pending,
-    )?;
+    let bytes_written = copy_and_finish_file(reader, output_file, faults, copy)?;
     let replaced = matches!(written_at, WrittenAt::Temp(..));
     commit_output(&parent, written_at, leaf, safe_path.as_path())?;
     if replaced {
@@ -625,7 +615,7 @@ const FILE_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
-/// The [`AdmittedSize`](crate::security::quota::AdmittedSize) of `write.permit`
+/// The [`AdmittedSize`](crate::security::quota::AdmittedSize) of `copy.permit`
 /// is enforced as a hard streaming ceiling and exact post-copy match by
 /// [`copy_cancellable`].
 ///
@@ -637,16 +627,15 @@ pub(crate) fn copy_and_finish_file<R: Read + ?Sized>(
     reader: &mut R,
     file: File,
     faults: ReadFaults<'_>,
-    write: FileWrite<'_>,
-    pending: PendingMode,
+    copy: FileCopy<'_>,
 ) -> Result<u64> {
-    let FileWrite {
+    let FileCopy {
         copy_buffer,
         permit,
+        pending,
         marking,
-        mode: _,
         progress,
-    } = write;
+    } = copy;
     let mut writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_BYTES, file);
     let bytes_written = copy_cancellable(
         reader,
@@ -662,17 +651,81 @@ pub(crate) fn copy_and_finish_file<R: Read + ?Sized>(
 }
 
 /// What a file write consumes besides the entry's bytes and location: the
-/// scratch buffer, the quota permit, the mark, the creation mode and the
-/// progress callback.
+/// scratch buffer, the quota permit, the creation mode and the progress
+/// callback.
 ///
 /// The permit is held by value and the struct is not `Clone`, so one value
-/// authorizes exactly one write.
+/// authorizes exactly one write. Creating the file spends the mode and turns
+/// the bundle into a [`FileCopy`].
 pub(crate) struct FileWrite<'a> {
     pub(crate) copy_buffer: &'a mut CopyBuffer,
     pub(crate) permit: QuotaPermit,
-    pub(crate) marking: Option<&'a MarkRun>,
     pub(crate) mode: Option<CreateMode>,
     pub(crate) progress: &'a mut dyn ProgressCallback,
+}
+
+/// What the copy consumes once the file exists: the scratch buffer, the quota
+/// permit, the mode still to be applied, the mark and the progress callback.
+pub(crate) struct FileCopy<'a> {
+    pub(crate) copy_buffer: &'a mut CopyBuffer,
+    pub(crate) permit: QuotaPermit,
+    pub(crate) pending: PendingMode,
+    pub(crate) marking: Option<&'a MarkRun>,
+    pub(crate) progress: &'a mut dyn ProgressCallback,
+}
+
+impl<'a> FileWrite<'a> {
+    fn into_copy(self, pending: PendingMode, marking: Option<&'a MarkRun>) -> FileCopy<'a> {
+        FileCopy {
+            copy_buffer: self.copy_buffer,
+            permit: self.permit,
+            pending,
+            marking,
+            progress: self.progress,
+        }
+    }
+
+    /// Creates `leaf` exclusively in `dir` with this bundle's mode, at the
+    /// timing `marking` calls for, and returns the file with what the copy
+    /// into it consumes.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of [`create_file`].
+    pub(crate) fn create_file(
+        self,
+        dir: &VettedDir,
+        leaf: Leaf<'_>,
+        marking: Option<&'a MarkRun>,
+    ) -> std::io::Result<(File, FileCopy<'a>)> {
+        let (file, pending) = create_file(dir, leaf, self.mode, ModeTiming::of(marking))?;
+        Ok((file, self.into_copy(pending, marking)))
+    }
+
+    /// [`create_temp_sibling_with`] with this bundle's mode, and what the
+    /// copy into the temp file consumes.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of [`create_temp_sibling_with`].
+    pub(crate) fn create_temp_sibling(
+        self,
+        dir: &VettedDir,
+        entry: Leaf<'_>,
+        marking: Option<&'a MarkRun>,
+        replace: &ReplacePermit,
+        next_candidate: impl FnMut() -> TempLeaf,
+    ) -> std::io::Result<(TempLeaf, File, FileCopy<'a>)> {
+        let (temp, file, pending) = create_temp_sibling_with(
+            dir,
+            entry,
+            self.mode,
+            ModeTiming::of(marking),
+            replace,
+            next_candidate,
+        )?;
+        Ok((temp, file, self.into_copy(pending, marking)))
+    }
 }
 
 /// Flushes out `writer`'s file handle and seals it: the mark, then the mode.
@@ -697,9 +750,9 @@ fn finish_written(
 }
 
 /// An open, empty output file and where its content must end up.
-struct OutputSlot {
+struct OutputSlot<'a> {
     file: File,
-    pending: PendingMode,
+    copy: FileCopy<'a>,
     written_at: WrittenAt,
 }
 
@@ -712,21 +765,21 @@ struct OutputSlot {
 /// content. Returns `None` when the entry exists and `duplicates` is `Skip`.
 /// Under `Refuse` a file or symlink this run created is a duplicate and gives
 /// `None` as well; any other occupant fails with `DestinationOccupied`.
-fn open_output_slot(
+fn open_output_slot<'a>(
     dir: &VettedDir,
     leaf: Leaf<'_>,
     rel: &Path,
-    mode: Option<CreateMode>,
+    write: FileWrite<'a>,
     duplicates: OccupantPolicy,
-    root: &PinnedRoot,
-    timing: ModeTiming,
-) -> Result<Option<OutputSlot>> {
-    match create_file(dir, leaf, mode, timing) {
+    root: &'a PinnedRoot,
+) -> Result<Option<OutputSlot<'a>>> {
+    let marking = root.marking();
+    match create_file(dir, leaf, write.mode, ModeTiming::of(marking)) {
         Ok((file, pending)) => {
             root.created().note_file(&file, dir, leaf, rel);
             Ok(Some(OutputSlot {
                 file,
-                pending,
+                copy: write.into_copy(pending, marking),
                 written_at: WrittenAt::Final,
             }))
         }
@@ -742,12 +795,12 @@ fn open_output_slot(
                 return Ok(None);
             };
             refuse_non_file_occupant(dir, leaf, rel, root)?;
-            let (temp, file, pending) =
-                create_temp_sibling_with(dir, leaf, mode, timing, &permit, TempLeaf::next)
-                    .map_err(|e| replace_error(rel, &e))?;
+            let (temp, file, copy) = write
+                .create_temp_sibling(dir, leaf, marking, &permit, TempLeaf::next)
+                .map_err(|e| replace_error(rel, &e))?;
             Ok(Some(OutputSlot {
                 file,
-                pending,
+                copy,
                 written_at: WrittenAt::Temp(temp, permit),
             }))
         }
@@ -1549,7 +1602,6 @@ mod tests {
             FileWrite {
                 copy_buffer: &mut copy_buffer,
                 permit,
-                marking: root.marking(),
                 mode: Some(sanitized(0o644)),
                 progress: &mut NoopProgress,
             },
@@ -1615,7 +1667,6 @@ mod tests {
             FileWrite {
                 copy_buffer: &mut copy_buffer,
                 permit,
-                marking: root.marking(),
                 mode: Some(sanitized(0o644)),
                 progress: &mut NoopProgress,
             },
@@ -1667,7 +1718,6 @@ mod tests {
             FileWrite {
                 copy_buffer: &mut copy_buffer,
                 permit,
-                marking: root.marking(),
                 mode: Some(sanitized(0o644)),
                 progress: &mut NoopProgress,
             },
@@ -1718,7 +1768,6 @@ mod tests {
                 FileWrite {
                     copy_buffer: &mut copy_buffer,
                     permit,
-                    marking: root.marking(),
                     mode: Some(sanitized(0o644)),
                     progress: &mut NoopProgress,
                 },
@@ -1786,7 +1835,6 @@ mod tests {
             FileWrite {
                 copy_buffer: &mut copy_buffer,
                 permit,
-                marking: root.marking(),
                 mode: Some(sanitized(0o644)),
                 progress: &mut NoopProgress,
             },
@@ -2039,7 +2087,6 @@ mod tests {
             FileWrite {
                 copy_buffer: &mut copy_buffer,
                 permit,
-                marking: root.marking(),
                 mode: Some(CreateMode::Exact(sanitized_mode)),
                 progress: &mut NoopProgress,
             },
@@ -2347,6 +2394,69 @@ mod tests {
         assert!(!NotARegularFile::is_cause_of(&refusal));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_marked_run_defers_the_mode_until_the_copy_has_marked_the_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let source = tempfile::tempfile().expect("source");
+        rustix::fs::fsetxattr(
+            &source,
+            "com.apple.quarantine",
+            b"0083;5f3c8d11;Safari;3F2D5A10-1111-4222-8333-444455556666",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .expect("quarantine the source");
+        let temp = TempDir::new().expect("temp dir");
+        let root = pinned(&DestDir::new(temp.path()).expect("dest"));
+        let (_, leaf) = Leaf::split(Path::new("marked.txt")).expect("leaf");
+        let mode_bits = || {
+            std::fs::metadata(temp.path().join("marked.txt"))
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        let report = crate::mark::MarkScope::open(crate::MarkPropagation::WhenMarked, &source)
+            .around(|run| {
+                let run = run.expect("a marking run");
+                let mut copy_buffer = CopyBuffer::new();
+                let mut progress = NoopProgress;
+                let permit = QuotaTracker::new()
+                    .reserve(5, &SecurityConfig::default())
+                    .expect("reserve");
+                let (file, copy) = FileWrite {
+                    copy_buffer: &mut copy_buffer,
+                    permit,
+                    mode: Some(sanitized(0o644)),
+                    progress: &mut progress,
+                }
+                .create_file(root.dir(), leaf, Some(run))
+                .expect("create file");
+                assert_ne!(mode_bits(), 0o644, "the mode waits for the mark");
+
+                let mut reader = Cursor::new(b"hello");
+                copy_and_finish_file(
+                    &mut reader,
+                    file,
+                    ReadFaults::new(ReadFamily::SevenZ, None),
+                    copy,
+                )?;
+                assert_eq!(mode_bits(), 0o644);
+                Ok(ExtractionReport::new())
+            })
+            .expect("extraction");
+
+        assert_eq!(
+            report.mark,
+            crate::MarkOutcome::Propagated {
+                marked: 1,
+                failed: 0
+            }
+        );
+    }
+
     #[test]
     fn copy_and_finish_file_writes_flushes_and_enforces_admitted_size() {
         let temp = TempDir::new().expect("temp dir");
@@ -2355,27 +2465,22 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
 
         let (_, leaf) = Leaf::split(Path::new("ok.txt")).expect("leaf");
-        let (file, pending) = create_file(
-            root.dir(),
-            leaf,
-            Some(sanitized(0o644)),
-            ModeTiming::AfterMark,
-        )
-        .expect("create file");
         let permit = QuotaTracker::new().reserve(11, &config).expect("reserve");
+        let mut progress = NoopProgress;
+        let (file, copy) = FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit,
+            mode: Some(sanitized(0o644)),
+            progress: &mut progress,
+        }
+        .create_file(root.dir(), leaf, None)
+        .expect("create file");
         let mut reader = Cursor::new(b"hello world");
         let written = copy_and_finish_file(
             &mut reader,
             file,
             ReadFaults::new(ReadFamily::SevenZ, None),
-            FileWrite {
-                copy_buffer: &mut copy_buffer,
-                permit,
-                marking: None,
-                mode: None,
-                progress: &mut NoopProgress,
-            },
-            pending,
+            copy,
         )
         .expect("exact copy should succeed");
         assert_eq!(written, 11);
@@ -2385,22 +2490,22 @@ mod tests {
         );
 
         let (_, over_leaf) = Leaf::split(Path::new("over.txt")).expect("leaf");
-        let (over_file, over_pending) =
-            create_file(root.dir(), over_leaf, None, ModeTiming::AtCreate).expect("create file");
         let over_permit = QuotaTracker::new().reserve(4, &config).expect("reserve");
+        let mut over_progress = NoopProgress;
+        let (over_file, over_copy) = FileWrite {
+            copy_buffer: &mut copy_buffer,
+            permit: over_permit,
+            mode: None,
+            progress: &mut over_progress,
+        }
+        .create_file(root.dir(), over_leaf, None)
+        .expect("create file");
         let mut over_reader = Cursor::new(b"longer than four bytes");
         let err = copy_and_finish_file(
             &mut over_reader,
             over_file,
             ReadFaults::new(ReadFamily::SevenZ, None),
-            FileWrite {
-                copy_buffer: &mut copy_buffer,
-                permit: over_permit,
-                marking: None,
-                mode: None,
-                progress: &mut NoopProgress,
-            },
-            over_pending,
+            over_copy,
         )
         .expect_err("overrun must fail");
         assert_matches!(err, ArchiveError::SecurityViolation { .. });
@@ -2415,7 +2520,9 @@ mod tests {
 mod refuse_probe_tests {
 
     use super::*;
+    use crate::NoopProgress;
     use crate::formats::pinned_dir::support::leaf;
+    use crate::security::quota::QuotaTracker;
     use std::assert_matches;
     use tempfile::TempDir;
 
@@ -2429,17 +2536,26 @@ mod refuse_probe_tests {
     }
 
     fn open(root: &PinnedRoot, name: &str) -> Result<Option<()>> {
+        let mut copy_buffer = CopyBuffer::new();
+        let mut progress = NoopProgress;
+        let permit = QuotaTracker::new()
+            .reserve(0, &SecurityConfig::default())
+            .unwrap();
         open_output_slot(
             root.dir(),
             leaf(name),
             Path::new(name),
-            None,
+            FileWrite {
+                copy_buffer: &mut copy_buffer,
+                permit,
+                mode: None,
+                progress: &mut progress,
+            },
             OccupantPolicy::new(
                 crate::ExistingFiles::Refuse,
                 crate::RepeatedPaths::KeepFirst,
             ),
             root,
-            ModeTiming::AtCreate,
         )
         .map(|slot| slot.map(drop))
     }

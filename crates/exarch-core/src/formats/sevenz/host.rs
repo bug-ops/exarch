@@ -10,6 +10,7 @@ use std::path::Path;
 use super::extract::FilePlan;
 use super::extract::PrePass;
 use super::extract::SevenZTarget;
+use super::write::Destination;
 use super::write::lstat_dest;
 use super::write::refuse_undecoded_target_in;
 use super::write::write_file_direct;
@@ -267,12 +268,14 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             WriteMode::CreateNew => write_file_direct(
                 reader,
                 faults,
-                &parent,
-                leaf,
+                Destination {
+                    parent: &parent,
+                    leaf,
+                    marking,
+                },
                 FileWrite {
                     copy_buffer,
                     permit,
-                    marking,
                     mode,
                     progress: &mut *tally.progress,
                 },
@@ -280,13 +283,15 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             WriteMode::ReplaceRegular(replace) => write_file_with_permit(
                 reader,
                 faults,
-                &parent,
-                leaf,
+                Destination {
+                    parent: &parent,
+                    leaf,
+                    marking,
+                },
                 replace,
                 FileWrite {
                     copy_buffer,
                     permit,
-                    marking,
                     mode,
                     progress: &mut *tally.progress,
                 },

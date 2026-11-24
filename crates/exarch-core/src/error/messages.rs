@@ -1056,6 +1056,7 @@ impl ArchiveError {
                     | ConfigProblem::Empty
                     | ConfigProblem::BlankOrControl
                     | ConfigProblem::PaddedWithBlank
+                    | ConfigProblem::OnlyIgnoredCharacters
                     | ConfigProblem::ContainsSeparator
                     | ConfigProblem::InnerDot
                     | ConfigProblem::DotEntry
@@ -1276,6 +1277,7 @@ fn redacted_problem(problem: &ConfigProblem) -> std::borrow::Cow<'_, ConfigProbl
         | ConfigProblem::Empty
         | ConfigProblem::BlankOrControl
         | ConfigProblem::PaddedWithBlank
+        | ConfigProblem::OnlyIgnoredCharacters
         | ConfigProblem::ContainsSeparator
         | ConfigProblem::InnerDot
         | ConfigProblem::DotEntry

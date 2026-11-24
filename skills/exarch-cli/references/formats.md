@@ -23,6 +23,15 @@ A TAR holding constructs that readers (`bsdtar`, Python `tarfile`) parse differe
 - non-zero bytes between an `x`/`g`/`L`/`K` body and the next 512-byte boundary;
 - a non-empty GNU long name/link body not ending in exactly one NUL.
 
+The `TAR_AMBIGUITY` hint depends on the variant and says that no option relaxes the refusal (it names `--zip-consistency ignore` as the ZIP-only switch on commands that accept it):
+
+- sparse (`S` entry or a sparse PAX record): well formed but unsupported; other tools may extract it;
+- ambiguous constructs (duplicate PAX records, global (`g`) overrides, stacked PAX or GNU long records, payload on a directory or link, non-zero padding, prefix without ustar, oversized or duplicate extension headers): well formed but tools disagree about it; the hint says to ask the producer to re-create it and never suggests another tool (a different reader may be the one that sees a hidden member);
+- a global PAX header over `max_tar_metadata_bytes` (default 4 MiB): not necessarily damaged; the hint says `No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_tar_metadata_bytes.`;
+- malformed headers (bad checksum, malformed or empty-key PAX record, non-numeric `size`, non-canonical number, extension header without magic, malformed GNU long body, window mismatch): `may be corrupted or malformed`, so treat the file as damaged.
+
+Only the sparse hint suggests extracting with another trusted tool; for the ambiguous group do not, have the producer re-create the archive. Do not debug either as damaged. `TAR_TRAILER` corrupt/truncated refusals keep the `may be corrupted or malformed` hint.
+
 `list` applies a local PAX `mtime` record. Global `g` headers, `uname`, `gname`, `uid`, `gid`, and `SCHILY.fflags` are ignored on purpose. Not covered: PAX keys that extractors apply (xattrs, ACLs) and data after a plain TAR's end marker. A global header with other records (such as `git archive`'s `comment`) is accepted.
 
 A TAR regular, continuous, or sparse entry whose name ends in `/` and that carries data fails with `InvalidArchive`. Non-file entry types (FIFO, device, undefined typeflags) are `SecurityViolation`; an unknown typeflag reads `unsupported entry type: 'D' (0x44)`.

@@ -215,7 +215,7 @@ class TestSecurityConfig:
         """A name made only of code points that comparison ignores is refused."""
         config = SecurityConfig()
         for raw in ("\u200c", "\ufeff\u200d"):
-            with pytest.raises(ValueError, match="empty"):
+            with pytest.raises(ValueError, match="ignores"):
                 config.add_banned_component(raw)
 
     def test_banned_component_refuses_separators_and_dots(self):

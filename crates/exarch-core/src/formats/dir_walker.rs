@@ -28,6 +28,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
+use crate::config::Landing;
 use crate::formats::handle_resolution::LinkCursor;
 use crate::formats::occupant::OccupiedSite;
 use crate::formats::occupant::occupied_by;
@@ -151,11 +152,8 @@ impl<'c> DirWalker<'c> {
 
     /// Refuses a followed symlink that lands on a banned name, so an entry
     /// path is judged where it is written and not only by how it is spelled.
-    fn check_landing(self, position: &Path) -> Result<()> {
-        if let Some(component) = self.config.banned_component_in(position) {
-            return Err(Violation::BannedComponent { component }.into());
-        }
-        Ok(())
+    fn check_landing(self, position: &Path, entry: &Path) -> Result<()> {
+        self.config.check_banned_in(position, Landing::Entry(entry))
     }
 
     /// Creates `dest/rel` and every missing ancestor, vetting each component,
@@ -418,7 +416,7 @@ impl<'c> DirWalker<'c> {
                 }))
             }
             (Followed::Inside { position, dir }, LinkPolicy::ContainedOnly) => {
-                self.check_landing(&position)?;
+                self.check_landing(&position, entry)?;
                 let dir = match dir {
                     Some(dir) => DirRef::Opened(dir),
                     None => {

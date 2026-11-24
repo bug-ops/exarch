@@ -7,19 +7,28 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::formats::common;
 use crate::formats::common::FileWrite;
-use crate::formats::common::ModeTiming;
 use crate::formats::occupant::ReplacePermit;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::source_fault::ReadFaults;
+use crate::mark::MarkRun;
 use crate::security::fs_view::FsView;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::path::Path;
+
+/// Where a file entry is written: the vetted parent directory, the leaf in it
+/// and the download-origin mark of the run.
+#[derive(Clone, Copy)]
+pub(super) struct Destination<'a> {
+    pub(super) parent: &'a VettedDir,
+    pub(super) leaf: Leaf<'a>,
+    pub(super) marking: Option<&'a MarkRun>,
+}
 
 /// Writes `reader`'s bytes directly to `leaf` in `parent` (no temp file, no
 /// rename), consuming the [`QuotaPermit`](crate::security::quota::QuotaPermit)
@@ -69,15 +78,18 @@ use std::path::Path;
 /// Returns an error if file creation, the copy, or the underlying I/O fails,
 /// or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-pub(super) fn write_file_direct(
+pub(super) fn write_file_direct<'a>(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
-    parent: &VettedDir,
-    leaf: Leaf<'_>,
-    write: FileWrite<'_>,
+    dest: Destination<'a>,
+    write: FileWrite<'a>,
 ) -> Result<u64> {
-    let (file, pending) =
-        common::create_file(parent, leaf, write.mode, ModeTiming::of(write.marking))?;
+    let Destination {
+        parent,
+        leaf,
+        marking,
+    } = dest;
+    let (file, copy) = write.create_file(parent, leaf, marking)?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at `leaf` (issue #492 adversarial review, finding M1):
     // since this branch only runs when nothing occupied `leaf` beforehand, it
@@ -86,7 +98,7 @@ pub(super) fn write_file_direct(
     // returning on both success and error, so `guard` never unlinks a
     // still-open handle (critical on Windows).
     let guard = TempFileGuard::new(parent, leaf);
-    let bytes_written = common::copy_and_finish_file(reader, file, faults, write, pending)?;
+    let bytes_written = common::copy_and_finish_file(reader, file, faults, copy)?;
     guard.persist();
     Ok(bytes_written)
 }
@@ -138,15 +150,14 @@ pub(super) fn write_file_direct(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-pub(super) fn write_file_with_permit(
+pub(super) fn write_file_with_permit<'a>(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
-    parent: &VettedDir,
-    leaf: Leaf<'_>,
+    dest: Destination<'a>,
     replace: ReplacePermit,
-    write: FileWrite<'_>,
+    write: FileWrite<'a>,
 ) -> Result<u64> {
-    write_file_with_permit_using(reader, faults, parent, leaf, replace, write, TempLeaf::next)
+    write_file_with_permit_using(reader, faults, dest, replace, write, TempLeaf::next)
 }
 
 /// Implementation behind [`write_file_with_permit`], parameterized over the
@@ -172,29 +183,27 @@ pub(super) fn write_file_with_permit(
 /// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
 /// fails, or if the actual decompressed byte count exceeds or falls short of
 /// the permit's byte count.
-pub(super) fn write_file_with_permit_using(
+pub(super) fn write_file_with_permit_using<'a>(
     reader: &mut dyn Read,
     faults: ReadFaults<'_>,
-    parent: &VettedDir,
-    leaf: Leaf<'_>,
+    dest: Destination<'a>,
     replace: ReplacePermit,
-    write: FileWrite<'_>,
+    write: FileWrite<'a>,
     next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
-    let (temp, temp_file, pending) = common::create_temp_sibling_with(
+    let Destination {
         parent,
         leaf,
-        write.mode,
-        ModeTiming::of(write.marking),
-        &replace,
-        next_candidate,
-    )?;
+        marking,
+    } = dest;
+    let (temp, temp_file, copy) =
+        write.create_temp_sibling(parent, leaf, marking, &replace, next_candidate)?;
 
     // `copy_and_finish_file` takes `temp_file` by value and closes it before
     // returning on both success and error, so neither the rename nor
     // `temp_guard`'s unwind cleanup ever races a still-open handle (Windows).
     let temp_guard = TempFileGuard::for_temp(parent, temp.clone());
-    let bytes_written = common::copy_and_finish_file(reader, temp_file, faults, write, pending)?;
+    let bytes_written = common::copy_and_finish_file(reader, temp_file, faults, copy)?;
     parent.replace_entry(&temp, leaf, replace)?;
     temp_guard.persist();
 

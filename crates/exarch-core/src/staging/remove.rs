@@ -302,13 +302,12 @@ fn retry_restoring<T>(
 /// on the entry that is checked against the one just stat'ed.
 fn restore_owner_access(parent: &File, name: &OsStr) -> io::Result<()> {
     let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-        || stat.st_uid != rustix::process::geteuid().as_raw()
-    {
+    let entry = EntryMode::of_stat(&stat);
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || !entry.is_owned_by_caller() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     let (_, leaf) = Leaf::split(std::path::Path::new(name)).map_err(|_| not_found())?;
-    let mode = DirMode::of_destination(EntryMode::of_stat(&stat)).restored_private();
+    let mode = DirMode::of_destination(entry).restored_private();
     let by_handle = VettedDir::reopen_at(parent)?.set_dir_mode(
         leaf,
         FileIdentity::Known(IdentityKey::of_stat(&stat)?),
@@ -322,14 +321,12 @@ fn restore_owner_access(parent: &File, name: &OsStr) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             rustix::fs::chmodat(parent, name, mode.as_raw_mode(), AtFlags::SYMLINK_NOFOLLOW)?;
             let after = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
-            if IdentityKey::of_stat(&after)? == IdentityKey::of_stat(&stat)? {
-                Ok(())
-            } else {
-                Err(io::Error::new(
+            (IdentityKey::of_stat(&after)? == IdentityKey::of_stat(&stat)?).ok_or_else(|| {
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     "a staged directory was replaced during removal",
-                ))
-            }
+                )
+            })
         }
         other => other,
     }

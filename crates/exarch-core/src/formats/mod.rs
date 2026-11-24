@@ -17,6 +17,7 @@ pub(crate) mod pinned_dir;
 pub(crate) mod reparse;
 pub(crate) mod run_record;
 pub(crate) mod sevenz;
+pub(crate) mod short_name;
 pub(crate) mod source_fault;
 pub(crate) mod spool;
 pub(crate) mod tar;

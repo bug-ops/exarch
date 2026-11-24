@@ -33,6 +33,7 @@ use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
 use crate::formats::run_record::Maker;
+use crate::formats::short_name;
 use crate::formats::source_fault::ReadFaults;
 use crate::formats::target::Admission;
 use crate::formats::target::ExtractTarget;
@@ -178,6 +179,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         let write_mode = if occupancy.is_occupied() {
             let root = self.inner.root();
+            short_name::vet(root, &parent, safe_path.as_path(), leaf)?;
             let action = OccupantPolicy::of(tally.options).on_occupant(
                 EntryShape::File,
                 safe_path.as_path(),

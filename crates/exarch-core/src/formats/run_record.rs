@@ -71,6 +71,25 @@ const RECORD_CAP: usize = 4 * 1024 * 1024;
 /// `existing` (maker unknown) afterwards.
 const DIAGNOSTIC_RECORD_CAP: usize = 16 * 1024;
 
+/// The most bytes of spellings a run remembers as its own (see
+/// [`RunRecord::note_spelling`]), counting [`SPELLING_OVERHEAD`] per entry;
+/// past it nothing is added and the parent is listed again, which stays
+/// correct.
+#[cfg(any(windows, test))]
+const SPELLING_BYTES: usize = 4 * 1024 * 1024;
+
+/// What one remembered spelling costs besides its path bytes.
+#[cfg(any(windows, test))]
+const SPELLING_OVERHEAD: usize = 64;
+
+/// The spellings a run remembers, under a byte budget.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+struct Spellings {
+    paths: HashSet<PathBuf>,
+    bytes: usize,
+}
+
 /// How much a [`RunRecord`] keeps before it saturates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordBudget {
@@ -203,6 +222,10 @@ pub(crate) enum Maker {
 pub(crate) struct RunRecord {
     budget: RecordBudget,
     created: RefCell<Created>,
+    /// Paths, exactly as spelled, whose last name is known to be stored as
+    /// spelled.
+    #[cfg(any(windows, test))]
+    spellings: RefCell<Spellings>,
 }
 
 impl RunRecord {
@@ -211,6 +234,45 @@ impl RunRecord {
         Self {
             budget,
             created: RefCell::default(),
+            #[cfg(any(windows, test))]
+            spellings: RefCell::default(),
+        }
+    }
+
+    /// Remembers that the last name of `rel` is stored exactly as spelled: the
+    /// run created it under that spelling, or the parent listed it. The match
+    /// is on the spelling, not on the entry, so another spelling of the same
+    /// entry is never a hit.
+    #[cfg(any(windows, test))]
+    pub(crate) fn note_spelling(&self, rel: &Path) {
+        let mut spellings = self.spellings.borrow_mut();
+        let cost = rel.as_os_str().len().saturating_add(SPELLING_OVERHEAD);
+        if spellings.bytes.saturating_add(cost) <= SPELLING_BYTES
+            && spellings.paths.insert(rel.to_path_buf())
+        {
+            spellings.bytes = spellings.bytes.saturating_add(cost);
+        }
+    }
+
+    /// Whether [`note_spelling`](Self::note_spelling) holds exactly `rel`.
+    #[cfg(any(windows, test))]
+    pub(crate) fn knows_spelling(&self, rel: &Path) -> bool {
+        self.spellings.borrow().paths.contains(rel)
+    }
+
+    /// Remembers the 8.3-shaped name the run just created as `leaf` at `rel`.
+    #[cfg_attr(
+        not(windows),
+        expect(
+            unused_variables,
+            clippy::unused_self,
+            reason = "only Windows judges short-name spellings"
+        )
+    )]
+    fn note_created_spelling(&self, leaf: Leaf<'_>, rel: &Path) {
+        #[cfg(windows)]
+        if super::short_name::ShortNameShape::of(leaf.as_os_str()).is_some() {
+            self.note_spelling(rel);
         }
     }
 
@@ -222,6 +284,7 @@ impl RunRecord {
     /// A directory is recorded the same way: a duplicate check never skips
     /// one, but a refusal asks whether the run made the occupant.
     pub(crate) fn note(&self, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        self.note_created_spelling(leaf, rel);
         if !self.is_saturated() {
             self.insert(key_of(dir, leaf, rel));
         }
@@ -231,6 +294,7 @@ impl RunRecord {
     /// still holds open: keyed by its handle, so no lookup by name unless the
     /// handle gives no identity, which the lookup by name then classifies.
     pub(crate) fn note_file(&self, file: &File, dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) {
+        self.note_created_spelling(leaf, rel);
         if self.is_saturated() {
             return;
         }
@@ -391,6 +455,7 @@ mod tests {
     use super::key_basis;
     use crate::formats::pinned_dir::support::leaf;
     use crate::formats::pinned_dir::support::pinned_at;
+    use std::path::Path;
 
     fn made_and_foreign() -> (tempfile::TempDir, crate::formats::pinned_dir::VettedDir) {
         let temp = tempfile::tempdir().unwrap();
@@ -653,5 +718,58 @@ mod tests {
         );
         assert_eq!(ExistingFiles::Refuse.record_budget(), RecordBudget::Full);
         assert_eq!(ExistingFiles::Overwrite.record_budget(), RecordBudget::Full);
+    }
+
+    #[test]
+    fn a_remembered_spelling_matches_only_that_exact_spelling() {
+        let record = RunRecord::new(RecordBudget::Full);
+        record.note_spelling(Path::new("d/ABCDEF~1"));
+
+        assert!(record.knows_spelling(Path::new("d/ABCDEF~1")));
+        assert!(!record.knows_spelling(Path::new("d/abcdef~1")));
+        assert!(!record.knows_spelling(Path::new("d/LONGNA~1")));
+        assert!(!record.knows_spelling(Path::new("ABCDEF~1")));
+    }
+
+    #[test]
+    fn remembered_spellings_do_not_depend_on_the_record_budget() {
+        let record = RunRecord::new(RecordBudget::Diagnostic);
+        let path = |index: usize| std::path::PathBuf::from(format!("d/X~{index}"));
+        let count = super::DIAGNOSTIC_RECORD_CAP + 10;
+        for index in 0..count {
+            record.note_spelling(&path(index));
+        }
+
+        assert!(record.knows_spelling(&path(0)));
+        assert!(record.knows_spelling(&path(count - 1)));
+    }
+
+    #[test]
+    fn remembered_spellings_stay_within_the_byte_budget_whatever_the_key_length() {
+        let record = RunRecord::new(RecordBudget::Full);
+        let long = "c".repeat(200);
+        let path = |index: usize| std::path::PathBuf::from(format!("{long}/{long}/X~{index}"));
+        for index in 0..100_000 {
+            record.note_spelling(&path(index));
+        }
+
+        let spellings = record.spellings.borrow();
+        assert!(spellings.bytes <= super::SPELLING_BYTES);
+        let stored: usize = spellings
+            .paths
+            .iter()
+            .map(|p| p.as_os_str().len() + super::SPELLING_OVERHEAD)
+            .sum();
+        assert_eq!(stored, spellings.bytes);
+        assert!(
+            spellings.paths.len() < 100_000,
+            "the budget, not the count, stopped it"
+        );
+        drop(spellings);
+        assert!(record.knows_spelling(&path(0)));
+        assert!(
+            !record.knows_spelling(&path(99_999)),
+            "past the budget the parent is listed again"
+        );
     }
 }

@@ -21,6 +21,23 @@ pub(crate) fn make_fifo(path: &std::path::Path) {
     assert!(status.success(), "mkfifo failed");
 }
 
+/// The 8.3 spelling of `path`, or `None` when the volume has no short names
+/// (they can be disabled per volume).
+#[cfg(windows)]
+pub(crate) fn short_spelling(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::process::CommandExt;
+
+    let output = std::process::Command::new("cmd")
+        .raw_arg(format!(
+            "/C for %I in (\"{}\") do @echo %~sI",
+            path.display()
+        ))
+        .output()
+        .ok()?;
+    let short = std::path::PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+    (short.exists() && short != path).then_some(short)
+}
+
 /// The host's relative path limit, written out per host and independent of the
 /// production constant so a wrong value there is caught.
 #[cfg(target_os = "linux")]

@@ -288,6 +288,7 @@ new persisted or transmitted entity is introduced.
   section mandates `rust-security-maintenance` review for path-validation
   changes)
 - [[MOC-specs]] — all specifications
+- [[changes/short-name-alias]] — open delta: alternate 8.3 spellings of existing entries (FR-007)
 - [[001-security-pipeline/spec]] — parent security pipeline spec covering
   `SafePath`, `validate_path`, symlink/hardlink validation, and quota
   tracking that this finding extends

@@ -1185,6 +1185,7 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY;
     use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
@@ -1403,6 +1404,15 @@ mod imp {
         /// [`FileIdentity::Unknown`] when the volume reports no file id.
         pub(crate) fn identity(&self, name: Leaf<'_>) -> io::Result<Option<FileIdentity>> {
             Ok(self.status(name)?.map(|status| status.identity))
+        }
+
+        /// The names of this directory's entries, as UTF-16 code units.
+        pub(crate) fn names(&self) -> io::Result<Vec<Vec<u16>>> {
+            let listing = nt::reopen_dir(
+                self.0.as_handle(),
+                FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+            )?;
+            nt::list_names(listing.as_handle())
         }
 
         /// There is no handle-to-path resolution here, so a surviving entry is

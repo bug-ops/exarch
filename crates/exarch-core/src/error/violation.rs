@@ -307,6 +307,11 @@ pub enum Violation {
         /// The component, escaped.
         component: Box<str>,
     },
+    /// An existing entry is named by an alternate 8.3 spelling.
+    ShortNameAlias {
+        /// The component, escaped.
+        component: Box<str>,
+    },
     /// A path component contains `:`.
     StreamSeparator {
         /// The component, escaped.
@@ -537,6 +542,7 @@ impl Violation {
             | Self::PathTooLong { .. }
             | Self::UnsafeComponent { .. }
             | Self::TrailingDotOrSpace { .. }
+            | Self::ShortNameAlias { .. }
             | Self::StreamSeparator { .. }
             | Self::LinkTargetEmpty(_)
             | Self::LinkTargetNul(_)
@@ -583,6 +589,7 @@ impl Violation {
             | Self::UnsafeComponent { .. }
             | Self::ReservedDeviceName { .. }
             | Self::TrailingDotOrSpace { .. }
+            | Self::ShortNameAlias { .. }
             | Self::StreamSeparator { .. } => C::PathName,
             Self::PathDepth { .. } | Self::SymlinkTargetDepth { .. } => C::PathDepth,
             Self::LinkTargetEmpty(_)
@@ -680,6 +687,12 @@ impl fmt::Display for Violation {
             }
             Self::TrailingDotOrSpace { component } => {
                 write!(f, "path component ends with '.' or ' ': {component}")
+            }
+            Self::ShortNameAlias { component } => {
+                write!(
+                    f,
+                    "path component is an alternate 8.3 spelling: {component}"
+                )
             }
             Self::StreamSeparator { component } => {
                 write!(f, "path component contains ':': {component}")
@@ -849,6 +862,13 @@ mod tests {
             ),
             (
                 Violation::TrailingDotOrSpace {
+                    component: text("c"),
+                },
+                C::PathName,
+                None,
+            ),
+            (
+                Violation::ShortNameAlias {
                     component: text("c"),
                 },
                 C::PathName,
@@ -1091,7 +1111,7 @@ mod tests {
     /// The text of each `one_of_each` row, in order; byte-identical to the
     /// pre-typing messages (verified by the security audit), and callers match
     /// on them, so a wording change must be a deliberate edit here.
-    const EXPECTED_TEXT: [&str; 48] = [
+    const EXPECTED_TEXT: [&str; 49] = [
         "empty path not allowed",
         "path contains null bytes: p",
         "path contains null bytes - potential security issue",
@@ -1100,6 +1120,7 @@ mod tests {
         "path component is not portable (contains a backslash): c",
         "Windows reserved device name: c",
         "path component ends with '.' or ' ': c",
+        "path component is an alternate 8.3 spelling: c",
         "path component contains ':': c",
         "path depth 2 exceeds maximum 1",
         "symlink target depth 2 exceeds maximum 1",

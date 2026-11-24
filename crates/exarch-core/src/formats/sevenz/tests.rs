@@ -2100,6 +2100,35 @@ fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn an_existing_file_named_by_an_alternate_8_3_spelling_is_not_overwritten() {
+    let temp = TempDir::new().unwrap();
+    let long = temp.path().join("exarchlongfilename.txt");
+    std::fs::write(&long, b"old").unwrap();
+    let Some(short) = crate::test_utils::short_spelling(&long) else {
+        eprintln!("skipping: the volume has no 8.3 names");
+        return;
+    };
+    let alias = short.file_name().unwrap().to_string_lossy().into_owned();
+    let data = make_sevenz_archive(&[(alias.as_str(), b"new")]);
+    let archive = SevenZArchive::new(Cursor::new(data), &SecurityConfig::default()).unwrap();
+    let options = ExtractionOptions {
+        existing_files: crate::ExistingFiles::Overwrite,
+        ..ExtractionOptions::default()
+    };
+
+    let result = archive.extract(temp.path(), &options, &mut crate::NoopProgress);
+
+    std::assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation {
+            kind: Violation::ShortNameAlias { .. }
+        })
+    );
+    assert_eq!(std::fs::read(&long).unwrap(), b"old");
+}
+
 #[test]
 fn top_level_and_nested_files_are_written_through_the_owned_parent() {
     let data = make_sevenz_archive(&[("top.txt", b"top"), ("a/b/deep.txt", b"deep")]);

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core API: `Violation::LinkTargetBannedComponent` carries a `LinkKind` and its message names the link kind (#1348).
 - ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits of ZIP files and the mode of 7z files, so `verify --strict` can exit 3 on archives that passed before (#1312).
 - Core API: a banned path component made only of characters that file name comparison ignores is `ConfigProblem::OnlyIgnoredCharacters`, not `Empty`, in core, CLI, Python and Node (#1363).
+- Core API: new `Violation::ShortNameAlias`; on Windows an existing entry named by an alternate 8.3 spelling is refused in extraction and link targets (PR_PLACEHOLDER).
 
 ### Changed
 

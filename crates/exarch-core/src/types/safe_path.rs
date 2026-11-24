@@ -582,7 +582,7 @@ pub(crate) fn check_component_on(
 
 /// Spells `comp` injectively ([`path_text`](fn@crate::path_text)) with control
 /// characters escaped, for error messages.
-fn escaped_component(comp: &OsStr) -> String {
+pub(crate) fn escaped_component(comp: &OsStr) -> String {
     let mut out = String::new();
     for ch in crate::path_text(std::path::Path::new(comp)).chars() {
         if ch == '\\' {

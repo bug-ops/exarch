@@ -61,6 +61,7 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::short_name;
 use crate::formats::source_fault::ReadFaults;
 use crate::mark::MarkRun;
 #[cfg(unix)]
@@ -784,6 +785,7 @@ fn open_output_slot<'a>(
             }))
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            short_name::vet(root, dir, rel, leaf)?;
             let action = duplicates.on_occupant(
                 EntryShape::File,
                 rel,

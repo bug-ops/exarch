@@ -35,6 +35,7 @@ use crate::formats::occupant::occupied_by;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::short_name;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::PathModel;
@@ -352,7 +353,7 @@ impl<'c> DirWalker<'c> {
     ) -> Result<Hop<'r>> {
         let LinkSite { parent, leaf, .. } = *site;
         let mut err = match parent.open_dir(leaf) {
-            Ok(dir) => return Ok(Hop::plain(dir)),
+            Ok(dir) => return Self::vetted(root, (parent, leaf), walked, dir),
             Err(e) => e,
         };
         if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
@@ -369,8 +370,9 @@ impl<'c> DirWalker<'c> {
                 Ok(dir) => {
                     if made_here {
                         root.mark_created_dir(&dir);
+                        return Ok(Hop::plain(dir));
                     }
-                    return Ok(Hop::plain(dir));
+                    return Self::vetted(root, (parent, leaf), walked, dir);
                 }
                 Err(e) => e,
             };
@@ -382,6 +384,18 @@ impl<'c> DirWalker<'c> {
             }
             Ok(Some(Occupant::Directory) | None) | Err(_) => Err(err.into()),
         }
+    }
+
+    /// The hop onto the opened directory `dir`, refused when its spelling is an
+    /// alternate name.
+    fn vetted<'r>(
+        root: &PinnedRoot,
+        (parent, leaf): (&VettedDir, Leaf<'_>),
+        walked: &Path,
+        dir: VettedDir,
+    ) -> Result<Hop<'r>> {
+        short_name::vet(root, parent, walked, leaf)?;
+        Ok(Hop::plain(dir))
     }
 
     /// Resolves the symlink component `walked` under the active rule.

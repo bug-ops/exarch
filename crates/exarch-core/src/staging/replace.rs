@@ -1033,10 +1033,7 @@ mod displace_tests {
 #[cfg(all(test, windows))]
 #[expect(clippy::unwrap_used, reason = "tests assert by panicking")]
 mod windows_tests {
-    use std::os::windows::process::CommandExt;
-    use std::path::Path;
     use std::path::PathBuf;
-    use std::process::Command;
 
     use tempfile::TempDir;
 
@@ -1045,20 +1042,7 @@ mod windows_tests {
     use crate::formats::file_identity::FileIdentity;
     use crate::formats::file_identity::IdentityCheck;
     use crate::formats::file_identity::identity_of;
-
-    /// The 8.3 spelling of `path`, or `None` when the volume has no short
-    /// names (they can be disabled per volume).
-    fn short_spelling(path: &Path) -> Option<PathBuf> {
-        let output = Command::new("cmd")
-            .raw_arg(format!(
-                "/C for %I in (\"{}\") do @echo %~sI",
-                path.display()
-            ))
-            .output()
-            .ok()?;
-        let short = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
-        (short.exists() && short != path).then_some(short)
-    }
+    use crate::test_utils::short_spelling;
 
     fn long_named_dir(temp: &TempDir) -> PathBuf {
         let dir = temp.path().join("exarchlongdirectoryname");

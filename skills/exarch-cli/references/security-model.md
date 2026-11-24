@@ -11,6 +11,7 @@ Context for explaining refusals. A rejection for any reason here is the pipeline
 - An absolute name or any `..` component in the raw name is `PathTraversal`. A name is absolute on every platform when it starts with `/` or `\` (UNC included) or with a drive letter plus a separator or nothing (`C:\x`, `C:/x`, `C:`). A drive glued to a name (`C:name`) is absolute only on Windows; on Unix `a:notes.txt` is kept as is.
 - An empty entry name or a NUL byte is `SecurityViolation`.
 - Windows only: reserved device-name components (`CON`, `NUL`, `COM1`, ... ASCII case-insensitive, with or without extension), components containing `:` (alternate data streams), ending in dot or space, containing `<>"|?*` or control characters, or not valid Unicode are `SecurityViolation`; the same checks apply to link targets. Only the reserved-device-name check has an opt-out, and only in the Rust API. On other platforms these names are accepted.
+- Windows only: an existing entry named by an alternate 8.3 spelling is `SecurityViolation`, sub-code `PATH_NAME`.
 
 ## Download mark
 

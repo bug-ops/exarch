@@ -43,6 +43,8 @@ use crate::formats::common::errno_is;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::VettedDir;
+use crate::formats::short_name;
+use crate::formats::short_name::Spelling;
 use crate::security::fs_view::LinkBase;
 use crate::security::fs_view::MAX_SYMLINK_HOPS;
 use crate::security::fs_view::Occupant;
@@ -350,7 +352,7 @@ impl<'r> LinkCursor<'r> {
             }
             let leaf = Self::leaf(name)?;
             if let Ok(next) = self.dir()?.open_dir(leaf) {
-                self.push_dir(name, next);
+                self.push_dir(name, next)?;
                 continue;
             }
             match self.probe(leaf)? {
@@ -399,16 +401,31 @@ impl<'r> LinkCursor<'r> {
             .dir()?
             .open_dir(leaf)
             .map_err(|e| Refusal::of_probe(&e))?;
-        self.push_dir(name, next);
-        Ok(())
+        self.push_dir(name, next)
     }
 
-    fn push_dir(&mut self, name: &std::ffi::OsStr, next: VettedDir) {
+    /// Refuses `name`, an existing entry of the current directory, when it
+    /// is spelled as an alternate name: the cursor cannot say where it lands.
+    fn vet_name(&mut self, name: &std::ffi::OsStr) -> Resolution<()> {
+        let leaf = Self::leaf(name)?;
+        let rel = self.position.join(name);
+        let root = self.root;
+        let spelling = short_name::spelling(root, self.dir()?, &rel, leaf)
+            .map_err(|e| Refusal::of_probe(&e))?;
+        match spelling {
+            Spelling::AsListed => Ok(()),
+            Spelling::Alternate => Err(Refusal::Unresolvable),
+        }
+    }
+
+    fn push_dir(&mut self, name: &std::ffi::OsStr, next: VettedDir) -> Resolution<()> {
+        self.vet_name(name)?;
         if let Some(current) = self.dir.replace(next) {
             self.keep_ancestor(current);
         }
         self.position.push(name);
         self.note_held();
+        Ok(())
     }
 
     /// Adds `ancestor` to the window, closing the farthest one when it is full.
@@ -509,8 +526,7 @@ impl<'r> LinkCursor<'r> {
         // Opening first settles the common case, a real directory, in one
         // call; only a failed open is classified with a probe.
         if let Ok(next) = self.dir()?.open_dir(leaf) {
-            self.push_dir(name, next);
-            return Ok(());
+            return self.push_dir(name, next);
         }
         let occupant = self.probe(leaf)?;
         self.settle(name, leaf, occupant)
@@ -525,8 +541,12 @@ impl<'r> LinkCursor<'r> {
     ) -> Resolution<()> {
         match occupant {
             Some(Occupant::Directory) => self.descend(name, leaf),
-            Some(Occupant::Symlink) => self.follow_link(leaf),
+            Some(Occupant::Symlink) => {
+                self.vet_name(name)?;
+                self.follow_link(leaf)
+            }
             Some(Occupant::File) if self.may_end_on_file() => {
+                self.vet_name(name)?;
                 self.tail.push(name.clone());
                 Ok(())
             }

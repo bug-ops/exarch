@@ -2,7 +2,7 @@
 //!
 //! A spelling in the 8.3 short-name shape that the parent directory does not
 //! list under that name is an alternate spelling of another entry, and is
-//! refused. The decision ([`judge`]) is pure and platform-independent; only
+//! refused. The decision (`judge`) is pure and platform-independent; only
 //! listing the parent is Windows-only. Elsewhere a name is its own stored name.
 
 use std::ffi::OsStr;

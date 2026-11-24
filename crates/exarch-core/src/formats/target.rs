@@ -524,7 +524,6 @@ impl ExtractTarget for HostTarget<'_> {
             common::FileWrite {
                 copy_buffer: &mut self.copy_buffer,
                 permit,
-                marking: self.root.marking(),
                 mode,
                 progress: tally.progress,
             },

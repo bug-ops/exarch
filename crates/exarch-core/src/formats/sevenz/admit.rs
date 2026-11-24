@@ -5,7 +5,7 @@ use super::SIGNATURE_HEADER_SIZE;
 use super::header::BlockIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
-use super::header::aes_coders_in_decode_order;
+use super::header::charge_block_keys;
 use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::Limit;
@@ -459,27 +459,20 @@ pub(super) fn admit_aes_coders(
     kdf: &mut KdfRuns,
     graph: bool,
 ) -> std::result::Result<(), Refused> {
-    for aes in aes_coders_in_decode_order(block, graph) {
-        admit_aes_coder(aes, credentials, kdf, graph)?;
-    }
-    Ok(())
+    charge_block_keys(block, graph, |source| {
+        admit_aes_key(source, credentials, kdf)
+    })
 }
 
-/// Admits the AES coder of a block through [`KdfRuns::admit_key`].
+/// Admits one AES key of a block through [`KdfRuns::admit_key`].
 ///
 /// No password is reported by `verify` as [`UnverifiedReason::Encrypted`], like
 /// an AES ZIP entry; every other refusal is not decodable.
-fn admit_aes_coder(
-    coder: &sevenz_rust2::Coder,
+fn admit_aes_key(
+    source: KeySource<'_>,
     credentials: &Credentials,
     kdf: &mut KdfRuns,
-    uncached: bool,
 ) -> std::result::Result<(), Refused> {
-    let source = if uncached {
-        KeySource::Uncached(coder.properties())
-    } else {
-        KeySource::Block(coder.properties())
-    };
     kdf.admit_key(credentials, source)
         .map(drop)
         .map_err(|refusal| {

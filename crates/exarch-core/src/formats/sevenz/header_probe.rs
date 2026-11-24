@@ -27,6 +27,7 @@ use super::SIGNATURE_HEADER_LEN;
 use super::SIGNATURE_HEADER_SIZE;
 use super::admit;
 use super::header::SEVENZ_MAGIC;
+use super::prefetched::PrefetchedHeader;
 use crate::Malformation;
 use crate::SevenZHeaderTable;
 use crate::encryption::kdf;
@@ -154,17 +155,118 @@ enum NextHeader {
 fn next_header<R: Read + Seek>(source: &mut R) -> io::Result<NextHeader> {
     let mut start = [0u8; SIGNATURE_HEADER_LEN];
     source.read_exact(&mut start)?;
-    let offset = le64::<12, SIGNATURE_HEADER_LEN>(&start);
-    let size = le64::<20, SIGNATURE_HEADER_LEN>(&start);
+    Ok(parse_next_header(&start))
+}
+
+fn parse_next_header(start: &[u8; SIGNATURE_HEADER_LEN]) -> NextHeader {
+    let offset = le64::<12, SIGNATURE_HEADER_LEN>(start);
+    let size = le64::<20, SIGNATURE_HEADER_LEN>(start);
     let Some(at) = SIGNATURE_HEADER_SIZE.checked_add(offset) else {
-        return Ok(NextHeader::Foreign);
+        return NextHeader::Foreign;
     };
-    Ok(if start[..6] != SEVENZ_MAGIC {
+    if start[..6] != SEVENZ_MAGIC {
         NextHeader::Foreign
     } else if size == 0 {
         NextHeader::Absent
     } else {
         NextHeader::At { at, size }
+    }
+}
+
+/// What an AES layer adds to the data it encrypts: one block of padding.
+const AES_PADDING: u64 = 16;
+
+/// Why the bytes of an encrypted header could not be fetched.
+#[derive(Debug)]
+pub(super) enum FetchFailure {
+    /// The source failed.
+    Io(io::Error),
+    /// The next-header record or the packed header is over the cap.
+    TooLarge,
+    /// The bytes to hold are over the decoder memory limit.
+    Memory,
+    /// The archive is not laid out the way the probe followed it.
+    Unmodelled,
+}
+
+impl From<io::Error> for FetchFailure {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// An encrypted header read into memory, with the key it declares.
+///
+/// The key mode and parameters are read from the same record bytes that
+/// `bytes` serves to the parser, so what is admitted is what is parsed.
+#[derive(Debug)]
+pub(super) struct EncryptedHeader {
+    pub(super) bytes: PrefetchedHeader,
+    pub(super) mode: KeyMode,
+    pub(super) params: Option<AesParams>,
+}
+
+/// Reads the byte ranges sevenz-rust2 reads to open the encrypted header of
+/// the archive in `source`: the signature header, the encoded-header record
+/// and the packed header.
+///
+/// The key derivation of an encrypted header runs under the process-wide
+/// [`AesTurn`](crate::encryption::kdf::AesTurn); reading these ranges first
+/// keeps the caller's `Read`/`Seek` code out of it. The record and the size
+/// the header decodes to are held to `max_bytes`, the packed header to the
+/// decoded size plus one AES block (to the cap plus one AES block when the
+/// header has other coders), and the record and packed header together to
+/// `memory_bytes`.
+pub(super) fn prefetch_encoded_header<R: Read + Seek>(
+    source: &mut R,
+    max_bytes: u64,
+    memory_bytes: u64,
+) -> Result<EncryptedHeader, FetchFailure> {
+    let length = source.seek(SeekFrom::End(0))?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut start = [0u8; SIGNATURE_HEADER_LEN];
+    source.read_exact(&mut start)?;
+    let NextHeader::At { at, size } = parse_next_header(&start) else {
+        return Err(FetchFailure::Unmodelled);
+    };
+    if size > max_bytes {
+        return Err(FetchFailure::TooLarge);
+    }
+    source.seek(SeekFrom::Start(at))?;
+    let record_bytes = read_bounded(&mut *source, size)?;
+    let record = EncodedRecord::parse(&record_bytes).ok_or(FetchFailure::Unmodelled)?;
+    let (mode, params) = aes_header_key(&record).ok_or(FetchFailure::Unmodelled)?;
+    let (pack_pos, pack_size, unpacked) = (
+        record.pack_pos,
+        record.pack_size,
+        record.largest_unpack_size,
+    );
+    // With AES as the only coder the packed stream is the ciphertext of the
+    // decoded header; with other coders its size depends on the layout, so it
+    // is only held to the cap.
+    let packed_limit = if record.coders.len() == 1 {
+        unpacked
+    } else {
+        max_bytes
+    };
+    if unpacked > max_bytes || pack_size > packed_limit.saturating_add(AES_PADDING) {
+        return Err(FetchFailure::TooLarge);
+    }
+    if size.saturating_add(pack_size) > memory_bytes {
+        return Err(FetchFailure::Memory);
+    }
+    let pack_start = SIGNATURE_HEADER_SIZE
+        .checked_add(pack_pos)
+        .ok_or(FetchFailure::Unmodelled)?;
+    source.seek(SeekFrom::Start(pack_start))?;
+    let packed = read_bounded(&mut *source, pack_size)?;
+    Ok(EncryptedHeader {
+        bytes: PrefetchedHeader::new(length)
+            .with_part(0, SIGNATURE_HEADER_SIZE, start.to_vec())
+            .with_part(at, size, record_bytes)
+            .with_part(pack_start, pack_size, packed),
+        mode,
+        params,
     })
 }
 
@@ -282,25 +384,7 @@ fn decode_header<R: Read + Seek>(
     max_bytes: u64,
     memory_kib: usize,
 ) -> Result<Vec<u8>, Stop> {
-    let mut aes = record.coders.iter().filter(|coder| coder.id == METHOD_AES);
-    if let Some(first) = aes.next() {
-        let raw_key = std::iter::once(first)
-            .chain(aes)
-            .any(|coder| kdf::key_mode(coder.properties) == Some(KeyMode::RawKey));
-        let key = if raw_key {
-            KeyMode::RawKey
-        } else {
-            KeyMode::Derived
-        };
-        let only_aes = record
-            .coders
-            .iter()
-            .filter(|coder| coder.id == METHOD_AES)
-            .count()
-            == 1;
-        let params = (only_aes && record.chain_complete && key == KeyMode::Derived)
-            .then(|| AesParams::parse(first.properties))
-            .flatten();
+    if let Some((key, params)) = aes_header_key(record) {
         return Err(Stop::Refused(Refusal::Encrypted(key, params)));
     }
     let decoded = record.decoded().ok_or(Stop::Unmodelled)?;
@@ -333,6 +417,32 @@ fn decode_header<R: Read + Seek>(
         }
         _ => Err(Stop::Unmodelled),
     }
+}
+
+/// The key an encoded-header record declares, or `None` when none of its
+/// coders is AES: its mode, and its parameters when the header has exactly one
+/// AES coder with a derived key.
+fn aes_header_key(record: &EncodedRecord<'_>) -> Option<(KeyMode, Option<AesParams>)> {
+    let mut aes = record.coders.iter().filter(|coder| coder.id == METHOD_AES);
+    let first = aes.next()?;
+    let raw_key = std::iter::once(first)
+        .chain(aes)
+        .any(|coder| kdf::key_mode(coder.properties) == Some(KeyMode::RawKey));
+    let key = if raw_key {
+        KeyMode::RawKey
+    } else {
+        KeyMode::Derived
+    };
+    let only_aes = record
+        .coders
+        .iter()
+        .filter(|coder| coder.id == METHOD_AES)
+        .count()
+        == 1;
+    let params = (only_aes && record.chain_complete && key == KeyMode::Derived)
+        .then(|| AesParams::parse(first.properties))
+        .flatten();
+    Some((key, params))
 }
 
 /// Whether the chain from the packed stream `start`, following the bind pairs
@@ -1333,5 +1443,182 @@ mod tests {
             HeaderEntries::NotApplicable
         );
         assert_eq!(declared_entries(read(&bytes, size, MEMORY_KIB)), Some(3));
+    }
+
+    fn signature(offset: u64, size: u64) -> Vec<u8> {
+        let mut bytes = SEVENZ_MAGIC.to_vec();
+        bytes.extend_from_slice(&[0, 4, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes
+    }
+
+    #[cfg(feature = "encryption")]
+    fn encrypted_header_archive() -> Vec<u8> {
+        use sevenz_rust2::EncoderMethod;
+        use sevenz_rust2::encoder_options::AesEncoderOptions;
+
+        let mut options = AesEncoderOptions::new(Password::new("pw"));
+        options.num_cycles_power = 8;
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer.set_encrypt_header(true);
+        writer.set_content_methods(vec![options.into(), EncoderMethod::COPY.into()]);
+        for index in 0..60 {
+            let mut entry =
+                ArchiveEntry::new_file(&format!("directory/file-with-a-long-name-{index}"));
+            entry.has_stream = true;
+            entry.size = 4;
+            writer
+                .push_archive_entry(
+                    entry,
+                    Some(SourceReader::from(Cursor::new(b"data".to_vec()))),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn a_prefetch_holds_the_ranges_an_encrypted_header_is_opened_from() {
+        let bytes = encrypted_header_archive();
+        let mut view = prefetch_encoded_header(&mut Cursor::new(&bytes), u64::MAX / 4, u64::MAX)
+            .unwrap()
+            .bytes;
+        let archive =
+            Archive::read_with_memory_limit(&mut view, &Password::new("pw"), MEMORY_KIB).unwrap();
+        assert_eq!(archive.files.len(), 60);
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn a_record_over_the_cap_is_refused() {
+        let bytes = encrypted_header_archive();
+        let record =
+            le64::<20, SIGNATURE_HEADER_LEN>(bytes[..SIGNATURE_HEADER_LEN].try_into().unwrap());
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(&bytes), record - 1, ROOMY),
+            Err(FetchFailure::TooLarge)
+        );
+    }
+
+    #[test]
+    fn the_packed_header_is_held_to_the_decoded_size_plus_one_aes_block() {
+        let fetch = |pack: u8, decoded: u8| {
+            let record = record_of(&[(METHOD_AES, &[19, 0])], pack, decoded);
+            let packed = vec![0u8; usize::from(pack)];
+            prefetch_encoded_header(
+                &mut Cursor::new(archive_with_record(&packed, &record)),
+                ROOMY,
+                ROOMY,
+            )
+        };
+        assert!(fetch(21, 5).is_ok());
+        assert_matches!(fetch(22, 5), Err(FetchFailure::TooLarge));
+        assert_matches!(fetch(100, 5), Err(FetchFailure::TooLarge));
+    }
+
+    #[test]
+    fn the_buffered_header_counts_against_the_memory_limit() {
+        let record = record_of(&[(METHOD_AES, &[19, 0])], 21, 5);
+        let buffered = record.len() as u64 + 21;
+        let fetch = |memory: u64| {
+            prefetch_encoded_header(
+                &mut Cursor::new(archive_with_record(&[0; 21], &record)),
+                ROOMY,
+                memory,
+            )
+        };
+        assert!(fetch(buffered).is_ok());
+        assert_matches!(fetch(buffered - 1), Err(FetchFailure::Memory));
+    }
+
+    fn record_with_aes(properties: &[u8]) -> Vec<u8> {
+        record_of(&[(METHOD_AES, properties)], 21, 5)
+    }
+
+    #[test]
+    fn the_key_comes_from_the_record_that_is_parsed() {
+        let derived = record_with_aes(&[19, 0]);
+        let raw = record_with_aes(&[0x3F, 0]);
+        let key = |record: &[u8]| {
+            prefetch_encoded_header(
+                &mut Cursor::new(archive_with_record(&[0; 21], record)),
+                ROOMY,
+                ROOMY,
+            )
+            .map(|fetched| (fetched.mode, fetched.params.is_some()))
+        };
+        assert_matches!(key(&derived), Ok((KeyMode::Derived, true)));
+        assert_matches!(key(&raw), Ok((KeyMode::RawKey, false)));
+    }
+
+    #[test]
+    fn a_packed_header_of_several_coders_is_held_to_the_cap_plus_one_aes_block() {
+        let fetch = |pack: u8| {
+            let record = record_of(&[(METHOD_LZMA2, &[1]), (METHOD_AES, &[19, 0])], pack, 5);
+            let packed = vec![0u8; usize::from(pack)];
+            prefetch_encoded_header(
+                &mut Cursor::new(archive_with_record(&packed, &record)),
+                60,
+                ROOMY,
+            )
+        };
+        assert!(fetch(76).is_ok());
+        assert_matches!(fetch(77), Err(FetchFailure::TooLarge));
+    }
+
+    #[test]
+    fn a_decoded_size_over_the_cap_is_refused() {
+        let record = record_of(&[(METHOD_AES, &[19, 0])], 5, 100);
+        assert_matches!(
+            prefetch_encoded_header(
+                &mut Cursor::new(archive_with_record(&[0; 5], &record)),
+                50,
+                ROOMY
+            ),
+            Err(FetchFailure::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_declared_record_over_the_cap_is_refused_before_it_is_read() {
+        let mut source = signature(0, 1 << 40);
+        source.extend_from_slice(&[0; 8]);
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(source), ROOMY, ROOMY),
+            Err(FetchFailure::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_layout_the_probe_does_not_follow_is_unmodelled() {
+        let mut plain = signature(0, 1);
+        plain.push(K_HEADER);
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(plain), ROOMY, ROOMY),
+            Err(FetchFailure::Unmodelled),
+            "a plain header is not an encoded record"
+        );
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(EMPTY), ROOMY, ROOMY),
+            Err(FetchFailure::Unmodelled),
+            "no next header"
+        );
+        let mut foreign = signature(0, 8);
+        foreign[0] ^= 0xFF;
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(foreign), ROOMY, ROOMY),
+            Err(FetchFailure::Unmodelled)
+        );
+    }
+
+    #[test]
+    fn a_failing_source_is_an_io_failure() {
+        assert_matches!(
+            prefetch_encoded_header(&mut Cursor::new(vec![1, 2, 3]), ROOMY, ROOMY),
+            Err(FetchFailure::Io(_))
+        );
     }
 }

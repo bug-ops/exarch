@@ -177,10 +177,11 @@ impl VerifiedStage {
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
             return refuse("is not a directory");
         }
-        if stat.st_uid != rustix::process::geteuid().as_raw() {
+        let entry = EntryMode::of_stat(&stat);
+        if !entry.is_owned_by_caller() {
             return refuse("is owned by another user");
         }
-        let mode = DirMode::of_destination(EntryMode::of_stat(&stat));
+        let mode = DirMode::of_destination(entry);
         if !mode.is_owner_only() {
             return refuse("is accessible to other users");
         }
@@ -289,10 +290,7 @@ fn unopenable_error(parent: &VettedDir, name: &LeafBuf, error: io::Error) -> io:
     let stripped_mode = (error.kind() == io::ErrorKind::PermissionDenied)
         .then(|| parent.status(name.as_leaf()).ok().flatten())
         .flatten()
-        .filter(|status| {
-            status.occupant == Occupant::Directory
-                && status.mode.uid().get() == rustix::process::geteuid().as_raw()
-        })
+        .filter(|status| status.occupant == Occupant::Directory && status.mode.is_owned_by_caller())
         .map(|status| DirMode::of_destination(status.mode))
         .filter(|mode| mode.is_owner_only() && !mode.owner_has_full_access());
     let _ = parent.remove_dir(name.as_leaf());
@@ -1013,8 +1011,8 @@ impl StagingDir {
     #[cfg(target_os = "macos")]
     pub(super) fn keep_own_after_adoption(&mut self, own: Option<OwnContents>) {
         let closed = rustix::fs::fstat(self.pin.as_file()).is_ok_and(|stat| {
-            stat.st_uid == rustix::process::geteuid().as_raw()
-                && u32::from(stat.st_mode) & 0o022 == 0
+            let mode = EntryMode::of_stat(&stat);
+            mode.is_owned_by_caller() && !DirMode::of_destination(mode).has_foreign_write()
         }) && super::acl::only_inherit_entries(self.pin.as_file());
         self.own = own.filter(|_| closed);
     }

@@ -113,6 +113,12 @@ mod imp {
             self.0 & 0o077 == 0
         }
 
+        /// Whether group or world can write.
+        #[cfg(target_os = "macos")]
+        pub(in crate::staging) const fn has_foreign_write(self) -> bool {
+            self.0 & 0o022 != 0
+        }
+
         /// Whether the owner has read, write and search access.
         pub(in crate::staging) const fn owner_has_full_access(self) -> bool {
             self.0 & Self::PRIVATE.0 == Self::PRIVATE.0
@@ -732,6 +738,30 @@ mod dir_mode_tests {
     use crate::formats::pinned_dir::Uid;
 
     const ALL_BITS: EntryMode = EntryMode::for_test(0o7777, Uid::from_raw(1), Gid::from_raw(1));
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreign_write_is_group_or_world_write_whatever_else_is_set() {
+        let of = |bits| {
+            DirMode::of_destination(EntryMode::for_test(
+                bits,
+                Uid::from_raw(1),
+                Gid::from_raw(1),
+            ))
+        };
+
+        for bits in [0o700, 0o755, 0o750, 0o1755, 0o2755, 0o4755, 0o0] {
+            assert!(!of(bits).has_foreign_write(), "{bits:o}");
+        }
+        for bits in [0o720, 0o702, 0o722, 0o777, 0o1777, 0o2770, 0o3777] {
+            assert!(of(bits).has_foreign_write(), "{bits:o}");
+        }
+        assert!(
+            !of(0o7777)
+                .without(DirBits::ForeignWriteAndSetgid)
+                .has_foreign_write()
+        );
+    }
 
     #[test]
     fn a_destination_mode_never_carries_setuid() {

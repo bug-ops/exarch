@@ -376,7 +376,11 @@ describe('SecurityConfig', () => {
       for (const raw of ['\u200c', '\ufeff\u200d']) {
         assert.throws(
           () => config.addBannedComponent(raw),
-          { code: 'INVALID_CONFIGURATION', setting: 'banned_path_component' },
+          {
+            code: 'INVALID_CONFIGURATION',
+            setting: 'banned_path_component',
+            message: /only of characters that file name comparison ignores/,
+          },
           raw
         );
       }

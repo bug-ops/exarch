@@ -229,6 +229,9 @@ pub enum ConfigProblem {
     BlankOrControl,
     /// The entry starts or ends with whitespace or control characters.
     PaddedWithBlank,
+    /// The entry consists only of characters that file name comparison
+    /// ignores, so it can never name a component.
+    OnlyIgnoredCharacters,
     /// The entry contains a path separator.
     ContainsSeparator,
     /// The extension has an inner dot.
@@ -431,6 +434,9 @@ impl fmt::Display for ConfigProblem {
             }
             Self::PaddedWithBlank => {
                 f.write_str("must not start or end with whitespace or control characters")
+            }
+            Self::OnlyIgnoredCharacters => {
+                f.write_str("must not consist only of characters that file name comparison ignores")
             }
             Self::ContainsSeparator => f.write_str("must not contain a path separator"),
             Self::InnerDot => f.write_str(

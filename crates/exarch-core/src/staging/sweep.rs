@@ -44,6 +44,7 @@ use super::remove::Trail;
 use super::remove::Visit;
 use super::remove::walk;
 use crate::formats::file_identity::IdentityKey;
+use crate::formats::pinned_dir::EntryMode;
 use crate::formats::pinned_dir::open_directory_at;
 use crate::formats::run_record::RunRecord;
 
@@ -224,14 +225,10 @@ impl<'a> Sweep<'a> {
 /// and nothing the run did not create is touched.
 fn cleared_own_entry(file: &File, ledger: &RunRecord) -> bool {
     rustix::fs::fstat(file).is_ok_and(|stat| {
-        is_owned_by_caller(&stat)
+        EntryMode::of_stat(&stat).is_owned_by_caller()
             && IdentityKey::of_stat(&stat).is_ok_and(|key| ledger.created_with(key))
     }) && acl::only_inherited_entries(file)
         && acl::CopiedAcl::clear(file).is_ok()
-}
-
-fn is_owned_by_caller(stat: &Stat) -> bool {
-    stat.st_uid == rustix::process::geteuid().as_raw()
 }
 
 /// Opens a file that is not a directory without reading, writing or blocking

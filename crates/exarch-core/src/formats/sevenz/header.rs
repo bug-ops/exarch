@@ -9,9 +9,11 @@
 //! blocks, is closed in `SevenZHeader::check`.
 
 use super::header_probe::DeclaredHeader;
+use super::header_probe::FetchFailure;
 use super::header_probe::HeaderEntries;
 use super::header_probe::Refusal;
 use super::header_probe::header_entries;
+use super::header_probe::prefetch_encoded_header;
 use super::header_probe::probe;
 use crate::ArchiveError;
 use crate::EncryptionRefusal;
@@ -20,11 +22,13 @@ use crate::QuotaResource;
 use crate::Result;
 use crate::Violation;
 use crate::encryption::Credentials;
+use crate::encryption::kdf::AesTurn;
 use crate::encryption::kdf::KdfRepeatExceeded;
 use crate::encryption::kdf::KdfRuns;
 use crate::encryption::kdf::KeyMode;
 use crate::encryption::kdf::KeySource;
 use crate::encryption::kdf::SlotWatch;
+use crate::encryption::kdf::lock_unpoisoned;
 use crate::encryption::kdf::with_header_key;
 use crate::formats::common;
 use crate::formats::io_marker::IoMarker;
@@ -197,7 +201,7 @@ impl SevenZHeader {
     }
 
     /// Registers the key set-up of AES block `index`, decoded with `password`,
-    /// to be called holding the `AesTurn` before the block's decoder is built.
+    /// under `turn` before the block's decoder is built.
     ///
     /// Charges the derivation again when another operation used the shared
     /// key slot since this operation's last block.
@@ -210,6 +214,7 @@ impl SevenZHeader {
     /// way, so no pass can go on deriving past the budget.
     pub(crate) fn enter_aes_block(
         &self,
+        turn: &mut AesTurn,
         index: BlockIndex,
         password: &Password,
     ) -> std::io::Result<()> {
@@ -218,19 +223,15 @@ impl SevenZHeader {
         }
         let block = self.block(index);
         let (charged, repeated) = {
-            let mut watch = self
-                .key_use
-                .watch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut watch = lock_unpoisoned(&self.key_use.watch);
             if self.block_walks_graph(index) {
-                watch.enter_unordered_block();
+                watch.enter_unordered_block(turn);
                 return Ok(());
             }
             let coders = reached_aes_coders(block)
                 .into_iter()
                 .map(sevenz_rust2::Coder::properties);
-            let charged = watch.enter_block(coders, password.as_slice());
+            let charged = watch.enter_block(turn, coders, password.as_slice());
             (charged, watch.repeated())
         };
         if charged == 0 {
@@ -247,19 +248,16 @@ impl SevenZHeader {
         Ok(())
     }
 
-    /// The work admission charges for this archive, as `KdfRuns` counts it.
+    /// The work admission charges for this archive, through the same walk
+    /// admission uses ([`charge_block_keys`]).
     fn admitted_kdf_work(&self) -> u64 {
         let mut runs = KdfRuns::new(self.kdf_budget, self.header_encrypted);
         for (position, block) in self.archive.blocks.iter().enumerate() {
-            let index = BlockIndex(position);
-            let graph = self.block_walks_graph(index);
-            for coder in aes_coders_in_decode_order(block, graph) {
-                let _refusal_is_reported_by_admission = if graph {
-                    runs.admit_uncached(coder.properties())
-                } else {
-                    runs.admit(coder.properties())
-                };
-            }
+            let graph = self.block_walks_graph(BlockIndex(position));
+            let _ = charge_block_keys(block, graph, |source| {
+                let _refusal_is_reported_by_admission = runs.admit_source(source);
+                Ok::<(), !>(())
+            });
         }
         runs.spent()
     }
@@ -292,6 +290,24 @@ impl SevenZHeader {
     /// Whether the block holds AES-encrypted content.
     pub(crate) fn is_block_encrypted(&self, index: BlockIndex) -> bool {
         block_is_encrypted(self.block(index))
+    }
+
+    /// Whether the block is a plain chain whose only AES coder is the first one
+    /// the decoder builds, so that the key is derived before the decoder
+    /// calls the source.
+    pub(crate) fn aes_coder_leads_block(&self, index: BlockIndex) -> bool {
+        let block = self.block(index);
+        !self.block_walks_graph(index)
+            && block
+                .coders
+                .iter()
+                .filter(|coder| is_aes_coder(coder))
+                .count()
+                == 1
+            && block
+                .ordered_coder_iter()
+                .next()
+                .is_some_and(|(_, coder)| is_aes_coder(coder))
     }
 
     /// The password block decoding passes to `sevenz-rust2`.
@@ -530,11 +546,33 @@ pub(super) fn aes_coders_in_decode_order(block: &Block, graph: bool) -> Vec<&sev
     ordered
 }
 
+/// Charges the AES keys of `block` through `charge`, in the order and with the
+/// cache semantics admission and the runtime repeat check both rely on: decode
+/// order with [`KeySource::Block`] for a chain, listed order with
+/// [`KeySource::Uncached`] for a `graph` block. The one statement of the KDF
+/// accounting walk.
+///
+/// # Errors
+///
+/// The first error `charge` returns.
+pub(super) fn charge_block_keys<E>(
+    block: &Block,
+    graph: bool,
+    mut charge: impl FnMut(KeySource<'_>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    for coder in aes_coders_in_decode_order(block, graph) {
+        let properties = coder.properties();
+        charge(if graph {
+            KeySource::Uncached(properties)
+        } else {
+            KeySource::Block(properties)
+        })?;
+    }
+    Ok(())
+}
+
 fn block_is_encrypted(block: &Block) -> bool {
-    block
-        .coders
-        .iter()
-        .any(|coder| coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256)
+    block.coders.iter().any(is_aes_coder)
 }
 
 /// Header entries allowed on top of `max_file_count`: entries extraction does
@@ -695,6 +733,7 @@ pub(crate) fn open_sevenz_header<R: Read + Seek>(
     };
     let mut header_password = None;
     let mut header_key = None;
+    let mut prefetched = None;
     match header_entries(source, cap.bytes().get(), kib(limit.memory)) {
         HeaderEntries::Declared(tables) if tables.entries() > limit.entries => {
             return Err(ArchiveError::QuotaExceeded {
@@ -714,9 +753,16 @@ pub(crate) fn open_sevenz_header<R: Read + Seek>(
                 detail: "unsupported header layout: the number of entries cannot be read".into(),
             }));
         }
-        HeaderEntries::Refused(Refusal::Encrypted(mode, params)) => {
-            header_password = Some(admit_encrypted_header(credentials, limit, mode)?);
-            header_key = params;
+        HeaderEntries::Refused(Refusal::Encrypted(mode, _)) => {
+            // Refuse early, before any more of the source is read.
+            drop(admit_encrypted_header(credentials, limit, mode)?);
+            let fetched = prefetch_encoded_header(source, cap.bytes().get(), limit.memory.get())
+                .map_err(|failure| fetch_failure(failure, cap, limit))?;
+            // The parse runs on these bytes, so the key admitted is the one
+            // they declare, not the one the probe saw on its own read.
+            header_password = Some(admit_encrypted_header(credentials, limit, fetched.mode)?);
+            header_key = fetched.params;
+            prefetched = Some(fetched.bytes);
         }
         HeaderEntries::Refused(Refusal::Memory) => {
             return Err(HeaderCap::Memory(limit.memory).refusal());
@@ -727,18 +773,21 @@ pub(crate) fn open_sevenz_header<R: Read + Seek>(
     let password = header_password.unwrap_or_else(Password::empty);
     source.seek(SeekFrom::Start(0)).map_err(ArchiveError::Io)?;
     let tap = SourceTap::default();
-    let mut read = || {
-        Archive::read_with_memory_limit(
-            &mut SourceRead::new(&mut *source, tap.clone()),
-            &password,
-            kib(parse_limit.bytes()),
-        )
-    };
-    let parsed = if header_encrypted {
-        with_header_key(header_key, password.as_slice(), read)
-    } else {
-        read()
-    };
+    let memory_kib = kib(parse_limit.bytes());
+    let parsed = prefetched.map_or_else(
+        || {
+            Archive::read_with_memory_limit(
+                &mut SourceRead::new(&mut *source, tap.clone()),
+                &password,
+                memory_kib,
+            )
+        },
+        |mut bytes| {
+            with_header_key(header_key, password.as_slice(), || {
+                Archive::read_with_memory_limit(&mut bytes, &password, memory_kib)
+            })
+        },
+    );
     match parsed {
         Ok(archive) => {
             let declared = u64::try_from(archive.files.len()).unwrap_or(u64::MAX);
@@ -767,6 +816,19 @@ pub(crate) fn read_sevenz_header<R: Read + Seek>(
     limit: HeaderLimit,
 ) -> Result<SevenZHeader> {
     open_sevenz_header(source, limit, &Credentials::default())
+}
+
+/// The error for an encrypted header whose bytes could not be fetched before
+/// the parse.
+fn fetch_failure(failure: FetchFailure, cap: HeaderCap, limit: HeaderLimit) -> ArchiveError {
+    match failure {
+        FetchFailure::Io(error) => ArchiveError::Io(error),
+        FetchFailure::TooLarge => cap.refusal(),
+        FetchFailure::Memory => HeaderCap::Memory(limit.memory).refusal(),
+        FetchFailure::Unmodelled => ArchiveError::from(Malformation::SevenZHeaderUnreadable {
+            detail: "unsupported header layout: the encrypted header cannot be read".into(),
+        }),
+    }
 }
 
 fn encryption_refusal(reason: EncryptionRefusal) -> ArchiveError {
@@ -907,19 +969,22 @@ mod tests {
         let decoded = by_salt(aes_coders_in_decode_order(block, false));
         assert_eq!(listed.len(), 2);
         assert_eq!(decoded, listed);
+        assert!(
+            !header.aes_coder_leads_block(BlockIndex::first()),
+            "two AES coders do not let the turn go early"
+        );
     }
 
     #[cfg(feature = "encryption")]
     #[test]
     fn a_kdf_refusal_stays_in_force_for_the_rest_of_the_operation() {
-        use crate::encryption::kdf::AesTurn;
         use crate::encryption::kdf::SlotWatch;
         use sevenz_rust2::ArchiveEntry;
         use sevenz_rust2::ArchiveWriter;
         use sevenz_rust2::EncoderMethod;
         use sevenz_rust2::encoder_options::AesEncoderOptions;
 
-        let _turn = AesTurn::acquire();
+        let mut turn = AesTurn::acquire();
 
         let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
         options.salt = [1; 16];
@@ -950,12 +1015,20 @@ mod tests {
         let password = header.block_password();
         let mut other_operation = SlotWatch::default();
 
-        assert!(header.enter_aes_block(blocks[0], &password).is_ok());
-        other_operation.enter_block([&[11u8, 0][..]], password.as_slice());
-        let refused = header.enter_aes_block(blocks[1], &password).unwrap_err();
+        assert!(
+            header
+                .enter_aes_block(&mut turn, blocks[0], &password)
+                .is_ok()
+        );
+        other_operation.enter_block(&mut turn, [&[11u8, 0][..]], password.as_slice());
+        let refused = header
+            .enter_aes_block(&mut turn, blocks[1], &password)
+            .unwrap_err();
         assert!(KdfRepeatExceeded::find(&refused).is_some());
         for &block in &blocks[2..] {
-            let later = header.enter_aes_block(block, &password).unwrap_err();
+            let later = header
+                .enter_aes_block(&mut turn, block, &password)
+                .unwrap_err();
             assert!(KdfRepeatExceeded::find(&later).is_some());
         }
     }
@@ -963,14 +1036,13 @@ mod tests {
     #[cfg(feature = "encryption")]
     #[test]
     fn a_block_the_chain_does_not_cover_is_a_graph_charged_in_full_with_an_unknown_mirror() {
-        use crate::encryption::kdf::AesTurn;
         use crate::encryption::kdf::SlotWatch;
         use sevenz_rust2::ArchiveEntry;
         use sevenz_rust2::ArchiveWriter;
         use sevenz_rust2::EncoderMethod;
         use sevenz_rust2::encoder_options::AesEncoderOptions;
 
-        let _turn = AesTurn::acquire();
+        let mut turn = AesTurn::acquire();
         let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
         options.salt = [7; 16];
         options.num_cycles_power = 10;
@@ -1016,13 +1088,19 @@ mod tests {
         let password = Password::new("pw");
         let held = [11u8, 0];
         let mut probe = SlotWatch::default();
-        assert_eq!(probe.enter_block([&held[..]], password.as_slice()), 0);
+        assert_eq!(
+            probe.enter_block(&mut turn, [&held[..]], password.as_slice()),
+            0
+        );
         assert!(
             header
-                .enter_aes_block(BlockIndex::first(), &password)
+                .enter_aes_block(&mut turn, BlockIndex::first(), &password)
                 .is_ok()
         );
-        assert_eq!(probe.enter_block([&held[..]], password.as_slice()), 1 << 11);
+        assert_eq!(
+            probe.enter_block(&mut turn, [&held[..]], password.as_slice()),
+            1 << 11
+        );
     }
 
     /// The wiring that decides when a block is charged and recorded as a coder
@@ -1030,7 +1108,6 @@ mod tests {
     #[cfg(feature = "encryption")]
     mod graph_wiring {
         use super::*;
-        use crate::encryption::kdf::AesTurn;
         use crate::encryption::kdf::KdfRuns;
         use crate::encryption::kdf::SlotWatch;
         use crate::formats::sevenz::admit::admit_aes_coders;
@@ -1074,6 +1151,14 @@ mod tests {
                 .unwrap()
         }
 
+        fn first_salt() -> u8 {
+            std::process::id().to_le_bytes()[0]
+        }
+
+        fn second_salt() -> u8 {
+            !first_salt()
+        }
+
         fn aes(salt: u8) -> Coder {
             coder_with(EncoderMethod::ID_AES256_SHA256, &writer_block(salt))
         }
@@ -1110,13 +1195,70 @@ mod tests {
             admit_aes_coders(block, &credentials(), runs, graph).unwrap();
         }
 
+        #[test]
+        fn admission_and_the_runtime_replay_charge_the_same_keys() {
+            let block = block_of(vec![
+                aes(first_salt()),
+                aes(first_salt()),
+                aes(second_salt()),
+            ]);
+
+            for graph in [false, true] {
+                let mut visited = 0;
+                charge_block_keys(&block, graph, |source| {
+                    assert_eq!(matches!(source, KeySource::Uncached(_)), graph);
+                    visited += 1;
+                    Ok::<(), !>(())
+                })
+                .unwrap();
+                assert_eq!(visited, 3);
+            }
+
+            let mut chain = KdfRuns::new(NonZeroU64::MAX, false);
+            spent_by(&block, false, &mut chain);
+            assert_eq!(chain.spent(), 2 << POWER, "a repeated key is charged once");
+
+            let mut graph = KdfRuns::new(NonZeroU64::MAX, false);
+            spent_by(&block, true, &mut graph);
+            assert_eq!(graph.spent(), 3 << POWER, "a graph charges every coder");
+
+            let mut archive = Archive::default();
+            archive.blocks = vec![block];
+            let header = SevenZHeader::assume_checked(archive);
+            assert!(header.block_walks_graph(BlockIndex::first()));
+            assert_eq!(header.admitted_kdf_work(), graph.spent());
+        }
+
+        #[test]
+        fn a_block_off_the_chain_or_without_aes_does_not_lead_with_aes() {
+            let leads = |coders: Vec<Coder>| {
+                let mut archive = Archive::default();
+                archive.blocks = vec![block_of(coders)];
+                SevenZHeader::assume_checked(archive).aes_coder_leads_block(BlockIndex::first())
+            };
+            assert!(!leads(vec![]));
+            assert!(!leads(vec![aes(first_salt())]));
+        }
+
+        #[test]
+        fn the_walk_stops_at_the_first_refusal() {
+            let block = block_of(vec![aes(first_salt()), aes(second_salt())]);
+            let mut visited = 0;
+            let result = charge_block_keys(&block, false, |_| {
+                visited += 1;
+                Err("refused")
+            });
+            assert_eq!(result, Err("refused"));
+            assert_eq!(visited, 1);
+        }
+
         /// A multi-input coder, in the shapes the wiring must treat as a graph:
         /// BCJ2 on one pack stream, and an ordinary coder in a block no chain
         /// covers.
         fn graph_blocks() -> Vec<Block> {
             vec![
-                block_of(vec![bcj2(), aes(1), aes(1)]),
-                block_of(vec![copy(), aes(1), aes(1)]),
+                block_of(vec![bcj2(), aes(first_salt()), aes(first_salt())]),
+                block_of(vec![copy(), aes(first_salt()), aes(first_salt())]),
             ]
         }
 
@@ -1141,12 +1283,12 @@ mod tests {
             for block in graph_blocks() {
                 assert!(walks_coder_graph(&block, 1));
             }
-            let ordered = block_of(vec![bcj2(), aes(1), aes(2)]);
+            let ordered = block_of(vec![bcj2(), aes(first_salt()), aes(second_salt())]);
             let salts: Vec<u8> = aes_coders_in_decode_order(&ordered, true)
                 .iter()
                 .map(|coder| coder.properties()[2])
                 .collect();
-            assert_eq!(salts, [1, 2]);
+            assert_eq!(salts, [first_salt(), second_salt()]);
         }
 
         #[test]
@@ -1156,7 +1298,7 @@ mod tests {
                 let mut graph = KdfRuns::new(NonZeroU64::MAX, false);
                 spent_by(&block, true, &mut graph);
                 assert_eq!(graph.spent(), 2 << POWER);
-                spent_by(&block_of(vec![aes(1)]), false, &mut graph);
+                spent_by(&block_of(vec![aes(first_salt())]), false, &mut graph);
                 assert_eq!(graph.spent(), 3 << POWER);
 
                 let mut chain = KdfRuns::new(NonZeroU64::MAX, false);
@@ -1171,7 +1313,7 @@ mod tests {
 
         #[test]
         fn the_replay_and_the_set_up_of_a_graph_block_follow_the_same_rule() {
-            let _turn = AesTurn::acquire();
+            let mut turn = AesTurn::acquire();
             let password = Password::new("pw");
             let held = [11u8, 0];
             for block in graph_blocks() {
@@ -1182,15 +1324,181 @@ mod tests {
                 assert_eq!(header.admitted_kdf_work(), 2 << POWER);
 
                 let mut probe = SlotWatch::default();
-                assert_eq!(probe.enter_block([&held[..]], password.as_slice()), 0);
+                assert_eq!(
+                    probe.enter_block(&mut turn, [&held[..]], password.as_slice()),
+                    0
+                );
                 assert!(
                     header
-                        .enter_aes_block(BlockIndex::first(), &password)
+                        .enter_aes_block(&mut turn, BlockIndex::first(), &password)
                         .is_ok()
                 );
-                assert_eq!(probe.enter_block([&held[..]], password.as_slice()), 1 << 11);
+                assert_eq!(
+                    probe.enter_block(&mut turn, [&held[..]], password.as_slice()),
+                    1 << 11
+                );
             }
         }
+    }
+
+    /// A source that notes every call made while the calling thread holds the
+    /// `AesTurn`.
+    #[cfg(feature = "encryption")]
+    struct TurnWatchingSource<R> {
+        inner: R,
+        calls_under_turn: usize,
+        calls_outside_turn: usize,
+    }
+
+    #[cfg(feature = "encryption")]
+    impl<R> TurnWatchingSource<R> {
+        fn note(&mut self) {
+            if AesTurn::held_by_current_thread() {
+                self.calls_under_turn += 1;
+            } else {
+                self.calls_outside_turn += 1;
+            }
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    impl<R: Read> Read for TurnWatchingSource<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.note();
+            self.inner.read(buf)
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    impl<R: Seek> Seek for TurnWatchingSource<R> {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.note();
+            self.inner.seek(to)
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn opening_an_encrypted_header_runs_no_source_code_under_the_turn() {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+        use sevenz_rust2::EncoderMethod;
+        use sevenz_rust2::encoder_options::AesEncoderOptions;
+
+        let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
+        options.num_cycles_power = 10;
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer.set_encrypt_header(true);
+        writer.set_content_methods(vec![options.into(), EncoderMethod::COPY.into()]);
+        let mut entry = ArchiveEntry::new_file("a");
+        entry.has_stream = true;
+        entry.size = 4;
+        writer
+            .push_archive_entry(entry, Some(Cursor::new(b"data".to_vec())))
+            .unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let credentials = Credentials::new(Some(std::sync::Arc::new(
+            crate::Password::new(b"pw".to_vec()).unwrap(),
+        )));
+        let mut source = TurnWatchingSource {
+            inner: Cursor::new(bytes),
+            calls_under_turn: 0,
+            calls_outside_turn: 0,
+        };
+
+        let header = open_sevenz_header(&mut source, HeaderLimit::UNLIMITED, &credentials).unwrap();
+
+        assert!(header.header_encrypted());
+        assert_eq!(header.files().len(), 1);
+        assert!(
+            source.calls_outside_turn > 0,
+            "the header bytes were fetched from the source"
+        );
+        assert_eq!(source.calls_under_turn, 0);
+    }
+
+    #[cfg(feature = "encryption")]
+    fn encrypted_header_archive(power: u8) -> Vec<u8> {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+        use sevenz_rust2::EncoderMethod;
+        use sevenz_rust2::encoder_options::AesEncoderOptions;
+
+        let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
+        options.num_cycles_power = power;
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer.set_encrypt_header(true);
+        writer.set_content_methods(vec![options.into(), EncoderMethod::COPY.into()]);
+        let mut entry = ArchiveEntry::new_file("a");
+        entry.has_stream = true;
+        entry.size = 4;
+        writer
+            .push_archive_entry(entry, Some(Cursor::new(b"data".to_vec())))
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// Serves one archive until the second seek to the end, which is where the
+    /// prefetch starts, and another one after it.
+    #[cfg(feature = "encryption")]
+    struct ChangingSource {
+        first: Cursor<Vec<u8>>,
+        later: Cursor<Vec<u8>>,
+        end_seeks: usize,
+    }
+
+    #[cfg(feature = "encryption")]
+    impl ChangingSource {
+        fn active(&mut self) -> &mut Cursor<Vec<u8>> {
+            if self.end_seeks >= 2 {
+                &mut self.later
+            } else {
+                &mut self.first
+            }
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    impl Read for ChangingSource {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.active().read(buf)
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    impl Seek for ChangingSource {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            if matches!(to, SeekFrom::End(_)) {
+                self.end_seeks += 1;
+            }
+            self.active().seek(to)
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn the_key_admitted_is_the_one_the_parsed_bytes_declare() {
+        let credentials = Credentials::new(Some(std::sync::Arc::new(
+            crate::Password::new(b"pw".to_vec()).unwrap(),
+        )));
+        let mut source = ChangingSource {
+            first: Cursor::new(encrypted_header_archive(8)),
+            later: Cursor::new(encrypted_header_archive(0x3F)),
+            end_seeks: 0,
+        };
+
+        let refused = open_sevenz_header(&mut source, HeaderLimit::UNLIMITED, &credentials);
+
+        assert_matches!(
+            refused,
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::Encrypted {
+                    reason: EncryptionRefusal::WeakEncryptionRefused,
+                    ..
+                },
+                ..
+            })
+        );
     }
 
     #[test]

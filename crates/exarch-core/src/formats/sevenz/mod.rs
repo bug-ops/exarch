@@ -458,7 +458,9 @@ mod header_probe;
 mod host;
 mod links;
 mod lzma2;
+mod prefetched;
 mod sink;
+mod turn_gate;
 mod verify;
 mod write;
 

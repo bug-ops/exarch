@@ -4,6 +4,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
+use crate::config::Landing;
 use crate::error::PortableHazard;
 use crate::security::context::LeafSymlink;
 use crate::security::context::ValidationContext;
@@ -16,7 +17,6 @@ use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::first_blocking_ancestor;
 use crate::security::fs_view::paths_start_with;
-use crate::security::fs_view::relative_below;
 use crate::selection::Rewritten;
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -301,16 +301,7 @@ impl<P: ParentCheck> SafePath<P> {
                     check_component_for(view.path_model(), comp, config)?;
 
                     if has_banned_components {
-                        let comp_str = comp
-                            .to_str()
-                            .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
-
-                        if !config.is_path_component_allowed(&comp_str) {
-                            return Err(Violation::BannedComponent {
-                                component: comp_str.as_ref().into(),
-                            }
-                            .into());
-                        }
+                        config.check_component(comp, Landing::Entry(path))?;
                     }
 
                     normalized.push(component);
@@ -370,7 +361,7 @@ impl<P: ParentCheck> SafePath<P> {
         {
             match view.canonicalize(parent, root) {
                 Ok(Containment::Within(canonical)) => {
-                    check_landing_allowed(&canonical, dest, path, config)?;
+                    config.check_landing(&canonical, dest, Landing::Entry(path))?;
                 }
                 Ok(Containment::Escapes) => {
                     return Err(escape_refusal(view, root, &final_path, path));
@@ -543,26 +534,6 @@ pub(crate) fn portable_component_hazard(comp: &OsStr) -> Option<PortableHazard> 
     } else {
         None
     }
-}
-
-/// Refuses a canonical parent below `root` that runs through a banned name,
-/// which a symlink on the entry's own path can lead to, and one that is not
-/// below `root` at all.
-fn check_landing_allowed(
-    canonical: &Path,
-    root: &Path,
-    entry: &Path,
-    config: &SecurityConfig,
-) -> Result<()> {
-    let Some(relative) = relative_below(canonical, root) else {
-        return Err(ArchiveError::PathTraversal {
-            path: entry.to_path_buf(),
-        });
-    };
-    if let Some(component) = config.banned_component_in(relative) {
-        return Err(Violation::BannedComponent { component }.into());
-    }
-    Ok(())
 }
 
 /// Rejects the component hazards of `model`: none for the host's own rules
@@ -1038,21 +1009,20 @@ mod tests {
     #[test]
     fn test_landing_outside_the_root_is_refused() {
         let config = SecurityConfig::default();
-        let result = check_landing_allowed(
+        let result = config.check_landing(
             Path::new("/elsewhere/docs"),
             Path::new("/dest"),
-            Path::new("a/b"),
-            &config,
+            Landing::Entry(Path::new("a/b")),
         );
         assert_matches!(result, Err(ArchiveError::PathTraversal { .. }));
         assert!(
-            check_landing_allowed(
-                Path::new("/dest/docs"),
-                Path::new("/dest"),
-                Path::new("a/b"),
-                &config
-            )
-            .is_ok()
+            config
+                .check_landing(
+                    Path::new("/dest/docs"),
+                    Path::new("/dest"),
+                    Landing::Entry(Path::new("a/b"))
+                )
+                .is_ok()
         );
     }
 

@@ -262,7 +262,7 @@ fn a_kdf_refusal_in_the_link_walk_is_reported_as_the_refusal() {
     use sevenz_rust2::encoder_options::AesEncoderOptions;
     use std::sync::Arc;
 
-    let _turn = AesTurn::acquire();
+    let mut turn = AesTurn::acquire();
     let mut options = AesEncoderOptions::new(sevenz_rust2::Password::new("pw"));
     options.salt = [1; 16];
     options.num_cycles_power = 10;
@@ -300,7 +300,7 @@ fn a_kdf_refusal_in_the_link_walk_is_reported_as_the_refusal() {
         &mut |_, _| {
             calls += 1;
             if calls == 1 {
-                other_operation.enter_block([&[11u8, 0][..]], password.as_slice());
+                other_operation.enter_block(&mut turn, [&[11u8, 0][..]], password.as_slice());
             }
             Ok(())
         },

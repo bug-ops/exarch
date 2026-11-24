@@ -9,6 +9,8 @@ use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
+use crate::config::Landing;
+use crate::config::LinkSite;
 use crate::security::fs_view::FsView;
 #[cfg(any(test, feature = "testing"))]
 use crate::security::fs_view::HostFs;
@@ -22,7 +24,6 @@ use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::dest_dir::ProbePath;
 use crate::types::safe_path::ParentCheck;
-use crate::types::safe_symlink::check_resolved_target;
 use crate::types::safe_symlink::check_target_components;
 use crate::types::safe_symlink::has_root_or_prefix;
 
@@ -286,7 +287,11 @@ impl HardlinkTracker {
             });
         }
 
-        check_target_components(target, LinkKind::Hardlink, view.path_model(), config)?;
+        let site = LinkSite {
+            link: link_path.as_path(),
+            kind: LinkKind::Hardlink,
+        };
+        check_target_components(target, site, view.path_model(), config)?;
 
         // Also reject absolute targets (redundant with above, but keeps
         // existing check)
@@ -312,13 +317,7 @@ impl HardlinkTracker {
 
         // The literal target passed above; the location it resolves to may run
         // through a symlink already on disk, so it is checked too.
-        check_resolved_target(
-            &resolved,
-            root.as_path(),
-            link_path.as_path(),
-            LinkKind::Hardlink,
-            config,
-        )?;
+        config.check_landing(&resolved, root.as_path(), Landing::Link(site))?;
 
         // Track this hardlink target (H-PERF-6: use entry API)
         self.seen_targets

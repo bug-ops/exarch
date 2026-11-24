@@ -357,7 +357,7 @@ class SecurityConfig:
         once the total passes the budget), so encrypted 7z operations with different
         keys that run at the same time can make each other fail. 7z operations of one
         process take turns only during the key set-up of each encrypted block and while
-        an encrypted header is read.
+        an encrypted header is parsed from bytes already read.
 
         A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives
         the outer key again after every inner operation, so with the default budget

@@ -16,9 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Permissions: `extract` honors the permission policy: without `--preserve-permissions` a file gets its archive mode minus the umask, with it the exact sanitized archive mode, in TAR, ZIP and 7z (#1312).
 - Core API: `Violation::LinkTargetBannedComponent` carries a `LinkKind` and its message names the link kind (#1348).
 - ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits of ZIP files and the mode of 7z files, so `verify --strict` can exit 3 on archives that passed before (#1312).
+- Core API: a banned path component made only of characters that file name comparison ignores is `ConfigProblem::OnlyIgnoredCharacters`, not `Empty`, in core, CLI, Python and Node (#1363).
 
 ### Changed
 
+- 7z: one KDF charge walk serves admission and the runtime check, the key-slot fingerprint is owned by the AES turn, the encrypted header is read before the turn, and a block led by its only AES coder releases the turn before its decoder first reads the source (#1363).
+- Core: one landing check for banned path components, typed owner and mode predicates for staging trust checks, and `FileWrite` drops its unused mode and marking (#1363).
+- CLI: tar ambiguity refusals get a hint that matches the refusal, in place of "may be corrupted" (#1363).
+- Dependencies: zstd 0.14.5 (libzstd 1.6.0) in both lockfiles, fixing CVE-2026-124851 (#1363).
 - Creation: a named source and a walked file are decided by one classifier, and TAR creation re-checks `max_file_size` on the opened file (#1306).
 - TAR: each PAX header body is parsed once per entry (#1306).
 - Dependencies: `zip` ~9.8, and the weekly zip-drift job tests the newest 9.x again (#1306).

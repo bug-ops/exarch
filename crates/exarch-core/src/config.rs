@@ -1,9 +1,13 @@
 //! Security configuration for archive extraction.
 
 use std::cell::OnceCell;
+use std::ffi::OsStr;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
+use std::path::Component;
+use std::path::Path;
 
+use crate::ArchiveError;
 use crate::ConfigProblem;
 use crate::ConfigSetting;
 use crate::EntryPattern;
@@ -12,12 +16,53 @@ use crate::Limit;
 use crate::MarkPropagation;
 use crate::PathRewrite;
 use crate::RatioLimit;
+use crate::Result;
+use crate::Violation;
 use crate::closed_enum::closed_enum;
 use crate::non_zero;
 use crate::non_zero_u64;
+use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::relative_below;
 use crate::types::Extension;
 use crate::types::ExtensionFilter;
 use crate::types::PathComponentName;
+
+/// Who is asking for a path check, which selects the escape and banned-name
+/// errors.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Landing<'a> {
+    /// An archive entry written at this path.
+    Entry(&'a Path),
+    /// A link, judged by where its target lands.
+    Link(LinkSite<'a>),
+}
+
+/// The link whose target is being checked, so a link-target check cannot be
+/// handed an entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LinkSite<'a> {
+    /// Where the link is created.
+    pub(crate) link: &'a Path,
+    /// What kind of link it is.
+    pub(crate) kind: LinkKind,
+}
+
+impl Landing<'_> {
+    fn escape(self) -> ArchiveError {
+        match self {
+            Self::Entry(path) => ArchiveError::PathTraversal {
+                path: path.to_path_buf(),
+            },
+            Self::Link(LinkSite { link, kind }) => {
+                let path = link.to_path_buf();
+                match kind {
+                    LinkKind::Symlink => ArchiveError::SymlinkEscape { path },
+                    LinkKind::Hardlink => ArchiveError::HardlinkEscape { path },
+                }
+            }
+        }
+    }
+}
 
 closed_enum! {
     /// Whether an archive feature is admitted.
@@ -92,7 +137,7 @@ closed_enum! {
         /// Replace the occupant where the kinds allow it, else fail.
         Overwrite => "overwrite",
 
-        /// Fail with [`ArchiveError::DestinationOccupied`](crate::ArchiveError::DestinationOccupied)
+        /// Fail with [`ArchiveError::DestinationOccupied`]
         /// for an occupant the current run did not create.
         ///
         /// A file or symlink the run created itself (a later file, symlink or
@@ -146,7 +191,7 @@ closed_enum! {
         /// destination that does not exist or is empty; delete it on failure.
         ///
         /// A destination that holds content is refused with
-        /// [`ArchiveError::OutputExists`](crate::ArchiveError::OutputExists)
+        /// [`ArchiveError::OutputExists`]
         /// before anything is extracted, and one that is not a directory with
         /// [`ConfigProblem::NotADirectory`].
         /// A symlinked destination is resolved first, so the staging directory is
@@ -200,7 +245,7 @@ closed_enum! {
         /// The original is renamed aside only once extraction succeeded and
         /// removed after the staged tree is in place; if moving the staged tree
         /// fails the original is restored, and
-        /// [`ArchiveError::ReplaceFailed`](crate::ArchiveError::ReplaceFailed)
+        /// [`ArchiveError::ReplaceFailed`]
         /// says whether that worked. A backup that cannot be removed is reported
         /// as an [`ExtractionWarning::BackupCleanupFailed`](crate::ExtractionWarning::BackupCleanupFailed).
         /// A destination that does not exist is created as under `Atomic`.
@@ -1041,12 +1086,13 @@ pub struct SecurityConfig {
     /// and key parameters cost each other nothing, but encrypted 7z operations
     /// with different keys that run at the same time can make each other fail
     /// this way. They take turns during the key set-up of each encrypted block
-    /// and while an encrypted header is read, never while entries are
-    /// processed. A refusal of this kind applies to every later encrypted block
-    /// of the operation. A pipeline that extracts an encrypted 7z from inside
-    /// an encrypted 7z derives the outer key again after every inner operation,
-    /// so with the default budget and 7-Zip's power 19 it is refused after 256
-    /// outer blocks; raise `max_kdf_work` for such pipelines.
+    /// and while an encrypted header is parsed from bytes already read, never
+    /// while entries are processed. A refusal of this kind applies to every
+    /// later encrypted block of the operation. A pipeline that extracts an
+    /// encrypted 7z from inside an encrypted 7z derives the outer key again
+    /// after every inner operation, so with the default budget and 7-Zip's
+    /// power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for
+    /// such pipelines.
     ///
     /// Blocks that combine several coders in a layout that is not a plain chain
     /// (such as BCJ2 with several AES coders) are charged for every AES coder,
@@ -1745,15 +1791,43 @@ impl SecurityConfig {
             .any(|banned| banned.matches_folding_once(component, &fold))
     }
 
-    /// The first banned name among the normal components of `path`, if any.
-    pub(crate) fn banned_component_in(&self, path: &std::path::Path) -> Option<Box<str>> {
-        path.components().find_map(|component| {
-            let std::path::Component::Normal(name) = component else {
-                return None;
-            };
-            let name = name.to_string_lossy();
-            (!self.is_path_component_allowed(&name)).then(|| Box::from(name.as_ref()))
-        })
+    /// Refuses `comp` when it is a banned name, with the error `who` selects.
+    pub(crate) fn check_component(&self, comp: &OsStr, who: Landing<'_>) -> Result<()> {
+        let name = comp.to_string_lossy();
+        if self.is_path_component_allowed(&name) {
+            return Ok(());
+        }
+        let component = Box::from(name.as_ref());
+        Err(match who {
+            Landing::Entry(_) => Violation::BannedComponent { component },
+            Landing::Link(LinkSite { kind, .. }) => {
+                Violation::LinkTargetBannedComponent { kind, component }
+            }
+        }
+        .into())
+    }
+
+    /// Refuses a banned name among the normal components of `relative`, a
+    /// position already known to be below the root.
+    pub(crate) fn check_banned_in(&self, relative: &Path, who: Landing<'_>) -> Result<()> {
+        relative
+            .components()
+            .try_for_each(|component| match component {
+                Component::Normal(name) => self.check_component(name, who),
+                _ => Ok(()),
+            })
+    }
+
+    /// Refuses a `canonical` location that is not below `root`, with the
+    /// escape error `who` selects, or that runs through a banned name.
+    pub(crate) fn check_landing(
+        &self,
+        canonical: &Path,
+        root: &Path,
+        who: Landing<'_>,
+    ) -> Result<()> {
+        let relative = relative_below(canonical, root).ok_or_else(|| who.escape())?;
+        self.check_banned_in(relative, who)
     }
 
     /// Returns `true` if a file with the given optional extension may be
@@ -2398,6 +2472,124 @@ mod tests {
     use std::assert_matches;
 
     use super::*;
+
+    fn link(kind: LinkKind) -> Landing<'static> {
+        Landing::Link(LinkSite {
+            link: Path::new("dir/l"),
+            kind,
+        })
+    }
+
+    #[test]
+    fn check_component_picks_the_error_of_who_asks() {
+        let config = SecurityConfig::default();
+        let entry = Landing::Entry(Path::new("a/.git"));
+
+        assert!(config.check_component(OsStr::new("src"), entry).is_ok());
+        assert_matches!(
+            config.check_component(OsStr::new(".GIT"), entry),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { .. }
+            })
+        );
+        for kind in [LinkKind::Symlink, LinkKind::Hardlink] {
+            assert_matches!(
+                config.check_component(OsStr::new(".git"), link(kind)),
+                Err(ArchiveError::SecurityViolation {
+                    kind: Violation::LinkTargetBannedComponent { kind: got, .. }
+                }) if got == kind
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_component_reports_the_lossy_text_of_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let config = SecurityConfig::default()
+            .try_add_banned_path_component("\u{fffd}x")
+            .unwrap();
+        let name = OsStr::from_bytes(b"\xffx");
+
+        assert_matches!(
+            config.check_component(name, Landing::Entry(Path::new("p"))),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { component }
+            }) if &*component == "\u{fffd}x"
+        );
+    }
+
+    #[test]
+    fn check_banned_in_finds_the_first_normal_component_and_skips_the_rest() {
+        let config = SecurityConfig::default();
+        let who = Landing::Entry(Path::new("e"));
+
+        assert!(config.check_banned_in(Path::new(""), who).is_ok());
+        assert!(config.check_banned_in(Path::new("a/./b/c"), who).is_ok());
+        assert_matches!(
+            config.check_banned_in(Path::new("a/.ssh/.git"), who),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { component }
+            }) if &*component == ".ssh"
+        );
+    }
+
+    #[test]
+    fn check_landing_refuses_an_escape_with_the_error_of_who_asks() {
+        let config = SecurityConfig::default();
+        let root = Path::new("/dest");
+        let outside = Path::new("/elsewhere/x");
+
+        assert_matches!(
+            config.check_landing(outside, root, Landing::Entry(Path::new("a/b"))),
+            Err(ArchiveError::PathTraversal { path }) if path == Path::new("a/b")
+        );
+        assert_matches!(
+            config.check_landing(outside, root, link(LinkKind::Symlink)),
+            Err(ArchiveError::SymlinkEscape { path }) if path == Path::new("dir/l")
+        );
+        assert_matches!(
+            config.check_landing(outside, root, link(LinkKind::Hardlink)),
+            Err(ArchiveError::HardlinkEscape { path }) if path == Path::new("dir/l")
+        );
+    }
+
+    #[test]
+    fn check_landing_judges_the_part_below_the_root_only() {
+        let config = SecurityConfig::default();
+        let root = Path::new("/dest/.git");
+
+        assert!(
+            config
+                .check_landing(Path::new("/dest/.git/docs"), root, link(LinkKind::Symlink))
+                .is_ok(),
+            "a banned name in the root itself is not judged"
+        );
+        assert_matches!(
+            config.check_landing(
+                Path::new("/dest/.git/a/.ssh"),
+                root,
+                link(LinkKind::Hardlink)
+            ),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::LinkTargetBannedComponent {
+                    kind: LinkKind::Hardlink,
+                    ..
+                }
+            })
+        );
+        assert_matches!(
+            config.check_landing(
+                Path::new("/dest/.git/.env"),
+                root,
+                Landing::Entry(Path::new("e"))
+            ),
+            Err(ArchiveError::SecurityViolation {
+                kind: Violation::BannedComponent { .. }
+            })
+        );
+    }
 
     #[test]
     fn test_default_config() {

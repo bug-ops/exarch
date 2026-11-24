@@ -35,6 +35,7 @@ use exarch_core::PolicySetting;
 use exarch_core::QuotaKind;
 use exarch_core::ReplaceFailure;
 use exarch_core::Restore;
+use exarch_core::TarAmbiguity;
 use exarch_core::TarTrailerRefusal;
 use exarch_core::Violation;
 use exarch_core::ZipBombDetails;
@@ -813,6 +814,7 @@ fn problem_hint(problem: &ConfigProblem) -> Option<&'static str> {
         | ConfigProblem::Empty
         | ConfigProblem::BlankOrControl
         | ConfigProblem::PaddedWithBlank
+        | ConfigProblem::OnlyIgnoredCharacters
         | ConfigProblem::ContainsSeparator
         | ConfigProblem::InnerDot
         | ConfigProblem::DotEntry
@@ -1108,6 +1110,111 @@ fn zip_inconsistency_message(op: Operation, message: Message, archive: &Path) ->
         )))
 }
 
+fn tar_ambiguity_context(
+    op: Operation,
+    ambiguity: &TarAmbiguity,
+    message: Message,
+    archive: &Path,
+) -> Message {
+    message
+        .lit("Invalid archive '")
+        .path(archive)
+        .lit("'")
+        .hint(Some(tar_ambiguity_hint(op, ambiguity)))
+}
+
+/// Why a TAR header was refused, which decides whether the archive is
+/// claimed to be intact.
+#[derive(Clone, Copy)]
+enum TarRefusalNature {
+    /// A sparse construct the reader does not extract; other tools may.
+    Unsupported,
+    /// Structurally valid, but readers disagree on what it means.
+    Ambiguous,
+    /// A global PAX header over the metadata limit, which only the Rust API
+    /// raises.
+    MetadataLimit,
+    /// A header or record that is not valid TAR.
+    Malformed,
+    /// A variant added to core that is not classified here yet.
+    Unclassified,
+}
+
+impl TarRefusalNature {
+    fn of(ambiguity: &TarAmbiguity) -> Self {
+        match ambiguity {
+            TarAmbiguity::SparseEntry | TarAmbiguity::UnsupportedRecord { .. } => Self::Unsupported,
+            TarAmbiguity::GlobalTooLarge { .. } => Self::MetadataLimit,
+            TarAmbiguity::OversizedRecord { .. }
+            | TarAmbiguity::DuplicateRecord { .. }
+            | TarAmbiguity::GlobalOverride { .. }
+            | TarAmbiguity::LocalBeforeGlobal
+            | TarAmbiguity::LongRecordBeforeGlobal
+            | TarAmbiguity::StackedLongRecord { .. }
+            | TarAmbiguity::StackedSizeRecord
+            | TarAmbiguity::PrefixWithoutUstar
+            | TarAmbiguity::DuplicateExtensionHeader { .. }
+            | TarAmbiguity::NonZeroPadding
+            | TarAmbiguity::NonRegularPayload { .. }
+            | TarAmbiguity::DirectoryNamedPayload { .. }
+            | TarAmbiguity::ExtensionBeforeLabel { .. } => Self::Ambiguous,
+            TarAmbiguity::MalformedRecord
+            | TarAmbiguity::EmptyKey
+            | TarAmbiguity::InvalidSize
+            | TarAmbiguity::UnrecognizedHeader { .. }
+            | TarAmbiguity::NonCanonicalNumber { .. }
+            | TarAmbiguity::ChecksumMismatch
+            | TarAmbiguity::MalformedLongRecord { .. }
+            | TarAmbiguity::WindowMismatch => Self::Malformed,
+            // `TarAmbiguity` is `#[non_exhaustive]`: a variant added in core
+            // gets the least committal wording until it is classified above.
+            _ => Self::Unclassified,
+        }
+    }
+}
+
+/// Advice for a refused TAR header. The archive is called well formed only
+/// where it is, and unlike ZIP no switch relaxes the refusal.
+fn tar_ambiguity_hint(op: Operation, ambiguity: &TarAmbiguity) -> String {
+    let (what, advice) = match TarRefusalNature::of(ambiguity) {
+        TarRefusalNature::Malformed | TarRefusalNature::Unclassified => {
+            return "The archive may be corrupted or malformed: a TAR header is not valid. No \
+                    option relaxes this refusal; re-download it or ask the producer to \
+                    re-create it."
+                .to_owned();
+        }
+        TarRefusalNature::MetadataLimit => {
+            return format!(
+                "A global PAX header is larger than the TAR metadata limit; the archive is not \
+                 necessarily damaged. {}",
+                relaxation_hint(op, Some(PolicySetting::MaxTarMetadataBytes))
+            );
+        }
+        TarRefusalNature::Unsupported => (
+            "The archive is well formed but uses a TAR construct that is not supported \
+             (GNU sparse data); other tools may extract it.",
+            "extract it with another tool you trust, or ask the producer to re-create it.",
+        ),
+        // Another reader may be the one that sees a hidden member, so it is not
+        // advised.
+        TarRefusalNature::Ambiguous => (
+            "The archive is well formed but ambiguous: tools disagree about how to read it, \
+             so exarch refuses it deliberately.",
+            "ask the producer to re-create it.",
+        ),
+    };
+    let relax = if op.accepts(Flag::ZipConsistency) {
+        format!(
+            "Unlike ZIP with {} {}, no option relaxes this refusal",
+            Flag::ZipConsistency.long(),
+            ZipConsistencyArg::Ignore.value_name()
+        )
+    } else {
+        "No option relaxes this refusal".to_owned()
+    };
+    format!("{what} {relax}; {advice}")
+}
+
 /// The message for `err`; the generic one for a variant added to
 /// `ArchiveError` after [`dedicated_context`] was written.
 fn context_message(
@@ -1301,9 +1408,10 @@ fn dedicated_context(
         ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => {
             security_violation(message, archive, relaxation_hint(op, err.relaxable_by()))
         }
-        ArchiveError::InvalidArchive(_)
-        | ArchiveError::TarAmbiguity(_)
-        | ArchiveError::TarTrailer(_) => message
+        ArchiveError::TarAmbiguity(ambiguity) => {
+            tar_ambiguity_context(op, ambiguity, message, archive)
+        }
+        ArchiveError::InvalidArchive(_) | ArchiveError::TarTrailer(_) => message
             .lit("Invalid archive '")
             .path(archive)
             .lit("'")
@@ -1429,6 +1537,7 @@ mod tests {
             ConfigProblem::Empty,
             ConfigProblem::BlankOrControl,
             ConfigProblem::PaddedWithBlank,
+            ConfigProblem::OnlyIgnoredCharacters,
             ConfigProblem::ContainsSeparator,
             ConfigProblem::InnerDot,
             ConfigProblem::DotEntry,
@@ -1578,6 +1687,94 @@ mod tests {
             let msg = full_text(&converted);
             assert!(msg.contains("no flag relaxes this check"), "{msg}");
             assert!(!msg.contains("--allow-"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_tar_ambiguity_hint_matches_the_nature_of_the_refusal() {
+        use exarch_core::TarExtensionKind;
+
+        let ambiguous_key = || "path".to_owned();
+        let sparse = [
+            TarAmbiguity::SparseEntry,
+            TarAmbiguity::UnsupportedRecord {
+                key: ambiguous_key(),
+            },
+        ];
+        let ambiguous = [
+            TarAmbiguity::DuplicateRecord {
+                key: ambiguous_key(),
+            },
+            TarAmbiguity::NonZeroPadding,
+            TarAmbiguity::PrefixWithoutUstar,
+            TarAmbiguity::StackedSizeRecord,
+            TarAmbiguity::DirectoryNamedPayload {
+                size: 1,
+                path: "d/".to_owned(),
+            },
+            TarAmbiguity::ExtensionBeforeLabel {
+                kind: TarExtensionKind::Pax,
+            },
+        ];
+        let malformed = [
+            TarAmbiguity::ChecksumMismatch,
+            TarAmbiguity::MalformedRecord,
+            TarAmbiguity::EmptyKey,
+            TarAmbiguity::InvalidSize,
+            TarAmbiguity::WindowMismatch,
+            TarAmbiguity::MalformedLongRecord {
+                kind: TarExtensionKind::LongName,
+            },
+        ];
+        for op in [Operation::List, Operation::Verify, Operation::Extract] {
+            for (group, nature, other_tool) in [
+                (&sparse[..], "not supported", true),
+                (&ambiguous[..], "ambiguous", false),
+            ] {
+                for variant in group {
+                    let err = ArchiveError::TarAmbiguity(variant.clone());
+                    let msg = full_text(&convert_error(op, err, Path::new("a.tar")));
+                    assert!(!msg.contains("corrupted"), "{variant:?}: {msg}");
+                    assert!(msg.contains("well formed"), "{variant:?}: {msg}");
+                    assert!(msg.contains(nature), "{variant:?}: {msg}");
+                    assert_eq!(
+                        msg.contains("another tool you trust"),
+                        other_tool,
+                        "{variant:?}: {msg}"
+                    );
+                    assert!(msg.contains("re-create it"), "{variant:?}: {msg}");
+                    assert!(msg.to_lowercase().contains("no option relaxes"), "{msg}");
+                    assert_eq!(
+                        msg.contains(Flag::ZipConsistency.long()),
+                        op.accepts(Flag::ZipConsistency),
+                        "{msg}"
+                    );
+                }
+            }
+            for variant in &malformed {
+                let err = ArchiveError::TarAmbiguity(variant.clone());
+                let msg = full_text(&convert_error(op, err, Path::new("a.tar")));
+                assert!(
+                    msg.contains("may be corrupted or malformed"),
+                    "{variant:?}: {msg}"
+                );
+                assert!(!msg.contains("well formed"), "{variant:?}: {msg}");
+                assert!(!msg.contains(Flag::ZipConsistency.long()), "{msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tar_global_header_over_the_limit_names_the_rust_api() {
+        for op in [Operation::List, Operation::Verify, Operation::Extract] {
+            let err =
+                ArchiveError::TarAmbiguity(TarAmbiguity::GlobalTooLarge { size: 2, limit: 1 });
+            let msg = full_text(&convert_error(op, err, Path::new("a.tar")));
+            assert!(msg.contains("metadata limit"), "{msg}");
+            assert!(msg.contains("Rust API only"), "{msg}");
+            assert!(msg.contains("with_max_tar_metadata_bytes"), "{msg}");
+            assert!(!msg.contains("tools disagree"), "{msg}");
+            assert!(!msg.contains("corrupted"), "{msg}");
         }
     }
 

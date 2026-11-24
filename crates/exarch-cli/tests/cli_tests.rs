@@ -7456,6 +7456,124 @@ fn test_extract_json_reports_zip_reader_sub_code() {
     assert_eq!(json["error"]["sub_code"], "ZIP_READER");
 }
 
+/// A TAR whose single PAX extension header holds `records`, followed by one
+/// regular entry.
+fn tar_with_pax_records(records: &[(&str, &str)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (key, value) in records {
+        let tail = format!(" {key}={value}\n");
+        let mut len = tail.len() + 1;
+        while len.to_string().len() + tail.len() != len {
+            len = len.to_string().len() + tail.len();
+        }
+        body.extend_from_slice(format!("{len}{tail}").as_bytes());
+    }
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut pax = tar::Header::new_ustar();
+    pax.set_entry_type(tar::EntryType::XHeader);
+    pax.set_path("pax").expect("pax path");
+    pax.set_size(body.len() as u64);
+    pax.set_cksum();
+    builder.append(&pax, body.as_slice()).expect("append pax");
+    let mut file = tar::Header::new_ustar();
+    file.set_path("a").expect("path");
+    file.set_size(1);
+    file.set_cksum();
+    builder.append(&file, &b"x"[..]).expect("append file");
+    builder.into_inner().expect("finish tar")
+}
+
+/// A TAR whose global PAX header is one byte over the default metadata limit.
+fn tar_with_oversized_global_header() -> Vec<u8> {
+    let size = exarch_core::SecurityConfig::default()
+        .max_tar_metadata_bytes
+        .get()
+        + 1;
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut global = tar::Header::new_ustar();
+    global.set_entry_type(tar::EntryType::XGlobalHeader);
+    global.set_path("global").expect("global path");
+    global.set_size(size);
+    global.set_cksum();
+    let body = vec![0_u8; usize::try_from(size).expect("size fits")];
+    builder
+        .append(&global, body.as_slice())
+        .expect("append global");
+    builder.into_inner().expect("finish tar")
+}
+
+#[test]
+fn test_tar_global_header_over_the_limit_json_hint_names_the_rust_api() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("global.tar");
+    std::fs::write(&archive, tar_with_oversized_global_header()).expect("write archive");
+
+    for command in ["list", "verify"] {
+        let output = exarch_cmd()
+            .arg(command)
+            .arg("--json")
+            .arg(&archive)
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+        assert_eq!(json["error"]["sub_code"], "TAR_AMBIGUITY", "{json}");
+        let hint = json["error"]["hint"].as_str().expect("hint");
+        assert!(hint.contains("metadata limit"), "{command}: {hint}");
+        assert!(hint.contains("Rust API only"), "{command}: {hint}");
+        assert!(!hint.contains("tools disagree"), "{command}: {hint}");
+    }
+}
+
+#[test]
+fn test_tar_ambiguity_json_hint_matches_the_refusal() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let cases = [
+        (
+            "dup.tar",
+            vec![("path", "x"), ("path", "y")],
+            ["well formed", "tools disagree", "re-create it"],
+            "another tool",
+        ),
+        (
+            "sparse.tar",
+            vec![("GNU.sparse.major", "1")],
+            ["well formed", "not supported", "another tool you trust"],
+            "corrupted",
+        ),
+        (
+            "empty_key.tar",
+            vec![("", "x")],
+            ["may be corrupted or malformed", "TAR header", "re-download"],
+            "well formed",
+        ),
+    ];
+    for (name, records, required, forbidden) in cases {
+        let archive = temp.path().join(name);
+        std::fs::write(&archive, tar_with_pax_records(&records)).expect("write archive");
+
+        for command in ["list", "verify", "extract"] {
+            let mut cmd = exarch_cmd();
+            cmd.arg(command).arg("--json").arg(&archive);
+            if command == "extract" {
+                cmd.arg(temp.path().join("out"));
+            }
+            let output = cmd.assert().code(1).get_output().stdout.clone();
+            let json: serde_json::Value =
+                serde_json::from_slice(&output).expect("invalid JSON output");
+            assert_eq!(json["error"]["kind"], "InvalidArchive", "{json}");
+            assert_eq!(json["error"]["sub_code"], "TAR_AMBIGUITY", "{json}");
+            let hint = json["error"]["hint"].as_str().expect("hint");
+            for needle in required {
+                assert!(hint.contains(needle), "{name} {command}: {hint}");
+            }
+            assert!(!hint.contains(forbidden), "{name} {command}: {hint}");
+        }
+    }
+}
+
 /// A closed stderr pipe must neither abort the run (exit 101) nor change the
 /// documented exit status of a successful extraction (#981).
 #[cfg(unix)]

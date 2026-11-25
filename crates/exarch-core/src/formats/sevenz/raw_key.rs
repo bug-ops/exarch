@@ -466,6 +466,8 @@ impl EncryptedHeader {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -544,12 +546,12 @@ mod tests {
         complex.extend([0, 1]);
         let two_inputs = first_coder(&synthesized_archive(&complex, 2)).unwrap();
         assert_eq!(two_inputs.properties(), properties);
-        assert!(matches!(
+        assert_matches!(
             twin(&two_inputs),
             Err(ArchiveError::InvalidArchive(
                 Malformation::SevenZUnsupportedCoder
             ))
-        ));
+        );
 
         let mut other = vec![1, 0x20 | 0x01, 0x00];
         put_number(&mut other, properties.len() as u64);

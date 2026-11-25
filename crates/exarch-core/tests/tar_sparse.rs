@@ -8,6 +8,7 @@
 
 mod tar_sparse_support;
 
+use std::assert_matches;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -92,11 +93,9 @@ fn extract_with_the_default_policy_refuses_a_well_formed_sparse_entry() {
             extract_archive(&archive, dir.path().join("out"), &config).unwrap_err(),
         ];
         for error in &errors {
-            assert!(
-                matches!(
-                    root(error),
-                    ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry)
-                ),
+            assert_matches!(
+                root(error),
+                ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry),
                 "{label}: {error:?}"
             );
         }
@@ -225,8 +224,9 @@ fn extract_with_expand_counts_the_real_size_against_max_file_size() {
     let at = |limit: u64| expand().with_max_file_size(std::num::NonZeroU64::new(limit).unwrap());
 
     let error = extract_to(&bytes, &at(999)).unwrap_err();
-    assert!(
-        matches!(root(&error), ArchiveError::QuotaExceeded { .. }),
+    assert_matches!(
+        root(&error),
+        ArchiveError::QuotaExceeded { .. },
         "{error:?}"
     );
     let (_dest, out) = extract_to(&bytes, &at(1000)).unwrap();
@@ -243,8 +243,9 @@ fn extract_with_expand_counts_the_real_size_against_max_total_size() {
     let at = |limit: u64| expand().with_max_total_size(std::num::NonZeroU64::new(limit).unwrap());
 
     let error = extract_to(&bytes, &at(1000)).unwrap_err();
-    assert!(
-        matches!(root(&error), ArchiveError::QuotaExceeded { .. }),
+    assert_matches!(
+        root(&error),
+        ArchiveError::QuotaExceeded { .. },
         "{error:?}"
     );
     extract_to(&bytes, &at(1200)).unwrap();
@@ -514,12 +515,10 @@ fn extract_with_expand_still_refuses_pax_sparse_records() {
         let dir = TempDir::new().unwrap();
         let archive = write_archive(&dir, &bytes);
         let error = list_archive(&archive, &expand()).unwrap_err();
-        assert!(
-            matches!(
-                root(&error),
-                ArchiveError::TarAmbiguity(TarAmbiguity::UnsupportedRecord { key: found })
-                    if found == key
-            ),
+        assert_matches!(
+            root(&error),
+            ArchiveError::TarAmbiguity(TarAmbiguity::UnsupportedRecord { key: found })
+                if found == key,
             "{key}: {error:?}"
         );
     }

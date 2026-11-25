@@ -12,6 +12,7 @@
 mod common;
 mod sevenz_patch;
 
+use std::assert_matches;
 use std::error::Error;
 use std::io::Cursor;
 use std::io::Read;
@@ -423,11 +424,9 @@ fn extract_block_with_aes_coders_of_different_keys_is_an_unsupported_coder() {
 
     let error = extract(bytes, 1 << 27, b"alpha").unwrap_err();
 
-    assert!(
-        matches!(
-            cause(&error),
-            ArchiveError::InvalidArchive(Malformation::SevenZUnsupportedCoder)
-        ),
+    assert_matches!(
+        cause(&error),
+        ArchiveError::InvalidArchive(Malformation::SevenZUnsupportedCoder),
         "{error:?}"
     );
 }

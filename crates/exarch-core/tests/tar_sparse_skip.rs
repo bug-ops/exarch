@@ -8,6 +8,7 @@
 
 mod tar_sparse_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -181,10 +182,7 @@ fn verify_with_expand_of_a_sparse_entry_with_a_truncated_payload_fails() {
         .verify_reader(ArchiveReader::tar(Cursor::new(truncated.to_vec()), None))
         .unwrap_err();
 
-    assert!(
-        matches!(root(&error), ArchiveError::InvalidArchive(_)),
-        "{error:?}"
-    );
+    assert_matches!(root(&error), ArchiveError::InvalidArchive(_), "{error:?}");
 }
 
 #[test]

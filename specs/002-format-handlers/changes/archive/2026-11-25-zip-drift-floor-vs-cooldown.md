@@ -4,12 +4,14 @@ tags:
   - spec
   - delta
 created: 2026-11-23
-status: open
+status: merged
 related:
   - "[[spec]]"
 ---
 
 # Delta: zip-drift workflow also checks manifest floors against the publish-age cooldown (#1342)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1342, #1347).
 
 > [!info] Scope
 > Capability: `002-format-handlers`, FR-064 (the `zip-drift.yml` workflow). The dependency cooldown itself (`.cargo/config.toml` `global-min-publish-age`, #1321) and the Dependabot cooldown (#1338) are repository policy that no spec covers; they are not specified here.

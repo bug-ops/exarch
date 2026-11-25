@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[001-security-pipeline/spec]]"
 ---
 
 # Delta: SecurityConfig::permissions applies to extraction (#1308)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1308, #1312).
 
 ## ADDED
 

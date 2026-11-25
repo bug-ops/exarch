@@ -7,13 +7,15 @@ tags:
   - path-validation
   - windows
 created: 2026-11-24
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[001-security-pipeline/spec]]"
 ---
 
 # Delta: alternate 8.3 spellings of existing entries are refused
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1364).
 
 > [!info] Scope
 > Capability: `012-windows-reserved-device-names` (Windows component rules). The check complements the name-based component rules of FR-001: those judge the spelling in the archive, this one judges the name of an entry that already exists on disk.

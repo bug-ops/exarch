@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[001-security-pipeline/spec]]"
 ---
 
 # Delta: deferred mode under PermissionPolicy::Normalize (#1308)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1308, #1312). The 001 reference FR-059 is FR-060 in `spec.md`.
 
 > [!info] Scope
 > Capability: `026-mark-of-the-web-propagation`. Related delta: `specs/001-security-pipeline/changes/extract-honors-permission-policy.md` (FR-059). Code: `formats/pinned_dir.rs` (`create_new_deferred`, `PendingMode::apply`).

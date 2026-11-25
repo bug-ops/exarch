@@ -10,7 +10,7 @@ tags:
   - windows
   - rust
 created: 2026-08-03
-updated: 2026-11-08
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -166,6 +166,7 @@ Use EARS notation. Prefix with FR-NNN.
 | FR-004 | WHEN validating a path component against the reserved-name set THE SYSTEM SHALL strip only a single trailing extension (text after the last `.`) before comparison, so that `CON.txt` and `CON` both match but `CONTACT.txt` (a superstring, not an exact reserved base name) does not falsely match | must |
 | FR-005 | WHEN a reserved-name violation occurs during `list_archive` or `verify_archive` preflight in the verify pre-flight (`ListPass::VerifyPreflight`, `inspection/list.rs`) THE SYSTEM SHALL surface it as a graceful `VerificationIssue`, matching how other list-level security violations already degrade in that mode, rather than hard-aborting | should |
 | FR-006 | THE SYSTEM SHALL update `test_safe_path_windows_reserved_names` (`safe_path.rs` lines 723-736) to assert the defined reject/allow outcome for each case (bare name, name with extension, lowercase variant, intermediate path component, opt-out config) instead of only asserting the call does not panic | must |
+| FR-007 | WHEN, on Windows, an existing directory component, an existing file leaf (including a file a 7z extraction overwrites) or an existing link-target component is named by an alternate 8.3 short-name spelling of another entry, THE SYSTEM SHALL refuse it with `Violation::ShortNameAlias` (text `path component is an alternate 8.3 spelling: {component}`); the violation is a `SecurityViolation` with sub-code `PATH_NAME`, classed `PathName` like its siblings, config-independent and not relaxable (no `relaxable_by` setting, no opt-out, unlike FR-003); a name is suspect only when it has the 8.3 shape (a stem of 1 to 6 characters, `~`, digits, and an optional extension of at most 3 characters), and the decision compares the spelling with the names its parent directory lists: a suspect name that the parent does not list under that spelling is refused, a listed spelling is accepted; the check is listing-based and uses no `unsafe` code, and off Windows a name is its own stored name, so nothing is refused; names the extraction run itself created are remembered by exact spelling so the parent is not listed again for them, and the remembered set is bounded by total bytes (each name is charged its length plus a fixed per-entry overhead), past which nothing more is remembered and the parent is listed again, which is slower but equally strict; no check runs after a fresh file create, because the name of a file the run has just created is the spelling the run used | must |
 
 ## 4. Non-Functional Requirements
 
@@ -176,6 +177,7 @@ Use EARS notation. Prefix with FR-NNN.
 | NFR-003 | Consistency | The rejection must use the existing `ArchiveError::SecurityViolation` variant (same as banned-component rejections), not a new error variant — this keeps the error taxonomy stable for downstream consumers (`exarch-cli` formatters, `exarch-python`/`exarch-node` error conversion layers) without requiring changes outside `exarch-core` |
 | NFR-004 | Maintainability | Any new public `SecurityConfig` builder method introduced for FR-003 must carry a `///` doc comment with a runnable `# Examples` section, per the workspace's mandatory rustdoc policy (`deny(missing_docs)`-equivalent convention already followed by `with_banned_path_components`) |
 | NFR-005 | Testability | Windows-specific test coverage must remain gated behind `#[cfg(windows)]` (as the existing test already is) so it exercises real reserved-name semantics on Windows CI runners without affecting non-Windows test counts or runtime |
+| NFR-006 | Portability | The listing step of FR-007 is Windows-only; the decision (`judge`) and the shape test are pure and platform-independent, so they are unit-tested on every host; non-Windows behavior is unchanged (consistent with NFR-001) |
 
 ## 5. Data Model
 
@@ -196,6 +198,7 @@ new persisted or transmitted entity is introduced.
 | Same archive extracted on a non-Windows target | No reserved-name rejection occurs (FR-002); behavior is unchanged from today |
 | Reserved-name violation encountered during `list_archive`/`verify_archive` in the verify pre-flight (`ListPass::VerifyPreflight`) | Surfaced as a `VerificationIssue` in the report rather than a hard abort (FR-005), matching the pre-flight behavior for other violations |
 | Reserved name combined with a path-traversal or null-byte violation in the same entry | Existing validation order in `validate_with_context` (null bytes → absolute path → per-component loop) already runs earlier checks first; the reserved-name check is folded into the same per-component loop as `banned_path_components` and does not need new ordering rules |
+| An existing entry named by an alternate 8.3 spelling, as a directory component, file leaf (including a 7z overwrite) or link-target component, on Windows | Refused with `Violation::ShortNameAlias`; the same name is accepted when the parent lists it as spelled; no effect off Windows (FR-007) |
 
 ## 7. Success Criteria
 
@@ -280,6 +283,10 @@ new persisted or transmitted entity is introduced.
   list errs on the side of refusal).
   Link targets of symlinks and hardlinks get the same component check
   (`safe_symlink.rs`, `security/hardlink.rs`).
+- Deviations from FR-007 as shipped (#1364): a refusal raised while resolving a link
+  target through the link cursor surfaces as an unresolvable-link refusal, not as
+  `ShortNameAlias`; the 7z pre-pass does not vet alias spellings, the check runs at
+  extraction time. A follow-up is planned for each.
 
 ## 10. See Also
 
@@ -288,7 +295,7 @@ new persisted or transmitted entity is introduced.
   section mandates `rust-security-maintenance` review for path-validation
   changes)
 - [[MOC-specs]] — all specifications
-- [[changes/short-name-alias]] — open delta: alternate 8.3 spellings of existing entries (FR-007)
+- [[changes/archive/2026-11-25-short-name-alias]] — merged delta: alternate 8.3 spellings of existing entries (FR-007)
 - [[001-security-pipeline/spec]] — parent security pipeline spec covering
   `SafePath`, `validate_path`, symlink/hardlink validation, and quota
   tracking that this finding extends

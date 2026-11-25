@@ -4,13 +4,15 @@ tags:
   - delta
   - formats/tar
 created: 2026-11-25
-status: open
+status: merged
 related:
   - "[[019-verify-and-list-model/spec]]"
-  - "[[002-format-handlers/changes/tar-sparse-expand]]"
+  - "[[002-format-handlers/changes/archive/2026-11-25-tar-sparse-expand]]"
 ---
 
 # Delta: verify and list of sparse TAR entries (#1349)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1349, #1372).
 
 > [!info] Scope
 > Requirement id continues the table of [[019-verify-and-list-model/spec]] (last id FR-067). Core behaviour is [[002-format-handlers/spec]] FR-081 to FR-084. Spec sync applies the ADDED row and moves this file to `changes/archive/`.

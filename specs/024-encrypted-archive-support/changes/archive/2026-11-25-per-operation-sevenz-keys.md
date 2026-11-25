@@ -5,7 +5,7 @@ tags:
   - formats/sevenz
   - encryption
 created: 2026-11-25
-status: open
+status: merged
 related:
   - "[[024-encrypted-archive-support/spec]]"
   - "[[002-format-handlers/spec]]"
@@ -13,6 +13,8 @@ related:
 ---
 
 # Delta: per-operation 7z AES keys replace the process-wide key slot and turn (#1351, #1352)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1351, #1352, #1372). FR-040, FR-041 and Q10 follow the delta; GN-3 is removed with the upstream report.
 
 > [!info] Scope
 > Requirement ids continue the table of [[024-encrypted-archive-support/spec]] (last id FR-043, from the open delta `aes-key-verdict-extract-verify`). Spec sync applies the ADDED rows, then the MODIFIED rows, then moves this file to `changes/archive/`.

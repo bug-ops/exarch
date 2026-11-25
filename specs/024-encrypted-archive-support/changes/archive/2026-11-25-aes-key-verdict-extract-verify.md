@@ -5,7 +5,7 @@ tags:
   - formats/sevenz
   - encryption
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[024-encrypted-archive-support/spec]]"
   - "[[002-format-handlers/spec]]"
@@ -13,6 +13,8 @@ related:
 ---
 
 # Delta: extract and verify share the AES key-verdict rule (#1289)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1289, #1306).
 
 > [!info] Scope
 > Requirement ids continue the table of [[024-encrypted-archive-support/spec]] (last id FR-042). FR-010, FR-014 and FR-020 are read together with FR-043.

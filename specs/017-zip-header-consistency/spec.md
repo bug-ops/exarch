@@ -10,7 +10,7 @@ tags:
   - rust
   - typestate
 created: 2026-10-19
-updated: 2026-11-08
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -150,6 +150,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | FR-016 | WHEN a directory or special entry carries data, THE SYSTEM SHALL report `ZipInconsistency::NonRegularPayload { entry, kind: ZipNonRegularKind, compressed_size }`, and WHEN the end of a compressed entry's stream cannot be established inside its declared range THE SYSTEM SHALL report `StreamEndUnknown { entry, offset, reason: ZipStreamUndecided }` with `Rejected` (the decoder refuses the stream within the range) or `BudgetExhausted` (decoding it exceeds the decode budget and its bytes hold a record signature); under `Enforce` these refuse the archive in `extract`, `list` and `verify` (v0.8.0, #827, #837) | must |
 | FR-017 | WHEN a ZIP is opened under `Enforce`, THE SYSTEM SHALL run the entry-data checks once at open with a decode budget of 256 MiB per archive and a recheck allowance of `max_total_size` when that exceeds 256 MiB (else 256 MiB), and `--zip-consistency ignore` SHALL skip these checks and their decode (v0.8.0, #837) | must |
 | FR-018 | The suite SHALL carry regression tests for the open-time advisories of the `zip` crate, so a dependency move cannot reintroduce them: GHSA-m3j8 (many EOCD records pointing at different entries of one central directory made `ZipArchive::new` allocate memory quadratic in file size; the test checks the allocation stays bounded) and GHSA-w2w4 (an EOCD64 locator offset above the record position underflowed a subtraction and panicked, and multi-disk fields were not validated; the test checks a typed refusal, no panic); both live in `tests/zip_eocd_open.rs`, a binary of its own because the dhat allocator is process-wide (#1028) | must |
+| FR-019 | THE SYSTEM SHALL identify the ZIP entry named by `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` by `ZipEntryIndex` (an `Option` for `EntryNameUnreadable`, which may not know it; the public index newtype of the `zip` crate's entry map, the same one `ZipInconsistency::HeaderMismatch` carries) and never by a bare `usize` (#1306) | must |
 
 ## 4. Non-Functional Requirements
 

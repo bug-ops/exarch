@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[001-security-pipeline/spec]]"
 ---
 
 # Delta: list reports special mode bits for ZIP and 7z (#1307)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1307, #1312). The 001 reference FR-060 is FR-061 in `spec.md`.
 
 ## ADDED
 

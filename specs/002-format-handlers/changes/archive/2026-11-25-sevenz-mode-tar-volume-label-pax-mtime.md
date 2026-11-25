@@ -5,7 +5,7 @@ tags:
   - formats/sevenz
   - formats/tar
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[002-format-handlers/spec]]"
   - "[[016-sanitized-mode-and-non-exhaustive-enums/spec]]"
@@ -14,6 +14,8 @@ related:
 ---
 
 # Delta: 7z Unix mode restore, TAR volume label, unsupported-type text, PAX mtime in list (#1296, #1297, #1298, #1287)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1296, #1297, #1298, #1287, #1305, #1308). FR-078 cross-references to the permission rules follow the `spec.md` numbering (001 FR-060 and FR-061).
 
 > [!info] Scope
 > Four independent changes to one capability. Requirement ids continue the table of [[002-format-handlers/spec]] (last id FR-077). Spec sync applies the ADDED rows and the MODIFIED rows, then moves this file to `changes/archive/`.

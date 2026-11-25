@@ -10,7 +10,7 @@ tags:
   - security
   - rust
 created: 2026-11-04
-updated: 2026-11-16
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -216,6 +216,8 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | FR-053 | THE walker SHALL give every directory entry the metadata it used for the decision (walkdir's `DirEntry::metadata()`: `stat` of the object a followed link leads to under `follow_symlinks`, `lstat` otherwise), carried in the entry type as `EntryType::Directory { metadata: Box<Metadata> }` (boxed to keep the entry small; `EntryType` is no longer `PartialEq`), and TAR and ZIP creation SHALL take a directory entry's mode, owner and modification time from it and SHALL NOT call `std::fs::metadata` on the directory path at write time (`add_directory_to_tar`, the ZIP directory arm), so the recorded values describe the object the walk saw and a path that changes in between cannot change them, and one `stat` per directory is saved when permissions are preserved (live test neutral, cost of one boxed `Metadata` clone per directory); pinned by a walker test that changes the mode after the walk and by a TAR round-trip of a followed `0700` directory reached through a symlink (#1214) | must |
 | FR-054 | WHEN `CreationConfig` sets `Parallelism::Threads(n)`, THE SYSTEM SHALL prepare ZIP entries concurrently under [[027-zip-parallel-compression/spec]]: sources opened and verified on the main thread in walk order (FR-048, FR-049), workers never re-open by path, exact-length copy and `SourceChanged` unchanged (FR-051, FR-052), output through the staged path of FR-005 unchanged, output bytes equal to `Sequential`, and a worker panic surfaces on the calling thread; every regular file of at most 8 MiB takes the prepared-entry path in both modes, the walk is sorted by file name inside each directory for every format, and a ZIP entry stores the source modification time, so the output depends on the tree and the configuration only (breaking change of the sequential bytes relative to 0.10) (#1027) | must |
 | FR-055 | THE walker SHALL resolve the link policy once, at walk time: `EntryType` is `Content { walked, links }`, `Directory` or `Symlink`, a followed top-level link is `Content` and a kept link is `Symlink`, and the TAR and ZIP writers SHALL NOT read `follow_symlinks` again (#1255) | must |
+| FR-056 | THE SYSTEM SHALL classify every creation object (a file, link or directory found by a directory walk, and a file or link named directly as a source) in one function, so one object under one set of flags gets one decision whichever way it was reached; the function applies its rules in a fixed order and the first that applies wins: (1) the archive entry name is computed first (`--strip-prefix` and multi-source naming): a directory whose name is empty is not an entry and not an error, any other object whose name is empty fails with `InvalidConfiguration { StripPrefix, RemovesWholeName }` whatever its size or kind; (2) a FIFO, socket or device is skipped as `SkipKind::SpecialFile` (FR-050); (3) a regular file whose size exceeds `max_file_size` is skipped as `SkipKind::OverMaxFileSize` ([[002-format-handlers/spec]] FR-076); (4) an unfollowed link becomes `EntryType::Symlink`, a directory `EntryType::Directory`, and everything else `EntryType::Content` (FR-053, FR-055); the size is judged on the metadata the caller saw (walkdir's entry metadata for a walked object, and for a named source `stat` of a followed link under `follow_symlinks` or `lstat` otherwise); a skip always records the archive entry name, never the source path; a named source is checked against the excluded output once; the walker-only rules (hidden files, exclude patterns, the staged and target files, FR-015, FR-026) stay in the walk; name-first is deliberate, because the size limit must not change the outcome (#1292) | must |
+| FR-057 | WHEN TAR or ZIP creation has opened a source (FR-049) and before it writes any of its data, THE SYSTEM SHALL check the size the opened handle reports against `max_file_size`, with the one size rule of FR-056 step 3; a file that grew past the limit after the walk is skipped as `SkipKind::OverMaxFileSize` with its archive entry name, nothing of it is written, it does not count in `files_added`, and its progress entry is completed, identically for ZIP and TAR; the check judges the opened handle and the walker judges an earlier `stat`, so both stay; a source whose content no longer matches the size it reported is still `SourceChanged` (FR-051, FR-052) (#1288) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -267,6 +269,10 @@ THEN it fails with InvalidConfiguration (setting exclude_pattern), exit 1, and n
 | A source file in a directory without read permission (for example `0311`) | Archived normally (FR-048) |
 | Windows: no file identity is available | Only the regular-file and size checks apply (FR-049) |
 | Single-file top-level source matching an exclude pattern | Not filtered (unchanged behavior) |
+| A file over `max_file_size` whose name `--strip-prefix` empties, named as a source or found in a walked directory | Both runs fail with `InvalidConfiguration { StripPrefix, RemovesWholeName }` (FR-056, #1292); before this change the walked file was skipped as `over_max_file_size` |
+| A FIFO whose name `--strip-prefix` empties | Fails with `InvalidConfiguration`, named or walked, not skipped (FR-056) |
+| A skipped file (special or over the limit) | The skip names the archive entry, never the source path (FR-056) |
+| A file under `max_file_size` at the walk that grows past it before the open, TAR or ZIP | Skipped as `over_max_file_size`, not written, not counted in `files_added` (FR-057, #1288) |
 
 ## 7. Success Criteria
 

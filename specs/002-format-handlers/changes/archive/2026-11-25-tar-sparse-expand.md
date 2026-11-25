@@ -4,7 +4,7 @@ tags:
   - delta
   - formats/tar
 created: 2026-11-25
-status: open
+status: merged
 related:
   - "[[002-format-handlers/spec]]"
   - "[[003-config-api/spec]]"
@@ -15,6 +15,8 @@ related:
 ---
 
 # Delta: opt-in expansion of old GNU sparse TAR entries (#1349)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1349, #1372). The CLI requirement is FR-152 in `005-cli/spec.md`, not FR-150, which that spec already used.
 
 > [!info] Scope
 > Requirement ids continue the table of [[002-format-handlers/spec]] (last id FR-077; the open delta `sevenz-mode-tar-volume-label-pax-mtime` adds FR-078 to FR-080). The surface requirements live in sibling deltas: [[003-config-api/spec]] (FR-077), [[005-cli/spec]] (FR-150), [[006-python-bindings/spec]] (FR-125), [[007-node-bindings/spec]] (FR-136), [[019-verify-and-list-model/spec]] (FR-068). Spec sync applies all of them in the same PR.

@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-23
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[001-security-pipeline/spec]]"
 ---
 
 # Delta: the extraction copy ceiling is an AdmittedSize, `QuotaPermit::into_bytes` is removed (#1340)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1340, #1347).
 
 > [!info] Scope
 > Capability: `013-quota-permit-capability-token`. Internal (`pub(crate)`) surface only; no public API or observable behavior changes.

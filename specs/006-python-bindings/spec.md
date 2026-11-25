@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-16
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -214,6 +214,7 @@ THEN extraction respects those settings
 | FR-122 | `SecurityConfig.with_repeated_paths(str)` SHALL accept `"keep_first"` and `"refuse"` (closed-enum snake_case strings), expose the matching attribute and a `.pyi` entry, and raise the typed repeated-path error (#1201) | must |
 | FR-123 | The extract, list and verify functions SHALL take `password: bytearray \| None` (`bytes` and `str` are refused with a typed error, the caller wipes their buffer); `SecurityConfig` SHALL expose `max_kdf_work`; `SecurityViolationError` SHALL carry a `reason` attribute (default `None`) naming the encryption refusal (including `unusable_password`); `extract_archive_to_memory[_with_progress]`, `extract_archive_to_callback`, `list_archive_bytes[_with_progress]` and `verify_archive_bytes[_with_progress]` SHALL take `password` as the last parameter, validated before the archive is read; `ArchiveEntry.encrypted` SHALL be a `bool`; core owns every check (#1023, #1241, #1242, #1246, #1256, [[024-encrypted-archive-support/spec]] FR-003) | must |
 | FR-124 | An entry below an existing escaping symlink SHALL raise `SymlinkEscapeError` in every format; `test_destination_errors.py` asserts that kind only (#1230). Parallelism stays unexposed in the Python binding (#1027) | must |
+| FR-125 | `SecurityConfig` SHALL expose the `tar_sparse` property (string `"refuse"` or `"expand"`, default `"refuse"`; any other value raises `ValueError`) and `with_tar_sparse(policy)`, typed in `exarch.pyi` and mapped to `SecurityConfig::with_tar_sparse` ([[002-format-handlers/spec]] FR-081); the binding does type mapping only (#1349) | must |
 
 ## 4. Non-Functional Requirements
 

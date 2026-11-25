@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-23
-status: open
+status: merged
 related:
   - "[[spec]]"
-  - "[[013-quota-permit-capability-token/changes/copy-ceiling-admitted-size]]"
+  - "[[013-quota-permit-capability-token/changes/archive/2026-11-25-copy-ceiling-admitted-size]]"
 ---
 
 # Delta: the streaming ceiling of FR-014 is typed (#1340)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1340, #1347).
 
 > [!info] Scope
 > Capability: `001-security-pipeline`. Behavior of FR-014 is unchanged; only the type that carries the ceiling changes. Requirement FR-012 of [[013-quota-permit-capability-token/spec]] holds the contract.

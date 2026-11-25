@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-11-16
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -202,6 +202,7 @@ THEN extraction respects those settings
 | FR-133 | The security options SHALL accept `repeatedPaths: 'keep_first' \| 'refuse'` and `maxKdfWork`; the extract, list and verify options SHALL accept `password?: Uint8Array` (a `Buffer` is one; a string is refused with a typed error), and `extractArchiveToMemory[WithProgress][Sync]`, `extractArchiveToCallback[Sync]`, `listArchiveBytes[WithProgress][Sync]` and `verifyArchiveBytes[WithProgress][Sync]` SHALL take `password?: Uint8Array | null` as the last parameter (after `signal` where one exists), validated before the archive is read; every entry kind interface SHALL carry a boolean `encrypted`; native errors SHALL expose a `reason` property naming an encryption refusal (including `unusable_password`); `index.d.ts` is regenerated; core owns every check (#1201, #1023, #1256) | must |
 | FR-134 | An entry below an existing escaping symlink SHALL surface as `SYMLINK_ESCAPE` in every format (#1230) | must |
 | FR-135 | `scripts/check-package.mjs` SHALL compare the packed `package.json` with the committed one by whole-object, key-order-insensitive deep equality, with the field allowlist of what `pnpm pack` rewrites kept in a constant next to its measurement; a difference, including a key present in only one, is an error naming the field, and mutation tests in `loader.test.js` cover an exports redirect, `bin`, an added postinstall, a changed `main` and an added dependency (#1233); the tar and zip test builders live once in `tests/helpers/archives.js` (#1234). Parallelism stays unexposed in the Node binding (#1027) | must |
+| FR-136 | `SecurityConfig` SHALL expose `tarSparse` (`TarSparsePolicy`, `'refuse' \| 'expand'`, default `'refuse'`) and `withTarSparse(policy)`, typed in `index.d.ts` and mapped to `SecurityConfig::with_tar_sparse` ([[002-format-handlers/spec]] FR-081); the exported enum values equal `TarSparsePolicy::as_str` (#1349) | must |
 
 ## 4. Non-Functional Requirements
 

@@ -9,7 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
-updated: 2026-11-08
+updated: 2026-11-25
 status: implemented
 related:
   - "[[constitution]]"
@@ -128,11 +128,12 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | FR-004 | `ValidatorCore::validate_entry_path_in` (takes a `NodeKind` and returns an `EntryPath<SafePath>`; `EntryValidator::validate_entry_path` until v0.7.0, removed in #808) SHALL split path validation out of `validate_entry`, so callers that must inspect the destination before deciding whether to reserve quota (7z's duplicate-skip check) are not forced to reserve quota just to obtain the validated path | must |
 | FR-005 | `ValidatorCore::reserve_file` (`EntryValidator::reserve_file` until v0.7.0) SHALL mirror `charge_hardlink`'s decoupling for the 7z duplicate-skip case: quota is reserved only *after* the destination is inspected and the entry is confirmed not to be a skipped duplicate; the 7z pre-pass (`PrePass::reserve_file`, its own `ValidatorCore`) discards that permit, since it only checks the quota before any write, and the write path obtains its permit from `validate_file_in` | must |
 | FR-006 | EVERY format's file-write path (TAR, ZIP, 7z) SHALL consume its `QuotaPermit` by value at the point of writing, not merely hold a shared reference to it | must |
-| FR-007 | WHERE an extraction target needs an owned `QuotaPermit`, it SHALL obtain it from the typed `ValidatedFile` that `ValidatorCore::validate_file_in` returns (`security::admitted`, v0.8.0, #793, #808), which carries the permit by value; `ValidatedEntry::into_parts()` (v0.6.0 to v0.7.0) and `ValidatedEntry` itself (#900) were removed; `EntrySink::create_file` and `create_file_from` receive the permit's bytes as the `Copy` `AdmittedSize` (`QuotaPermit::into_admitted`, #909), so a sink cannot be handed a size that was not charged | must |
+| FR-007 | WHERE an extraction target needs an owned `QuotaPermit`, it SHALL obtain it from the typed `ValidatedFile` that `ValidatorCore::validate_file_in` returns (`security::admitted`, v0.8.0, #793, #808), which carries the permit by value; `ValidatedEntry::into_parts()` (v0.6.0 to v0.7.0) and `ValidatedEntry` itself (#900) were removed; `EntrySink::create_file` and `create_file_from` receive the permit's bytes as the `Copy` `AdmittedSize` (`QuotaPermit::into_admitted`, #909), so a sink cannot be handed a size that was not charged; a crate-private `admitted(&self) -> AdmittedSize` reads the reserved size without spending the permit (used for the byte-counter overflow check before the file is created), and `into_bytes` is removed (#1340) | must |
 | FR-008 | Since v0.8.0 (#793, #808) the TAR, ZIP and 7z handlers SHALL NOT match on a validated-entry enum; each entry kind is admitted through its own `ExtractTarget::validate_*` method returning its own typed proof, and only `validate_file` yields a `ValidatedFile` carrying a permit, so a permit cannot be bound for another kind and the ZIP runtime fail-closed guard of v0.6.0 is no longer needed (`ValidatedEntryType` and `EntryValidator::validate_entry` were removed, #900) | must |
 | FR-009 | `EntryCount` SHALL be a zero-sized, non-`Clone`/non-`Copy`, non-`Default` token whose only producer is `QuotaTracker::reserve_count`; `ValidatedHardlink` SHALL carry it as `counted`, so counting a hardlink against `max_file_count` twice, or never, is unrepresentable | must |
 | FR-010 | `max_file_count` SHALL count symlinks and hardlinks as well as files in `extract` (since #1038 it counts every entry, directories and skipped ones too): `ValidatorCore::reserve_symlink` charges a symlink's stored size and count through `QuotaTracker::reserve` and discards the permit, since no writer consumes one for a link | must |
 | FR-011 | `QuotaPermit` SHALL carry the reserved bytes as `Uncompressed`, so `ExtractTarget::file` takes no separate size and a write cannot disagree with what was charged; the ZIP and 7z extraction proof tokens SHALL be bound to their archive and the validated-file proof SHALL be built only by the validator (internal) (v0.8.0, #846, #869, #879, #888) | must |
+| FR-012 | THE SYSTEM SHALL cap every extraction copy by an `AdmittedSize`: `copy_cancellable` takes `ceiling: AdmittedSize` instead of `expected_size: Option<u64>`, so an extraction copy can be neither uncapped (`None`) nor capped by a number that did not come from a permit; the callers (`copy_and_finish_file` for TAR, ZIP and 7z, the sink `write_staged`, and the hardlink copy `copy_file_content_with_permit`) pass `QuotaPermit::into_admitted()`; the copy loop with an optional ceiling and an optional progress poll (`copy_polled`) stays crate-private for the verification path, whose cap is a declared size, not a quota, and whose drain is intentionally uncapped; internal (`pub(crate)`) surface only, no public API or observable behavior changes (#1340) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -147,7 +148,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `QuotaPermit` | Capability token proving a file's size was reserved against a `QuotaTracker` | carries the reserved `bytes: Uncompressed` (private; spent by crate-private `into_bytes(self)`, the write ceiling); not `Clone`, not `Copy`, no `Default`; sole producer is `QuotaTracker::reserve` |
+| `QuotaPermit` | Capability token proving a file's size was reserved against a `QuotaTracker` | carries the reserved `bytes: Uncompressed` (private; read by crate-private `admitted(&self)` and spent by `into_admitted(self)` into the `AdmittedSize` that is the write ceiling, #1340); not `Clone`, not `Copy`, no `Default`; sole producer is `QuotaTracker::reserve` |
 | `QuotaTracker::reserve` | Renamed from `record_file`; charges a file's size against `max_file_size`/`max_total_size`/`max_file_count` and, on success, returns a `QuotaPermit` | `fn reserve(&mut self, size: u64, config: &SecurityConfig) -> Result<QuotaPermit>` |
 | `EntryCount` | Capability token proving an entry was counted against `max_file_count` while its bytes are not yet charged (hardlinks); exported ungated at `security::EntryCount` | `PhantomData`-based; only producer is `QuotaTracker::reserve_count`; consumed by `QuotaTracker::charge` |
 | `ValidatorCore::charge_hardlink` | Renamed from `reserve_hardlink` (itself renamed from `record_hardlink`); standalone permit issuance for hardlink targets (size known only in TAR's second pass), spending the `EntryCount` from the first pass | `fn charge_hardlink(&mut self, counted: EntryCount, size: u64) -> Result<QuotaPermit>` |
@@ -156,7 +157,7 @@ THEN it can inspect the destination, then reserve quota (ValidatorCore::reserve_
 | `ValidatorCore::validate_entry_path_in` | Method splitting path validation out of per-kind validation, for callers needing the destination path before committing to a quota charge | takes a `NodeKind`, returns `EntryPath<SafePath>` (`Root` or `Child`) without reserving quota |
 | `ValidatedHardlink` | Typed proof carrying the `HardlinkTarget` and the first-pass `EntryCount` (`counted`) | The second pass spends `counted` through `charge_hardlink` |
 | `ValidatedFile` | Typed proof returned by `ValidatorCore::validate_file_in` (v0.8.0): `path`, `permit`, `mode` | The way a target takes the permit by value |
-| `AdmittedSize` | `Copy` view of the permit's bytes for `EntrySink::create_file*` (#909) | `get()`; built only by `QuotaPermit::into_admitted` |
+| `AdmittedSize` | `Copy` view of the permit's bytes for `EntrySink::create_file*` (#909) and the write ceiling of the extraction copy (#1340) | `get()`; built only by `QuotaPermit::admitted` and `QuotaPermit::into_admitted` |
 
 ## 6. Edge Cases and Error Handling
 

@@ -4,12 +4,14 @@ tags:
   - spec
   - delta
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[spec]]"
 ---
 
 # Delta: sanitizer clears the sticky bit (#1305) and verify judges special bits in every format (#1307)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1305, #1307, #1309, #1312). Renumbered at sync: FR-060 is FR-061 in `spec.md`, and the references to FR-059 are FR-060.
 
 > [!info] Scope
 > Capability: `001-security-pipeline`. Related delta: `specs/002-format-handlers/changes/sevenz-mode-tar-volume-label-pax-mtime.md` (FR-078).

@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-23
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[015-atomic-force-destination-swap-hardening/spec]]"
 ---
 
 # Delta: atomic extraction under an owner-restricting umask explains the umask and always removes the staging directory (#1339)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1339, #1347).
 
 > [!info] Scope
 > Capability: `003-config-api` (`Staging::Atomic`, `Staging::AtomicReplace`, FR-035, FR-036). Staging directory preparation stays as in FR-111 of [[015-atomic-force-destination-swap-hardening/spec]]. Unix only; other platforms have no umask to explain.

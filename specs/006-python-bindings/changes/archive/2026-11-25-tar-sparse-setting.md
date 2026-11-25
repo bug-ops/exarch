@@ -4,13 +4,15 @@ tags:
   - delta
   - formats/tar
 created: 2026-11-25
-status: open
+status: merged
 related:
   - "[[006-python-bindings/spec]]"
-  - "[[002-format-handlers/changes/tar-sparse-expand]]"
+  - "[[002-format-handlers/changes/archive/2026-11-25-tar-sparse-expand]]"
 ---
 
 # Delta: Python `tar_sparse` setting (#1349)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1349, #1372).
 
 > [!info] Scope
 > Requirement id continues the table of [[006-python-bindings/spec]] (last id FR-124). Core behaviour is [[002-format-handlers/spec]] FR-081 to FR-084. Spec sync applies the ADDED row and moves this file to `changes/archive/`.

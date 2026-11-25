@@ -4,13 +4,15 @@ tags:
   - spec
   - delta
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[spec]]"
   - "[[003-config-api/spec]]"
 ---
 
 # Delta: extraction honors PermissionPolicy (#1308)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1308, #1312). Renumbered at sync: FR-059 is FR-060 in `spec.md`, because FR-059 holds the banned-component rule of #1348.
 
 > [!info] Scope
 > Capability: `001-security-pipeline`. Decided by the user. Related deltas: `sanitizer-clears-sticky-bit` (same directory), `specs/003-config-api/changes/extract-honors-permission-policy.md`. Requirement ids continue the table of [[spec]] (last id FR-058; FR-060 is in the sticky-bit delta).

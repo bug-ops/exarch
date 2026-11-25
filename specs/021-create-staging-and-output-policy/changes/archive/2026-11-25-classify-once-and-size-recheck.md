@@ -4,13 +4,15 @@ tags:
   - delta
   - creation
 created: 2026-11-22
-status: open
+status: merged
 related:
   - "[[021-create-staging-and-output-policy/spec]]"
   - "[[002-format-handlers/spec]]"
 ---
 
 # Delta: one classification for named and walked sources, size re-check on the opened handle (#1292, #1288)
+
+> [!info] Merged into `spec.md` at spec sync of the v0.11.0..main sync (#1292, #1288, #1306).
 
 > [!info] Scope
 > Requirement ids continue the table of [[021-create-staging-and-output-policy/spec]] (last id FR-055).

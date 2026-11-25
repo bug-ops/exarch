@@ -98,7 +98,9 @@ def test_sparse_entry_expands_to_its_real_size(sparse_archive, temp_dir):
     content = (out / "hole.bin").read_bytes()
     assert content == b"hello" + bytes(995)
     assert (out / "after.txt").read_bytes() == b"after"
-    sizes = {entry.path: entry.size for entry in exarch.list_archive(sparse_archive, config).entries}
+    sizes = {
+        entry.path: entry.size for entry in exarch.list_archive(sparse_archive, config).entries
+    }
     assert sizes["hole.bin"] == 1000
     assert exarch.verify_archive(sparse_archive, config).status == "PASS"
 

@@ -149,6 +149,3 @@ def test_concurrent_7z_operations_with_different_passwords_each_succeed(temp_dir
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         assert all(pool.map(run, range(80)))
-
-
-

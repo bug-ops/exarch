@@ -7,71 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- TAR: opt-in `tar_sparse` / `--tar-sparse expand` extracts old GNU sparse entries, counting the real size against the size quotas, and refuses sparse maps that readers parse differently; PAX sparse records stay refused (#1349, #1372).
+## [0.12.0] - 2026-11-25
 
 ### Breaking
 
-- Core API: `TarAmbiguity::SparseMap`, `SparseMapDefect`, `TarSparsePolicy` and new `TarHeaderField` variants for the sparse policy; `SecurityConfig` gains a `tar_sparse` field (#1349, #1372).
+- Core API: new `TarAmbiguity::SparseMap`, `SparseMapDefect`, `TarSparsePolicy` and `TarHeaderField` variants, and a `tar_sparse` field on `SecurityConfig` (#1349, #1372).
+- Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` (`unsupported entry type: 'D' (0x44)`), `Violation::LinkTargetBannedComponent` carries a `LinkKind`, and `Violation::ShortNameAlias` is new (#1306, #1348, #1364).
+- Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize`; a banned component made only of ignored characters is `ConfigProblem::OnlyIgnoredCharacters`, not `Empty` (#1306, #1363).
 - 7z: archives whose AES coders in one block declare different key parameters, or whose encrypted header has several AES coders, are refused; 7-Zip does not write them (#1351, #1352, #1372).
-- Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#1306).
-- Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
-- Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
-- Permissions: extraction clears the sticky bit of regular files in every format, so a TAR file with the sticky bit extracts like ZIP and 7z, and `verify` reports a stored sticky bit on a TAR regular file as `InvalidPermissions` like setuid and setgid (#1309).
-- Permissions: `extract` honors the permission policy: without `--preserve-permissions` a file gets its archive mode minus the umask, with it the exact sanitized archive mode, in TAR, ZIP and 7z (#1312).
-- Core API: `Violation::LinkTargetBannedComponent` carries a `LinkKind` and its message names the link kind (#1348).
-- ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits of ZIP files and the mode of 7z files, so `verify --strict` can exit 3 on archives that passed before (#1312).
-- Core API: a banned path component made only of characters that file name comparison ignores is `ConfigProblem::OnlyIgnoredCharacters`, not `Empty`, in core, CLI, Python and Node (#1363).
-- Core API: new `Violation::ShortNameAlias`; on Windows an existing entry named by an alternate 8.3 spelling is refused in extraction and link targets (#1364).
+- Windows: an existing entry named by an alternate 8.3 spelling is refused in extraction and link targets (#1364).
+- Permissions: `extract` honors the permission policy in TAR, ZIP and 7z: without `--preserve-permissions` a file gets its archive mode minus the umask, with it the exact sanitized mode (#1312).
+- Permissions: extraction clears the sticky bit of regular files in every format, and `verify` reports a stored sticky bit on a TAR regular file as `InvalidPermissions` (#1309).
+- ZIP and 7z: `list` reports the stored setuid, setgid and sticky bits (ZIP) and the mode (7z), so `verify --strict` can exit 3 on archives that passed before (#1312).
+- Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, and skips name the entry, not the source path (#1306).
+
+### Added
+
+- TAR: opt-in `tar_sparse` / `--tar-sparse expand` extracts old GNU sparse entries, counting the real size against the size quotas, and refuses sparse maps that readers parse differently; PAX sparse records stay refused (#1349, #1372).
+- Tests: a Docker recipe runs the Linux sandbox tests with Landlock enforced under an owner-restricting umask matrix, and the serial idle-host benchmark step is documented (#1312, #1346).
 
 ### Changed
 
-- 7z: one KDF charge walk serves admission and the runtime check, and the encrypted header is read before any key is derived (#1363).
-- 7z: each operation derives its own AES keys and hands them to the decoder in raw-key form, so the process-wide key slot and the AES turn are gone and operations no longer wait for or evict each other (#1351, #1352, #1372).
-- Core: one shared poisoned-lock recovery helper per crate replaces the duplicated `lock().unwrap_or_else(PoisonError::into_inner)` calls (#1362, #1372).
-- Core: one landing check for banned path components, typed owner and mode predicates for staging trust checks, and `FileWrite` drops its unused mode and marking (#1363).
-- CLI: tar ambiguity refusals get a hint that matches the refusal, in place of "may be corrupted" (#1363).
-- Dependencies: zstd 0.14.5 (libzstd 1.6.0) in both lockfiles, fixing CVE-2026-124851 (#1363).
-- Creation: a named source and a walked file are decided by one classifier, and TAR creation re-checks `max_file_size` on the opened file (#1306).
-- TAR: each PAX header body is parsed once per entry (#1306).
-- Dependencies: `zip` ~9.8, and the weekly zip-drift job tests the newest 9.x again (#1306).
-- Fuzzing: `fuzz/Cargo.lock` follows the workspace version and the release steps refresh it, and the `encrypted` target accepts an empty file only for an unencrypted entry (#1306).
-- CLI: `exarch-cli` has a disallowed-methods clippy list so path-based filesystem calls are linted (#1306).
-- Docs: redundant explicit link targets in `exarch-core` are removed and CI gates `--document-private-items` rustdoc (#1306).
-- Lints: clippy exempts tests from `unwrap_used`/`expect_used` via `clippy.toml`, `disallowed_methods` exemptions became `#[expect]`, every `#[allow]` carries a reason, and `.cargo/config.toml` denies build warnings (#1286).
-- TAR: the GNU volume label skip lives on `CheckedTarEntry`, so an unchecked entry cannot be classified as skippable (#1309).
-- Lints: test-only helpers are `#[cfg(test)]`, the zip symlink cast states its real bound, the CLI interrupt guard uses `DropGuard`, and binding docs refer to `Password::MAX_LEN` (#1309).
-- Tests: the grow-after-walk creation fixture and the 7z encrypted-block predicate are written once (#1309).
-- Fuzzing: the fuzz crate lints clean under clippy as a CI step, and the `encrypted` oracle keys its empty-file exemption by path and encryption state (#1309).
-- Tests: a Docker recipe runs the Linux sandbox tests with Landlock enforced, and the serial idle-host benchmark step is documented (#1312).
-- Core: the extraction copy takes its write ceiling as `AdmittedSize` and `QuotaPermit::into_bytes` is removed (#1340), TAR/ZIP/7z writes share one `FileWrite` bundle (#1343), staging owner-bit recovery goes through `DirMode` and drops setuid (#1341), and MSRV 1.100 APIs replace older patterns (#1344) (#1347).
-- CI & Dependencies: Dependabot waits 7 days after publication in every ecosystem (#1338), a weekly `floor-vs-cooldown` job flags a `zip` floor the cooldown cannot resolve (#1342), and the Linux sandbox recipe runs an owner-restricting umask matrix as a non-root user (#1346) (#1347).
-- Docs: `CONTRIBUTING.md` documents the `cargo hack --no-dev-deps` workaround for the workspace lint (#1345) (#1347).
-- Core: centralized buffered file writes via `copy_and_finish_file` (#1314), delegated `zip_tail::holds_reader_record` to `chunk_search::search_chunks` (#1313), made `DestOccupancy::replace_mode` exhaustive (#1317), and adopted Rust 1.93–1.100 cleanups with `[workspace.lints.cargo]` (#1318).
-- Bindings & CLI: `exarch-python` acquires the GIL once per error conversion (#1316), `exarch-cli` uses saturating counters and `ExtractionReport::total_items()` (#1315), and `exarch-node` crate docs point to `bug-ops/exarch` (#1319).
-- CI & Dependencies: added `pnpm audit` and `pip-audit` to the security workflow (#1322), hash-pinned `pip-audit` in `crates/exarch-python/uv.lock` (`ci-audit` group) (#1324), added weekly `npm` Dependabot updates for `crates/exarch-node` (#1323), enabled Cargo 1.100's 7-day `global-min-publish-age` cooldown with overrides for `zip-drift` and `release` (#1321), and aligned `dependabot.yml`, `deny.toml`, and `ci.yml` comments (#1320).
+- 7z: each operation derives its own AES keys, the encrypted header is read before any key is derived, and one KDF charge walk serves admission and the runtime check (#1351, #1352, #1363, #1372).
+- Core: shared poisoned-lock recovery helper, one landing check for banned components, typed `DirMode` and owner/mode predicates for staging, `AdmittedSize` as the copy ceiling, one `FileWrite` bundle and `copy_and_finish_file` for TAR/ZIP/7z writes (#1313, #1314, #1317, #1340, #1341, #1343, #1347, #1362, #1363, #1372).
+- Core: TAR parses each PAX header body once per entry, the GNU volume label skip lives on `CheckedTarEntry`, and creation decides named and walked sources with one classifier that re-checks `max_file_size` on the opened file (#1306, #1309).
+- CLI: tar ambiguity refusals get a matching hint, counters saturate, and a `clippy.toml` method ban lints path-based filesystem calls (#1306, #1315, #1363).
+- Bindings: `exarch-python` acquires the GIL once per error conversion and `exarch-node` crate docs point to `bug-ops/exarch` (#1316, #1319).
+- Lints: `clippy.toml` exempts tests from `unwrap_used`/`expect_used`, escapes use `#[expect]` with a reason, test-only helpers are `#[cfg(test)]`, and Rust 1.93-1.100 APIs replace older patterns with `[workspace.lints.cargo]` (#1286, #1309, #1318, #1344, #1347).
+- Dependencies: zstd 0.14.5 (CVE-2026-124851), `zip` ~9.8 with a weekly zip-drift job, refreshed Python (`uv.lock`) and Node (`pnpm-lock.yaml`, biome 2.6.9, `@napi-rs/cli` 3.11.1) lockfiles, and routine dependency and action bumps (#1306, #1329-#1334, #1363).
+- CI: Dependabot and Cargo wait 7 days after publication (with `zip-drift` and `release` overrides), a weekly `floor-vs-cooldown` job flags an unresolvable `zip` floor, `pnpm audit` and `pip-audit` (hash-pinned) run in security, weekly `npm` Dependabot updates cover `exarch-node`, `--document-private-items` rustdoc and fuzz clippy are gated, and `fuzz/Cargo.lock` follows the workspace version (#1306, #1309, #1320-#1324, #1338, #1342, #1347).
+- Docs: redundant explicit link targets are removed and `CONTRIBUTING.md` documents the `cargo hack --no-dev-deps` workaround (#1306, #1345).
 
 ### Fixed
 
-- Staging: an atomic extract of an archive with subdirectories under an owner-restricting umask reports the umask and always removes the staging directory (#1339) (#1347).
-- Paths: banned path components match with Unicode normalization and case folding, ignoring characters HFS+ skips, a banned name made only of such characters is refused as empty, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink (#1348).
-- 7z: key derivations are charged against `max_kdf_work` per operation, a refusal stays in force for the rest of the operation, and blocks with several AES coders on a non-linear layout are charged per coder (#1348).
-- Staging: recover `0700` owner bits on freshly created staging directories under owner-restricting umasks (e.g. `0277`) and report the umask clearly when the directory cannot be opened (#1311), only classifying `unopenable_error` as a umask error when `0o077` group/other bits are clear (#1325).
-- Tests: made `test_create_tar_directory_mode_without_preserve_permissions` umask-independent (#1310), and gated `std::path::Path` under `#[cfg(feature = "encryption")]` in `sevenz_mode_and_ppmd_key` so integration tests compile with `--no-default-features` (#1326).
-
-- 7z: extraction restores the stored Unix permission bits of regular files through the TAR/ZIP sanitizer (#1306).
-- 7z: `extract` reports a wrong password on an AES PPMd block as `wrong_password_or_corrupt`, like `verify` (#1306).
-- TAR: a GNU volume label (`V`) without data and without a local extension header before it is skipped by `extract`, `list` and `verify`; other labels are `TAR_AMBIGUITY` (#1306).
-- TAR: `list` reports the modification time of a local PAX `mtime` record (#1306).
-- TAR: a PAX record whose value contains a newline is accepted when its declared length frames it, so archives with binary `SCHILY.xattr.*` values extract again; ambiguous records stay refused (#1291).
-- TAR: the PAX sparse-map record `SUN.holesdata` is refused as an unsupported record, like `GNU.sparse.*` (#1291).
-- Creation: a single source file over `--max-file-size` is skipped as `over_max_file_size` in TAR as well as ZIP (#1291).
-- Creation: ZIP `create` clamps a source mtime in year 10000 or later to the last DOS date instead of panicking (#1291).
-- `verify`: a declared-size overrun or a not-decodable coder in an AES 7z block keeps its own report instead of `wrong_password_or_corrupt` (#1291).
-- Docs: the 15 intra-doc links that broke with `--document-private-items` resolve (#1291).
-- Tests: the `exarch-cli` encryption tests read fixtures from inside the package (#1291).
-- Fuzzing: the `encrypted` target accepts empty files in its authenticity check, so a renamed directory entry no longer fails the run (#1283).
+- Paths: banned components match with Unicode normalization and case folding, ignoring characters HFS+ skips, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink (#1348).
+- 7z: KDF work is charged against `max_kdf_work` per operation and a refusal stays in force for the rest of the operation, including blocks with several AES coders on a non-linear layout (#1348).
+- 7z: extraction restores stored Unix permission bits of regular files, and a wrong password on an AES PPMd block is `wrong_password_or_corrupt` in `extract`, like `verify` (#1306).
+- TAR: a PAX record whose value contains a newline is accepted when its declared length frames it, `SUN.holesdata` is refused like `GNU.sparse.*`, a GNU volume label without data is skipped, and `list` reports a local PAX `mtime` (#1291, #1306).
+- Staging: owner bits are recovered on staging directories under owner-restricting umasks, the umask is reported when the directory cannot be opened, and an atomic extract always removes its staging directory (#1311, #1325, #1339, #1347).
+- Tests: umask-independent creation test, `--no-default-features` integration build, and the fuzz `encrypted` target accepts an empty file only for an unencrypted entry (#1283, #1310, #1326).
 
 ## [0.11.0] - 2026-11-16
 
@@ -2453,7 +2427,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/bug-ops/exarch/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/bug-ops/exarch/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/bug-ops/exarch/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bug-ops/exarch/compare/v0.8.0...v0.9.0

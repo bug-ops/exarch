@@ -66,10 +66,14 @@ python -m mypy.stubtest exarch --allowlist stubtest-allowlist.txt
 **Node.js bindings:**
 ```bash
 cd crates/exarch-node
-npm install
+pnpm install --frozen-lockfile
 npm run build
 npm test
 ```
+
+`npm run build` regenerates `index.d.ts`. Commit it with the change that alters
+the Node API; CI fails when `git diff --exit-code crates/exarch-node/index.d.ts`
+shows a difference.
 
 The release gate checks the exact packed tarball against the committed loader
 (`index.js`) and `package.json`. Run it locally with `npm run check:package`,
@@ -130,8 +134,9 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 # Manifest version floors must be at least 7 days old (`global-min-publish-age`), else
 # `cargo update` and `cargo semver-checks` fail
 
-# Check documentation
+# Check documentation (CI also builds `-p exarch-core` with `--document-private-items`)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features -p exarch-core --document-private-items
 
 # Run tests
 cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node
@@ -143,6 +148,34 @@ cargo test --doc --workspace --all-features --exclude exarch-python --exclude ex
 # Security audit
 cargo deny check
 ```
+
+CI also runs the following, so run them when you touch the matching files:
+
+```bash
+# Fuzz crate: formatting and lints
+cargo +nightly fmt --manifest-path fuzz/Cargo.toml -- --check
+cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+
+# Binding dependency audits (after changing pnpm-lock.yaml or uv.lock)
+(cd crates/exarch-node && pnpm audit)
+```
+
+Every `uses:` in `.github/` must pin a full 40-character commit SHA
+(`owner/action@<sha> # vX.Y.Z`); the `Action Pin Check` job rejects a tag.
+CI also runs `pip-audit` over the locked Python dependencies
+(`crates/exarch-python/uv.lock`).
+
+### Lints
+
+- `unwrap_used` and `expect_used` are warnings in library and binary code and
+  are allowed in tests (`clippy.toml`); use `?` outside tests.
+- Every `#[allow(...)]` carries a `reason = "..."`
+  (`clippy::allow_attributes_without_reason`). Prefer `#[expect(..., reason = "...")]`
+  so the attribute fails when it becomes unnecessary.
+- `exarch-cli` lints path-based filesystem mutators (`std::fs::write`,
+  `File::create`, `rename`, and similar) through `disallowed-methods`: write
+  through a directory handle, or add an `#[expect]` with a reason for a
+  deliberate by-name use.
 
 **Quick alias:**
 ```bash
@@ -238,6 +271,9 @@ tests; the tar-minefield corpus and its test are excluded from the package.
 - Place integration tests in `tests/` directory
 - Tests that wait on a child process or a signal wait on a ready line or the
   child's output, never a fixed sleep
+- Tests that assert a file mode must not depend on the host umask: extraction
+  without `--preserve-permissions` applies it, so a test passes on `022` and fails on `077`
+  unless it sets the mode policy or the umask explicitly
 - Security validators must have **100% test coverage**
 - Overall project coverage target: **80%+**
 - Write `assert_matches!(value, pattern)`, never `assert!(matches!(value, pattern))`:
@@ -297,6 +333,20 @@ step, with no parallel builds or test runs, and only when the 1-minute load
 average (`uptime`) is at or below about 7. Note the load next to each result;
 a result taken above that bar is directional only and must not be used to
 claim or dismiss a regression.
+
+## Dependency Cooldown
+
+`.cargo/config.toml` sets `global-min-publish-age = "7 days"`: `cargo update`
+skips crate versions published less than seven days ago, and Dependabot waits
+the same seven days in every ecosystem (security updates bypass it). To take a
+newer release on purpose, run the command with
+`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`; the `release` and `zip-drift`
+workflows do this deliberately.
+
+A version requirement in a manifest must not be newer than the cooldown, or
+`cargo update` and `cargo semver-checks` fail for everyone. The weekly
+`floor-vs-cooldown` job in `.github/workflows/zip-drift.yml` runs
+`cargo update --dry-run` for the workspace and the fuzz crate to catch this.
 
 ## Pull Request Process
 

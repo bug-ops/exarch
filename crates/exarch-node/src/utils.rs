@@ -1,6 +1,9 @@
 //! Utility functions for Node.js bindings.
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::BoundaryPath;
@@ -9,6 +12,15 @@ pub use exarch_core::path_text;
 
 use crate::CoreResult;
 use crate::error::Failure;
+
+/// Locks `mutex`, taking the data of a poisoned one.
+///
+/// Every value guarded by a mutex in this crate is a plain record that a
+/// panicking holder cannot leave half-written. This is the crate's single
+/// spelling of the recovery.
+pub fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The text of `path`, or the refusal a listing or in-memory extraction must
 /// raise: a lossy rendering could merge two distinct entries into one name.

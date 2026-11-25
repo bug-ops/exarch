@@ -17,6 +17,10 @@ Context for explaining refusals. A rejection for any reason here is the pipeline
 
 Extended attributes, ACLs and alternate data streams stored in an archive are never restored. The only mark an extracted file can get is a copy of the archive file's own download-origin mark, and only with `--mark-propagation when-marked` (default `never`): read through the archive's open handle, written through the handle that created each file, never derived from entry names or content. A source volume that cannot hold named streams has no mark to copy (`unmarked`). See `extract.md`.
 
+## Sparse TAR expansion
+
+`--tar-sparse expand` is the one opt-in that lets an entry be larger than the bytes stored for it. It is bounded by `--max-file-size` and `--max-total-size` only: there is no compression-ratio check on the expansion, and `extract` writes the holes (disk use equals the real size). Listing, verifying and skipping read only the stored bytes. Keep the size limits when the archive is not trusted; raising them raises the disk an extraction may fill.
+
 ## Decoder memory (no CLI flag)
 
 - `max_decoder_memory` defaults to 256 MiB (`SecurityConfig::max_decoder_memory`, Rust API; 1 GiB under `permissive()`). A `.tar.xz` whose LZMA2 dictionary needs more is refused by `extract`, `list`, and `verify` with `QuotaExceeded` (`DECODER_MEMORY`, message `quota exceeded: decoder memory (> 268435456 bytes)`).

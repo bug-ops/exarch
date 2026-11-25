@@ -38,6 +38,7 @@ pub use replace::ReplaceFailure;
 pub use replace::Restore;
 pub use replace::RestoreKind;
 pub use replace::StagingLeftover;
+pub use tar_ambiguity::SparseMapDefect;
 pub use tar_ambiguity::TarAmbiguity;
 pub use tar_ambiguity::TarExtensionKind;
 pub use tar_ambiguity::TarHeaderField;

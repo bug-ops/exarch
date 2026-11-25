@@ -13,7 +13,7 @@
 A TAR holding constructs that readers (`bsdtar`, Python `tarfile`) parse differently fails with `InvalidArchive`, `sub_code` `TAR_AMBIGUITY`:
 
 - a directory, symlink, or hardlink that declares a payload;
-- a GNU sparse (`S`) entry;
+- a GNU sparse (`S`) entry, unless `--tar-sparse expand` accepts its map (see "GNU sparse entries");
 - a size or checksum field that is not plain octal (sign or control character) or is base-256, including in `x`, `L`, `K` headers;
 - a `prefix` field in a header without ustar magic;
 - a PAX header with duplicate records, an empty key, a record over 999999 bytes, a non-numeric `size`, a non-canonical record length, or any `SCHILY.realsize` / `SUN.holesdata` / `GNU.sparse.*` record;
@@ -25,12 +25,28 @@ A TAR holding constructs that readers (`bsdtar`, Python `tarfile`) parse differe
 
 The `TAR_AMBIGUITY` hint depends on the variant and says that no option relaxes the refusal (it names `--zip-consistency ignore` as the ZIP-only switch on commands that accept it):
 
-- sparse (`S` entry or a sparse PAX record): well formed but unsupported; other tools may extract it;
+- a GNU sparse (`S`) entry under the default `--tar-sparse refuse`: well formed but refused by default; the hint names `--tar-sparse expand` and, otherwise, another trusted tool;
+- a sparse PAX record (`GNU.sparse.*`, `SCHILY.realsize`, `SUN.holesdata`): well formed but unsupported under both policies; other tools may extract it;
+- a sparse map that readers read differently (see "GNU sparse entries"): ambiguous, no option relaxes it;
 - ambiguous constructs (duplicate PAX records, global (`g`) overrides, stacked PAX or GNU long records, payload on a directory or link, non-zero padding, prefix without ustar, oversized or duplicate extension headers): well formed but tools disagree about it; the hint says to ask the producer to re-create it and never suggests another tool (a different reader may be the one that sees a hidden member);
 - a global PAX header over `max_tar_metadata_bytes` (default 4 MiB): not necessarily damaged; the hint says `No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_tar_metadata_bytes.`;
 - malformed headers (bad checksum, malformed or empty-key PAX record, non-numeric `size`, non-canonical number, extension header without magic, malformed GNU long body, window mismatch): `may be corrupted or malformed`, so treat the file as damaged.
 
-Only the sparse hint suggests extracting with another trusted tool; for the ambiguous group do not, have the producer re-create the archive. Do not debug either as damaged. `TAR_TRAILER` corrupt/truncated refusals keep the `may be corrupted or malformed` hint.
+Only the sparse hints suggest extracting with another trusted tool; for the ambiguous group do not, have the producer re-create the archive. Do not debug either as damaged. `TAR_TRAILER` corrupt/truncated refusals keep the `may be corrupted or malformed` hint.
+
+### GNU sparse entries (`--tar-sparse`)
+
+Default `refuse`: an old GNU sparse (`S`) entry fails `InvalidArchive`, `sub_code` `TAR_AMBIGUITY`, in `list`, `verify` and `extract`. `--tar-sparse expand` (also accepted by `list` and `verify`) reads it as a regular file of its real size with the holes written as zeros, only when `bsdtar`, Python `tarfile` and the `tar` crate read the map the same way. Anything else stays refused with `TAR_AMBIGUITY` (the message names the map defect) and no option relaxes it:
+
+- a slot with only one empty field, a used slot after an unused one, a zero offset in an extension block, or a zero length before the last used slot;
+- an extended flag other than 0 or 1, or extension blocks that do not match the flags;
+- a map offset, length or real size that is not plain octal or base-256 (same wording as other non-canonical numbers);
+- a PAX `size` record on the sparse entry (`PAX record "size" is not supported`), and every PAX sparse record, also under `expand`;
+- a sparse entry named like a directory (ending in `/`) that has a payload.
+
+Cost and limits under `expand`: the real size counts against `--max-file-size` and `--max-total-size` (`QuotaExceeded` in `extract` and `list`, a `HIGH` issue in `verify`) and against nothing else, because a TAR entry has no compressed size to take a ratio against. `extract` writes the holes, so the file takes its full real size on disk. `list`, `verify` and an entry that `extract` skips (`--allowed-extensions`, `--include`, `--exclude`) read only the archived bytes: a 4 TiB hole costs the same as its stored data. A skipped sparse payload is still held to the compression-ratio bound (`ZipBomb`, `sub_code` `SKIPPED_ENTRIES`, when its decoded bytes dwarf the compressed input that produced them).
+
+`list`, `verify` and `extract` all refuse the same maps (exit `1`, nothing written for the refused entry).
 
 `list` applies a local PAX `mtime` record. Global `g` headers, `uname`, `gname`, `uid`, `gid`, and `SCHILY.fflags` are ignored on purpose. Not covered: PAX keys that extractors apply (xattrs, ACLs) and data after a plain TAR's end marker. A global header with other records (such as `git archive`'s `comment`) is accepted.
 

@@ -16,6 +16,7 @@
 //! bytes the `tar` crate read to reach the entry: the checksum and size of
 //! every header and the framing of a local PAX body.
 
+mod sparse;
 mod window;
 
 use window::WindowWalk;
@@ -38,6 +39,7 @@ use crate::TarExtensionKind;
 use crate::TarHeaderField;
 use crate::TarNonRegularKind;
 use crate::TarPathKey;
+use crate::TarSparsePolicy;
 use crate::formats::tar_metadata_limit::MetadataWindow;
 
 const PAX_PATH: &[u8] = b"path";
@@ -58,6 +60,8 @@ const SIZE_FIELD: std::ops::Range<usize> = 124..136;
 const CHECKSUM_FIELD: std::ops::Range<usize> = 148..156;
 const PREFIX_OFFSET: usize = 345;
 const BASE256_MARKER: u8 = 0x80;
+const BASE256_VALUE: std::ops::Range<usize> = 4..12;
+const BLOCK: usize = 512;
 
 /// Whether a PAX header describes the next entry or every later entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,6 +90,28 @@ struct LocalOverrides {
     mtime: Option<SystemTime>,
 }
 
+/// How the bytes of an entry that nobody read are passed to reach the next
+/// header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SkipPlan {
+    /// Read the entry to its end, as for every entry but an accepted sparse
+    /// one.
+    #[default]
+    Drain,
+    /// Let the `tar` crate skip the archived bytes up to `end`, the offset of
+    /// the next header, without reading the entry.
+    ///
+    /// Reading a sparse entry yields its holes as zeros that no input byte
+    /// backs, so an unread one is never drained: the work follows the archived
+    /// bytes. `end` is computed from the framing values the `tar` crate itself
+    /// reports (data offset, extension blocks and archived size), never from
+    /// the content.
+    TarSkip {
+        /// Offset of the next header from the start of the archive.
+        end: u64,
+    },
+}
+
 /// What [`check_entry_headers`] learned about an entry besides refusing it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CheckedHeaders {
@@ -94,6 +120,8 @@ pub(crate) struct CheckedHeaders {
     /// The modification time a local PAX `mtime` record declares, when it
     /// parses.
     pub(crate) mtime: Option<SystemTime>,
+    /// How to pass the entry's data when nobody reads it.
+    pub(crate) skip: SkipPlan,
 }
 
 /// Reads a PAX `mtime` value, `-?digits(.digits)?`, as a time. The fraction is
@@ -397,6 +425,33 @@ fn is_plain_base256(field: &[u8]) -> bool {
             .is_some_and(|zeros| zeros.iter().all(|&b| b == 0))
 }
 
+/// The value of an octal field, as the `tar` crate reads it.
+fn octal_value(field: &[u8]) -> Option<u64> {
+    field
+        .iter()
+        .skip_while(|&&b| b == b' ')
+        .take_while(|b| (b'0'..=b'7').contains(b))
+        .try_fold(0u64, |acc, &b| {
+            acc.checked_mul(8)?
+                .checked_add(u64::from(b.checked_sub(b'0')?))
+        })
+}
+
+/// The value of a plain octal or base-256 field, or `None` for any other form.
+fn numeric_value(field: &[u8]) -> Option<u64> {
+    if is_plain_base256(field) {
+        field
+            .get(BASE256_VALUE)
+            .and_then(|value| value.as_array::<8>())
+            .copied()
+            .map(u64::from_be_bytes)
+    } else if is_plain_octal(field) {
+        octal_value(field)
+    } else {
+        None
+    }
+}
+
 fn check_header_fields(header: &Header) -> Result<()> {
     check_header_block(header.as_bytes(), header.as_ustar().is_some())
 }
@@ -448,7 +503,10 @@ pub(crate) fn check_trailing_headers(
 ///
 /// The header's size and checksum fields must be plain octal (or a base-256
 /// size), a header without a ustar magic must leave the `prefix` area empty,
-/// and GNU sparse entries are refused. A local PAX header must have unique,
+/// and GNU sparse entries are refused unless `sparse` is
+/// [`TarSparsePolicy::Expand`], which accepts one whose map every reader reads
+/// the same way (see the `sparse` child module) and no PAX `size` record. A
+/// local PAX header must have unique,
 /// well-formed records, no GNU sparse, `SCHILY.realsize` or `SUN.holesdata`
 /// records and no GNU long name or link record overriding its `path` or
 /// `linkpath`, and no `size` record in the same extension chain as a GNU long
@@ -473,6 +531,7 @@ pub(crate) fn check_entry_headers<R: Read>(
     entry: &mut Entry<'_, R>,
     window: &MetadataWindow<'_>,
     metadata_limit: u64,
+    sparse: TarSparsePolicy,
     preceding: PrecedingEntry,
 ) -> Result<CheckedHeaders> {
     let walk = window::walk_window(
@@ -480,20 +539,46 @@ pub(crate) fn check_entry_headers<R: Read>(
         preceding,
         entry.raw_header_position(),
         entry.raw_file_position(),
+        sparse,
     );
-    let mtime = check_parsed_headers(entry, metadata_limit, &walk)?;
+    let mtime = check_parsed_headers(entry, metadata_limit, sparse, &walk)?;
     walk.outcome?;
     let preceding = if entry.header().entry_type() == EntryType::XGlobalHeader {
         PrecedingEntry::GlobalPax
     } else {
         PrecedingEntry::Other
     };
-    Ok(CheckedHeaders { preceding, mtime })
+    let skip = skip_plan(entry, window)?;
+    Ok(CheckedHeaders {
+        preceding,
+        mtime,
+        skip,
+    })
+}
+
+/// The skip plan of an entry that passed every check: a sparse entry is
+/// skipped by the `tar` crate up to the end of its padded archived bytes.
+fn skip_plan<R: Read>(entry: &Entry<'_, R>, window: &MetadataWindow<'_>) -> Result<SkipPlan> {
+    if entry.header().entry_type() != EntryType::GNUSparse {
+        return Ok(SkipPlan::Drain);
+    }
+    let archived = entry
+        .header()
+        .entry_size()
+        .map_err(|_| TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Size,
+        })?;
+    let end = archived
+        .checked_next_multiple_of(BLOCK as u64)
+        .and_then(|padded| window.end().checked_add(padded))
+        .ok_or(TarAmbiguity::WindowMismatch)?;
+    Ok(SkipPlan::TarSkip { end })
 }
 
 fn check_parsed_headers<R: Read>(
     entry: &mut Entry<'_, R>,
     metadata_limit: u64,
+    sparse: TarSparsePolicy,
     walk: &WindowWalk<'_>,
 ) -> Result<Option<SystemTime>> {
     check_header_fields(entry.header())?;
@@ -501,7 +586,10 @@ fn check_parsed_headers<R: Read>(
         EntryType::XHeader => Err(unrecognized(TarExtensionKind::Pax)),
         EntryType::GNULongName => Err(unrecognized(TarExtensionKind::LongName)),
         EntryType::GNULongLink => Err(unrecognized(TarExtensionKind::LongLink)),
-        EntryType::GNUSparse => Err(TarAmbiguity::SparseEntry.into()),
+        EntryType::GNUSparse => match sparse {
+            TarSparsePolicy::Refuse => Err(TarAmbiguity::SparseEntry.into()),
+            TarSparsePolicy::Expand => check_sparse_headers(entry, walk),
+        },
         EntryType::XGlobalHeader => check_global_header(entry, metadata_limit).map(|()| None),
         kind if kind.as_byte() == b'V' => check_volume_label(entry, walk).map(|()| None),
         _ => check_local_headers(entry, walk),
@@ -546,6 +634,22 @@ fn check_volume_label<R: Read>(entry: &Entry<'_, R>, walk: &WindowWalk<'_>) -> R
         path: crate::bytes_text(&entry.path_bytes()),
     }
     .into())
+}
+
+/// Accepts the PAX records of a sparse entry only when none of them is a
+/// `size`: the `tar` crate applies it to the archived size, other readers to
+/// the real size.
+fn check_sparse_headers<R: Read>(
+    entry: &mut Entry<'_, R>,
+    walk: &WindowWalk<'_>,
+) -> Result<Option<SystemTime>> {
+    if walk.pax.as_ref().is_some_and(|pax| pax.declares_size) {
+        return Err(TarAmbiguity::UnsupportedRecord {
+            key: lossy(PAX_SIZE),
+        }
+        .into());
+    }
+    check_local_headers(entry, walk)
 }
 
 fn check_local_headers<R: Read>(

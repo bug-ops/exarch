@@ -25,6 +25,7 @@ use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::SolidLimits;
 use exarch_core::StripComponents;
+use exarch_core::TarSparsePolicy;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::non_zero_u64;
 use exarch_core::positive_from_i128;
@@ -297,6 +298,8 @@ pub trait PolicyFlags {
     fn limits(&self) -> LimitArgs;
     /// ZIP structure policy.
     fn zip(&self) -> ZipPolicyArgs;
+    /// Old GNU sparse TAR entry policy.
+    fn tar_sparse(&self) -> TarSparseArgs;
     /// Repeated-landing policy.
     fn repeated(&self) -> RepeatedPathsArgs;
     /// Entry selection and path rewrite.
@@ -419,6 +422,33 @@ impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
         match arg {
             ZipConsistencyArg::Enforce => Self::Enforce,
             ZipConsistencyArg::Ignore => Self::Ignore,
+        }
+    }
+}
+
+/// How old GNU sparse (`S`) TAR entries are handled.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TarSparseArg {
+    /// Refuse every GNU sparse entry
+    Refuse,
+    /// Read a GNU sparse entry as a regular file of its real size
+    Expand,
+}
+
+impl TarSparseArg {
+    /// The value as the command line spells it (`--tar-sparse <VALUE>`).
+    pub fn value_name(self) -> String {
+        use clap::ValueEnum as _;
+        self.to_possible_value()
+            .map_or_default(|value| value.get_name().to_owned())
+    }
+}
+
+impl From<TarSparseArg> for TarSparsePolicy {
+    fn from(arg: TarSparseArg) -> Self {
+        match arg {
+            TarSparseArg::Refuse => Self::Refuse,
+            TarSparseArg::Expand => Self::Expand,
         }
     }
 }
@@ -571,6 +601,25 @@ impl ZipPolicyArgs {
     }
 }
 
+/// Old GNU sparse TAR entry flag shared by `extract`, `list` and `verify`, so
+/// all three accept and reject the same archives.
+#[derive(clap::Args, Clone, Copy)]
+pub struct TarSparseArgs {
+    /// How to treat old GNU sparse TAR entries. `expand` reads one as a
+    /// regular file of its real size, holes written as zeros, when every TAR
+    /// reader reads its map the same way; the real size counts against the
+    /// size limits and nothing else
+    #[arg(long, value_enum, default_value_t = TarSparseArg::Refuse)]
+    pub tar_sparse: TarSparseArg,
+}
+
+impl TarSparseArgs {
+    /// Applies the sparse entry policy to `config`.
+    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
+        config.with_tar_sparse(self.tar_sparse.into())
+    }
+}
+
 /// Lookahead memory flag shared by the commands that decode 7z payloads.
 #[derive(clap::Args, Clone, Copy)]
 pub struct ParallelDecodeArgs {
@@ -637,6 +686,9 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
+
+    #[command(flatten)]
+    pub tar_sparse: TarSparseArgs,
 
     #[command(flatten)]
     pub repeated: RepeatedPathsArgs,
@@ -718,6 +770,10 @@ impl PolicyFlags for ExtractArgs {
 
     fn zip(&self) -> ZipPolicyArgs {
         self.zip
+    }
+
+    fn tar_sparse(&self) -> TarSparseArgs {
+        self.tar_sparse
     }
 
     fn repeated(&self) -> RepeatedPathsArgs {
@@ -840,6 +896,9 @@ pub struct ListArgs {
     pub zip: ZipPolicyArgs,
 
     #[command(flatten)]
+    pub tar_sparse: TarSparseArgs,
+
+    #[command(flatten)]
     pub repeated: RepeatedPathsArgs,
 
     #[command(flatten)]
@@ -856,6 +915,10 @@ impl PolicyFlags for ListArgs {
 
     fn zip(&self) -> ZipPolicyArgs {
         self.zip
+    }
+
+    fn tar_sparse(&self) -> TarSparseArgs {
+        self.tar_sparse
     }
 
     fn repeated(&self) -> RepeatedPathsArgs {
@@ -888,6 +951,9 @@ pub struct VerifyArgs {
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
+
+    #[command(flatten)]
+    pub tar_sparse: TarSparseArgs,
 
     #[command(flatten)]
     pub repeated: RepeatedPathsArgs,
@@ -931,6 +997,10 @@ impl PolicyFlags for VerifyArgs {
 
     fn zip(&self) -> ZipPolicyArgs {
         self.zip
+    }
+
+    fn tar_sparse(&self) -> TarSparseArgs {
+        self.tar_sparse
     }
 
     fn repeated(&self) -> RepeatedPathsArgs {

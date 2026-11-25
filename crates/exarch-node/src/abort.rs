@@ -19,7 +19,6 @@ use std::io::SeekFrom;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
@@ -39,6 +38,7 @@ use tokio::sync::Notify;
 
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
+use crate::utils::lock_unpoisoned;
 
 /// Checks that the argument looks like an `AbortSignal` and subscribes
 /// `onAbort(reason)` to it; returns the function that unsubscribes.
@@ -133,10 +133,7 @@ impl AbortWatch {
     }
 
     fn fire(&self, reason: Error) {
-        self.reason
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(reason);
+        lock_unpoisoned(&self.reason).get_or_insert(reason);
         self.aborted.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
@@ -217,13 +214,10 @@ impl AbortHandle {
     /// first time it is taken.
     #[must_use]
     pub fn failure(&self) -> Failure {
-        let reason = self.0.as_ref().and_then(|watch| {
-            watch
-                .reason
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
-        });
+        let reason = self
+            .0
+            .as_ref()
+            .and_then(|watch| lock_unpoisoned(&watch.reason).take());
         ProgressCallbackError::Aborted { reason }.into()
     }
 }

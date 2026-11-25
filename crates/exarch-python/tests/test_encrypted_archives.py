@@ -125,3 +125,27 @@ def test_the_security_config_never_holds_the_password():
 
     assert "password" not in repr(config).lower()
     assert config.max_kdf_work == 1 << 27
+
+
+def test_concurrent_7z_operations_with_different_passwords_each_succeed(temp_dir):
+    """#1352: two 7z archives with different passwords extract on several threads
+    under a tight ``max_kdf_work``. Each operation derives its own keys, so the
+    operations do not evict each other's key and charge it again."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs = [
+        (FIXTURES / "encrypted-header.7z", b"correct-horse"),
+        (FIXTURES / "encrypted-content-plain-header.7z", b"exarch"),
+    ]
+    # The encrypted-header archive adds a fixed header reserve of 2**24 to the budget.
+    config = exarch.SecurityConfig().with_max_kdf_work((1 << 24) + (1 << 21))
+
+    def run(index):
+        archive, secret = jobs[index % 2]
+        report = exarch.extract_archive(
+            archive, temp_dir / f"out-{index}", config, password=bytearray(secret)
+        )
+        return report.files_extracted == 2
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(pool.map(run, range(80)))

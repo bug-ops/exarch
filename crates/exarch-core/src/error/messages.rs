@@ -1614,6 +1614,7 @@ mod tests {
     }
 
     fn every_tar_ambiguity() -> Vec<super::super::tar_ambiguity::TarAmbiguity> {
+        use super::super::tar_ambiguity::SparseMapDefect as Defect;
         use super::super::tar_ambiguity::TarAmbiguity as A;
         use super::super::tar_ambiguity::TarExtensionKind as Ext;
         use super::super::tar_ambiguity::TarHeaderField as Field;
@@ -1659,6 +1660,18 @@ mod tests {
                 path: "d/".into(),
             },
             A::ExtensionBeforeLabel { kind: Ext::Pax },
+            A::SparseMap {
+                defect: Defect::PartialSlot,
+            },
+            A::NonCanonicalNumber {
+                field: Field::SparseOffset,
+            },
+            A::NonCanonicalNumber {
+                field: Field::SparseLength,
+            },
+            A::NonCanonicalNumber {
+                field: Field::RealSize,
+            },
         ]
     }
 

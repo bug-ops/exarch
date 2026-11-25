@@ -68,8 +68,8 @@ impl CommandError {
 pub type CommandResult = Result<Outcome, CommandError>;
 
 /// The configuration `flags` describe on top of `base`: limits, link policy,
-/// ZIP policy, decode lookahead and the path-depth limit, then the selection,
-/// which core checks against that depth.
+/// ZIP and sparse TAR policy, decode lookahead and the path-depth limit, then
+/// the selection, which core checks against that depth.
 ///
 /// # Errors
 ///
@@ -83,6 +83,7 @@ pub fn security_config(
         config = links.apply(config);
     }
     config = flags.zip().apply(config);
+    config = flags.tar_sparse().apply(config);
     config = flags.repeated().apply(config);
     if let Some(parallel) = flags.parallel() {
         config = parallel.apply(config)?;
@@ -125,6 +126,19 @@ mod tests {
             SecurityConfig::default(),
         );
         assert!(within_depth.is_ok(), "{within_depth:?}");
+    }
+
+    #[test]
+    fn tar_sparse_flag_maps_to_the_core_policy() {
+        use exarch_core::TarSparsePolicy;
+        let policy = |extra: &[&str]| {
+            security_config(&extract_flags(extra), SecurityConfig::default())
+                .unwrap()
+                .tar_sparse
+        };
+        assert_eq!(policy(&[]), TarSparsePolicy::Refuse);
+        assert_eq!(policy(&["--tar-sparse", "refuse"]), TarSparsePolicy::Refuse);
+        assert_eq!(policy(&["--tar-sparse", "expand"]), TarSparsePolicy::Expand);
     }
 
     #[test]

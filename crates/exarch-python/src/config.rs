@@ -26,6 +26,7 @@ use exarch_core::RequestedLevel;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::Staging;
 use exarch_core::StripComponents;
+use exarch_core::TarSparsePolicy;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::positive_from_i128;
@@ -494,22 +495,40 @@ impl PySecurityConfig {
         Ok(slf)
     }
 
+    /// Sets how old GNU sparse (`S`) TAR entries are handled.
+    ///
+    /// `"refuse"` (the default, also for `permissive()`) rejects every GNU
+    /// sparse entry. `"expand"` reads one as a regular file of its real size,
+    /// holes written as zeros, when `bsdtar`, Python `tarfile` and the `tar`
+    /// crate read its map the same way; other maps, a PAX `size` record on a
+    /// sparse entry and the PAX sparse forms stay refused. The real size counts
+    /// against `max_file_size` and `max_total_size` and against nothing else,
+    /// because a TAR entry has no compressed size to take a ratio against, and
+    /// the file takes its full size on disk. Listing, verifying and skipping an
+    /// entry read only its archived bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` for any other string.
+    fn with_tar_sparse<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        policy: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.tar_sparse = parse_tar_sparse(policy)?;
+        Ok(slf)
+    }
+
     /// Sets the most SHA-256 rounds of key derivation one operation may
     /// perform.
     ///
-    /// Charged for the keys an archive needs before any encrypted block is
-    /// decoded, and again when another 7z operation of the process replaced
-    /// the cached key with a different one in between (the operation then fails
-    /// with `kdf_cost_exceeded` once the total passes the budget), so encrypted
-    /// 7z operations with different keys that run at the same time can make
-    /// each other fail. 7z operations of one process take turns only during the
-    /// key set-up of each encrypted block and while an encrypted header is
-    /// parsed from bytes already read.
-    ///
-    /// A pipeline that extracts an encrypted 7z from inside an encrypted 7z
-    /// derives the outer key again after every inner operation, so with the
-    /// default budget and 7-Zip's power 19 it is refused after 256 outer
-    /// blocks; raise `max_kdf_work` for such pipelines.
+    /// Each 7z operation derives its AES keys itself and keeps them only for
+    /// that operation, so concurrent operations neither share keys nor wait on
+    /// each other. Admission charges one derivation for every change of key
+    /// parameters in archive order, and the derivations an operation performs
+    /// never exceed that charge (an operation over the budget fails with
+    /// `kdf_cost_exceeded`). A block whose AES coders declare different key
+    /// parameters is refused as an unsupported coder, and an encrypted header
+    /// with more than one AES coder as unreadable.
     ///
     /// Blocks that combine several coders in a layout that is not a plain chain
     /// (such as BCJ2 with several AES coders) are charged for every AES coder,
@@ -829,6 +848,19 @@ impl PySecurityConfig {
         Ok(())
     }
 
+    /// Returns how old GNU sparse TAR entries are handled (`"refuse"` or
+    /// `"expand"`).
+    #[getter]
+    fn get_tar_sparse(&self) -> &'static str {
+        self.inner.tar_sparse.as_str()
+    }
+
+    #[setter]
+    fn set_tar_sparse(&mut self, value: &str) -> PyResult<()> {
+        self.inner.tar_sparse = parse_tar_sparse(value)?;
+        Ok(())
+    }
+
     /// Returns how an archive that names one landing twice is handled
     /// (`"keep_first"` or `"refuse"`).
     #[getter]
@@ -1121,6 +1153,11 @@ fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDe
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
 fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
     parse_one(ConfigSetting::ZipConsistency, value)
+}
+
+/// Parses the string form shared with `TarSparsePolicy::as_str`.
+fn parse_tar_sparse(value: &str) -> PyResult<TarSparsePolicy> {
+    parse_one(ConfigSetting::TarSparse, value)
 }
 
 /// Parses the string form shared with `RepeatedPaths::as_str`.

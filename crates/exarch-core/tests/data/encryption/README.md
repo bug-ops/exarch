@@ -4,5 +4,6 @@ Encrypted fixtures for the #1023 acceptance tests, generated with `7z` (p7zip 17
 - `zipcrypto.zip`: legacy ZipCrypto (`-mem=ZipCrypto`)
 - `content.7z`: 7z, non-solid (`-ms=off`), encrypted content, plain header (`-p`, `-mhc=off`)
 - `header.7z`: 7z, non-solid (`-ms=off`), encrypted header and content (`-mhe=on`)
+- `header-7zz.7z`: 7z, non-solid (`-ms=off`), encrypted header and content (`-mhe=on`), made with 7-Zip 26.06 (`7zz`), same payload and password; header and both blocks share one key (power 19, no salt)
 - `plain.zip`, `plain.7z` (non-solid, `-ms=off`): unencrypted twins
 - `mixed-blocks.7z`: 7z, non-solid (`-ms=off`), plain block `plain.txt` then AES block `sealed.txt` (password `correct-horse`), plain header

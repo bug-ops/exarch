@@ -11,12 +11,24 @@
 //!
 //! Specific constructs that readers parse differently are refused as ambiguous
 //! rather than interpreted: a directory, symlink or hardlink that declares a
-//! payload, GNU sparse entries, signed or control-character size and checksum
+//! payload, GNU sparse entries (unless `tar_sparse` is `Expand`, see below),
+//! signed or control-character size and checksum
 //! fields, a `prefix` field without a ustar magic, duplicate, empty-key,
 //! over-long or `GNU.sparse.*` PAX records, a PAX `path` or `linkpath` stacked
 //! with a GNU long name or link record, and global PAX headers that override
 //! `path`, `linkpath` or `size`, are malformed, or follow a local header or a
 //! GNU long record.
+//!
+//! # Sparse Entries
+//!
+//! With [`TarSparsePolicy::Expand`](crate::TarSparsePolicy) an old GNU sparse
+//! entry (typeflag `S`) is read as a regular file of its real size, its holes
+//! zero-filled, but only when its map reads the same in `bsdtar`, Python
+//! `tarfile` and the `tar` crate. The real size is charged to `max_file_size`
+//! and `max_total_size` and to nothing else, because a TAR entry has no
+//! compressed size to take a ratio against. An entry that nobody reads (listed,
+//! verified, or skipped by a filter) is passed by its archived bytes, so its
+//! holes cost nothing.
 //!
 //! # Format Detection
 //!
@@ -54,7 +66,7 @@
 //! | Symlinks | ✅ Yes | Unix only, requires `config.allowed.symlinks = true` |
 //! | Hardlinks | ✅ Yes | Two-pass extraction, requires `config.allowed.hardlinks = true` |
 //! | Continuous | ✅ Yes | Treated as regular file |
-//! | GNU sparse | ❌ No | Refused as ambiguous |
+//! | GNU sparse | Opt-in | Refused as ambiguous unless `tar_sparse` is `Expand` |
 //! | PAX headers (`XHeader`, `XGlobalHeader`) | Skipped | Format-internal metadata |
 //! | GNU metadata (`GNULongName`, `GNULongLink`) | Skipped | Format-internal metadata |
 //! | Char devices | ❌ No | Rejected with `UnsupportedFeature` error |
@@ -362,7 +374,7 @@ impl<R: Read> TarArchive<R> {
             let guard = entry_result
                 .map_err(|raw| ArchiveError::partial_or(std::mem::take(&mut report), raw))?;
             let mut guard = guard
-                .check(config.max_tar_metadata_bytes.get())
+                .check(config.max_tar_metadata_bytes.get(), config.tar_sparse)
                 .map_err(|e| ArchiveError::partial_or(std::mem::take(&mut report), e))?;
 
             let entry_path = guard
@@ -565,6 +577,10 @@ fn special_entry(kind: SpecialFile) -> ArchiveError {
 
 /// Classifies a non-metadata TAR entry type, refusing special files.
 ///
+/// A GNU sparse entry is a file here: the header check has already refused it
+/// unless `tar_sparse` admits it, and no entry reaches this function before
+/// that check.
+///
 /// # Errors
 ///
 /// Returns [`ArchiveError::SecurityViolation`] for device nodes, FIFOs and any
@@ -573,7 +589,7 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
     use tar::EntryType as TarType;
 
     match kind {
-        TarType::Regular | TarType::Continuous => Ok(TarNode::File),
+        TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(TarNode::File),
         TarType::Directory => Ok(TarNode::Directory),
         TarType::Symlink => Ok(TarNode::Symlink),
         TarType::Link => Ok(TarNode::Hardlink),
@@ -614,7 +630,10 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
             },
         ));
     }
-    let is_file_typed = matches!(kind, tar::EntryType::Regular | tar::EntryType::Continuous);
+    let is_file_typed = matches!(
+        kind,
+        tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse
+    );
     if !is_file_typed || !entry.path_bytes().ends_with(b"/") {
         return Ok(kind);
     }

@@ -56,7 +56,7 @@ let config = SecurityConfig::default()
     ])?); // optional allowlist; an empty list is refused, `ExtensionFilter::Any` is the default
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`, `with_repeated_paths`. On `ExtractionOptions`: `with_staging` (`Staging::{InPlace, Atomic, AtomicReplace}`), `with_existing_files` (`ExistingFiles::{Skip, Overwrite, Refuse}`), `with_decode_reuse`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_solid_archives`, `with_solid_limits`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_tar_sparse`, `with_parallel_decode`, `with_repeated_paths`. On `ExtractionOptions`: `with_staging` (`Staging::{InPlace, Atomic, AtomicReplace}`), `with_existing_files` (`ExistingFiles::{Skip, Overwrite, Refuse}`), `with_decode_reuse`.
 
 ### Request Values
 
@@ -115,7 +115,7 @@ ExtractRequest::new(&config)
     .extract("secret.zip", "out")?;
 ```
 
-Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `UnusablePassword` (a 7z password that is not UTF-8), `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: `sevenz-rust2` keeps the last derived 7z key in process memory until the next derivation or exit, and a 7z password is converted for `sevenz-rust2` without being wiped there.
+Failures are `Violation::Encrypted` under `SECURITY_VIOLATION` / `ENCRYPTED` with a typed `EncryptionRefusal`: `PasswordRequired`, `WrongPassword`, `AuthenticationFailed`, `WrongPasswordOrCorrupt`, `UnusablePassword` (a 7z password that is not UTF-8), `WeakEncryptionRefused` (ZipCrypto, 7z raw-key mode) and `KdfCostExceeded`. `SecurityConfig::max_kdf_work` bounds the key derivation of a 7z operation; ZIP AES costs 1000 PBKDF2 rounds per entry, bounded by `max_file_count`. A password for an archive that is not encrypted is ignored. Residuals: 7z keys are held per operation (the 32-byte keys are zeroized on drop), but the raw `sevenz_rust2::Password` copies inside the decode view are not wiped.
 
 ### Repeated Paths and Occupied Destinations
 

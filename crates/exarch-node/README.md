@@ -170,7 +170,7 @@ encrypted is ignored; a 7z password that is not UTF-8 text throws it with
 data is encrypted, with or without a password. `SecurityConfig.maxKdfWork` bounds the key-derivation work
 of one 7z operation. Zeroization across the binding boundary is best effort.
 
-**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation performs. `sevenz-rust2` keeps one derived key per process, so a key that another 7z operation of the process replaced with a different one in between is charged again, and the operation fails with `kdf_cost_exceeded` once the total passes the budget; encrypted 7z operations with different keys that run at the same time can therefore make each other fail. A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives the outer key again after every inner operation, so with the default budget and 7-Zip's power 19 it is refused after 256 outer blocks; raise `max_kdf_work` for such pipelines. Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives. 7z operations of one process take turns only during the key set-up of each encrypted block and while an encrypted header is parsed from bytes already read.
+**Key-derivation budget.** `max_kdf_work` bounds the key-derivation work that a 7z operation performs. Each 7z operation derives its AES keys itself and keeps them only for that operation, so concurrent operations neither share keys nor wait on each other. Admission charges one derivation for every change of key parameters in archive order, and the derivations an operation performs never exceed that charge; an operation over the budget fails with `kdf_cost_exceeded`. A block whose AES coders declare different key parameters is refused as an unsupported coder, and an encrypted header with more than one AES coder as unreadable. Blocks that combine several coders in a layout that is not a plain chain (such as BCJ2 with several AES coders) are charged for every AES coder, so the budget is reached sooner for such archives.
 
 ### Archives in Memory
 
@@ -550,6 +550,7 @@ const config = new SecurityConfig()
   .withFlatten(true)                          // Land every file under its final component (replaces a strip count)
   .withAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
   .withZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
+  .withTarSparse('expand')                    // Read old GNU sparse TAR entries as files of their real size; 'refuse' (default) rejects them
   .withRepeatedPaths('refuse')                // Reject an archive that names one path twice; 'keep_first' (default) keeps the first copy
   .withParallelDecodeMemory(256 * 1024 * 1024) // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
   .withMaxSolidCompressionRatio(n)            // Ratio limit of a solid 7z block; only while solid archives are allowed
@@ -567,7 +568,7 @@ relaxes it.
 archive keeps in compressed entry data, which decodes part of the archive;
 the default `'skip'` reports them as `'unread'`.
 
-**Getters:** `maxTarMetadataBytes`, `maxDecoderMemory`, `compressedMemberAllowance`, `maxSolidCompressionRatio` (`null` while solid archives are not allowed) and `allowWindowsReservedNames` return the settings above. `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
+**Getters:** `maxTarMetadataBytes`, `maxDecoderMemory`, `compressedMemberAllowance`, `maxSolidCompressionRatio` (`null` while solid archives are not allowed) and `allowWindowsReservedNames` return the settings above. `allowedExtensions` returns the allowlist, or `null` while every extension is allowed. `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `tarSparse` returns `'refuse'` or `'expand'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
 
 ### Selecting and rewriting entries
 

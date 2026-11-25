@@ -6,6 +6,7 @@ use super::header::BlockIndex;
 use super::header::PerBlock;
 use super::header::SevenZHeader;
 use super::header::charge_block_keys;
+use super::raw_key::block_pair;
 use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::Limit;
@@ -452,7 +453,8 @@ pub(super) fn admit_sevenz_block(
 
 /// Admits every AES coder of `block`, in decode order (all of them in listed
 /// order, each in full, when `graph` says the block may be built as a coder
-/// graph).
+/// graph), and refuses a block whose AES coders declare different keys: one
+/// raw password per block cannot serve two.
 pub(super) fn admit_aes_coders(
     block: &sevenz_rust2::Block,
     credentials: &Credentials,
@@ -461,7 +463,10 @@ pub(super) fn admit_aes_coders(
 ) -> std::result::Result<(), Refused> {
     charge_block_keys(block, graph, |source| {
         admit_aes_key(source, credentials, kdf)
-    })
+    })?;
+    block_pair(block)
+        .map(drop)
+        .map_err(|error| Refused::new(UnverifiedReason::NotDecodable, error))
 }
 
 /// Admits one AES key of a block through [`KdfRuns::admit_key`].

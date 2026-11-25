@@ -15,25 +15,27 @@
 
 use std::ops::Range;
 
+use super::BLOCK;
 use super::CHECKSUM_FIELD;
 use super::ParsedPax;
 use super::PrecedingEntry;
 use super::SIZE_FIELD;
 use super::check_header_block;
-use super::is_plain_base256;
 use super::is_plain_octal;
+use super::numeric_value;
+use super::octal_value;
+use super::sparse;
 use crate::Result;
 use crate::TarAmbiguity;
 use crate::TarExtensionKind;
 use crate::TarHeaderField;
+use crate::TarSparsePolicy;
 use crate::formats::tar_metadata_limit::MetadataWindow;
 
-const BLOCK: usize = 512;
 const TYPEFLAG_OFFSET: usize = 156;
 const MAGIC_FIELD: Range<usize> = 257..265;
 const USTAR_MAGIC: &[u8; 8] = b"ustar\x0000";
 const GNU_MAGIC: &[u8; 8] = b"ustar  \0";
-const BASE256_VALUE: Range<usize> = 4..12;
 const CHECKSUM_SPACES: u64 = 8 * b' ' as u64;
 
 fn extension_kind_of(block: &[u8; BLOCK]) -> Option<TarExtensionKind> {
@@ -56,31 +58,8 @@ fn block_at(bytes: &[u8], offset: usize) -> Option<&[u8; BLOCK]> {
         .ok()
 }
 
-fn octal_value(field: &[u8]) -> Option<u64> {
-    field
-        .iter()
-        .skip_while(|&&b| b == b' ')
-        .take_while(|b| (b'0'..=b'7').contains(b))
-        .try_fold(0u64, |acc, &b| {
-            acc.checked_mul(8)?
-                .checked_add(u64::from(b.checked_sub(b'0')?))
-        })
-}
-
 fn declared_size(block: &[u8; BLOCK]) -> Result<u64> {
-    let field = &block[SIZE_FIELD];
-    let value = if is_plain_base256(field) {
-        field
-            .get(BASE256_VALUE)
-            .and_then(|value| value.as_array::<8>())
-            .copied()
-            .map(u64::from_be_bytes)
-    } else if is_plain_octal(field) {
-        octal_value(field)
-    } else {
-        None
-    };
-    value.ok_or_else(|| {
+    numeric_value(&block[SIZE_FIELD]).ok_or_else(|| {
         TarAmbiguity::NonCanonicalNumber {
             field: TarHeaderField::Size,
         }
@@ -132,6 +111,9 @@ pub(super) struct WindowWalk<'w> {
     pub(super) extensions: Vec<TarExtensionKind>,
     /// Whether every block in the window passed.
     pub(super) outcome: Result<()>,
+    /// How many sparse extension blocks follow the final header in the window;
+    /// zero unless the entry is a sparse one that `Expand` accepts.
+    pub(super) chain_blocks: usize,
 }
 
 /// Verifies the bytes `tar` read to reach an entry.
@@ -141,7 +123,9 @@ pub(super) struct WindowWalk<'w> {
 /// long name or link body must be one string ending in a single NUL.
 ///
 /// `header_pos` and `file_pos` are the offsets the `tar` crate reports for the
-/// yielded entry's header and data.
+/// yielded entry's header and data. Under [`TarSparsePolicy::Expand`] a sparse
+/// entry's map is checked and its extension blocks may follow the final header,
+/// so the window ends that many blocks after `file_pos`.
 ///
 /// # Errors
 ///
@@ -158,13 +142,15 @@ pub(super) fn walk_window<'w>(
     preceding: PrecedingEntry,
     header_pos: u64,
     file_pos: u64,
+    sparse: TarSparsePolicy,
 ) -> WindowWalk<'w> {
     let mut walk = WindowWalk {
         pax: None,
         extensions: Vec::new(),
         outcome: Ok(()),
+        chain_blocks: 0,
     };
-    walk.outcome = walk_blocks(window, preceding, header_pos, file_pos, &mut walk);
+    walk.outcome = walk_blocks(window, preceding, header_pos, file_pos, sparse, &mut walk);
     walk
 }
 
@@ -173,6 +159,7 @@ fn walk_blocks<'w>(
     preceding: PrecedingEntry,
     header_pos: u64,
     file_pos: u64,
+    sparse: TarSparsePolicy,
     walk: &mut WindowWalk<'w>,
 ) -> Result<()> {
     let bytes = window.bytes();
@@ -190,7 +177,9 @@ fn walk_blocks<'w>(
             if pax_has_size && has_long {
                 return Err(TarAmbiguity::StackedSizeRecord.into());
             }
-            return check_final_header(window, block, offset, header_pos, file_pos);
+            walk.chain_blocks =
+                check_final_header(window, block, offset, header_pos, file_pos, sparse)?;
+            return Ok(());
         };
         if walk.extensions.contains(&kind) {
             return Err(TarAmbiguity::DuplicateExtensionHeader { kind }.into());
@@ -249,19 +238,40 @@ fn check_long_record(kind: TarExtensionKind, body: &[u8]) -> Result<()> {
     }
 }
 
+/// Checks that the window ends where the `tar` crate says the entry's data
+/// begins, and returns how many sparse extension blocks sit between the final
+/// header and that point.
 fn check_final_header(
     window: &MetadataWindow<'_>,
     block: &[u8; BLOCK],
     offset: usize,
     header_pos: u64,
     file_pos: u64,
-) -> Result<()> {
-    let at_end = offset.checked_add(BLOCK) == Some(window.bytes().len());
+    sparse: TarSparsePolicy,
+) -> Result<usize> {
+    let after_header = offset
+        .checked_add(BLOCK)
+        .ok_or(TarAmbiguity::WindowMismatch)?;
+    let chain_blocks = if sparse == TarSparsePolicy::Expand && block[TYPEFLAG_OFFSET] == b'S' {
+        let chain = window
+            .bytes()
+            .get(after_header..)
+            .ok_or(TarAmbiguity::WindowMismatch)?;
+        sparse::check_map(block, chain)?
+    } else {
+        0
+    };
+    let chain_bytes = chain_blocks
+        .checked_mul(BLOCK)
+        .ok_or(TarAmbiguity::WindowMismatch)?;
+    let at_end = after_header.checked_add(chain_bytes) == Some(window.bytes().len());
     let position = window.start().saturating_add(offset as u64);
-    if !at_end || position != header_pos || window.end() != file_pos {
+    let data_start = file_pos.checked_add(chain_bytes as u64);
+    if !at_end || position != header_pos || data_start != Some(window.end()) {
         return Err(TarAmbiguity::WindowMismatch.into());
     }
-    check_header_block(block, block[MAGIC_FIELD] == *USTAR_MAGIC)
+    check_header_block(block, block[MAGIC_FIELD] == *USTAR_MAGIC)?;
+    Ok(chain_blocks)
 }
 
 #[cfg(test)]
@@ -279,7 +289,14 @@ mod tests {
         header_pos: u64,
         file_pos: u64,
     ) -> Result<()> {
-        walk_window(window, preceding, header_pos, file_pos).outcome
+        walk_window(
+            window,
+            preceding,
+            header_pos,
+            file_pos,
+            TarSparsePolicy::Refuse,
+        )
+        .outcome
     }
 
     fn header_block(typeflag: u8, size: usize) -> Vec<u8> {
@@ -435,6 +452,92 @@ mod tests {
             &TarAmbiguity::NonCanonicalNumber {
                 field: TarHeaderField::Size,
             },
+        );
+    }
+
+    fn octal_field(value: u64) -> Vec<u8> {
+        format!("{value:011o}\0").into_bytes()
+    }
+
+    /// An old GNU sparse header whose four slots are all used, so a chain may
+    /// follow when `extended`.
+    fn sparse_header(extended: bool) -> Vec<u8> {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(tar::EntryType::new(b'S'));
+        header.set_size(2048);
+        let mut bytes = header.as_bytes().to_vec();
+        for index in 0..4u64 {
+            let at = 386 + usize::try_from(index).unwrap() * 24;
+            bytes[at..at + 12].copy_from_slice(&octal_field(index * 1024));
+            bytes[at + 12..at + 24].copy_from_slice(&octal_field(512));
+        }
+        bytes[482] = u8::from(extended);
+        bytes[483..495].copy_from_slice(&octal_field(4096));
+        bytes[CHECKSUM_FIELD].fill(b' ');
+        let sum: u32 = bytes.iter().map(|&b| u32::from(b)).sum();
+        bytes[CHECKSUM_FIELD].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        bytes
+    }
+
+    fn chain_block() -> Vec<u8> {
+        vec![0u8; BLOCK]
+    }
+
+    fn check_sparse<'w>(
+        window: &MetadataWindow<'w>,
+        sparse: TarSparsePolicy,
+        file_pos: u64,
+    ) -> WindowWalk<'w> {
+        walk_window(window, PrecedingEntry::Other, 0, file_pos, sparse)
+    }
+
+    #[test]
+    fn a_sparse_chain_ends_the_window_after_the_extension_blocks() {
+        let bytes = [sparse_header(true), chain_block()].concat();
+        let window = MetadataWindow::new(0, &bytes);
+        let walk = check_sparse(&window, TarSparsePolicy::Expand, 512);
+        walk.outcome.unwrap();
+        assert_eq!(walk.chain_blocks, 1);
+    }
+
+    #[test]
+    fn a_sparse_header_without_a_chain_has_none() {
+        let bytes = sparse_header(false);
+        let window = MetadataWindow::new(0, &bytes);
+        let walk = check_sparse(&window, TarSparsePolicy::Expand, 512);
+        walk.outcome.unwrap();
+        assert_eq!(walk.chain_blocks, 0);
+    }
+
+    #[test]
+    fn a_chain_that_the_header_does_not_announce_is_refused() {
+        let bytes = [sparse_header(false), chain_block()].concat();
+        let window = MetadataWindow::new(0, &bytes);
+        assert_refused(
+            check_sparse(&window, TarSparsePolicy::Expand, 512).outcome,
+            &TarAmbiguity::SparseMap {
+                defect: crate::SparseMapDefect::ExtensionChain,
+            },
+        );
+    }
+
+    #[test]
+    fn a_file_position_that_ignores_the_chain_is_refused() {
+        let bytes = [sparse_header(true), chain_block()].concat();
+        let window = MetadataWindow::new(0, &bytes);
+        assert_refused(
+            check_sparse(&window, TarSparsePolicy::Expand, 1024).outcome,
+            &TarAmbiguity::WindowMismatch,
+        );
+    }
+
+    #[test]
+    fn a_sparse_chain_is_not_walked_under_the_refuse_policy() {
+        let bytes = [sparse_header(true), chain_block()].concat();
+        let window = MetadataWindow::new(0, &bytes);
+        assert_refused(
+            check_sparse(&window, TarSparsePolicy::Refuse, 512).outcome,
+            &TarAmbiguity::WindowMismatch,
         );
     }
 }

@@ -42,6 +42,7 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_TarSparse = Literal["refuse", "expand"]
 _RepeatedPaths = Literal["keep_first", "refuse"]
 _Durability = Literal["synced", "unsynced"]
 _ExistingFiles = Literal["skip", "overwrite", "refuse"]
@@ -187,6 +188,7 @@ _ConfigSetting = Literal[
     "parallel_decode_memory",
     "exclude_pattern",
     "zip_consistency",
+    "tar_sparse",
     "repeated_paths",
     "path_model",
     "archive_format",
@@ -346,23 +348,34 @@ class SecurityConfig:
         """
         ...
 
+    def with_tar_sparse(self, policy: _TarSparse) -> SecurityConfig:
+        """
+        Sets how old GNU sparse (``S``) TAR entries are handled.
+
+        ``"refuse"`` (the default, also for ``permissive()``) rejects every GNU sparse
+        entry. ``"expand"`` reads one as a regular file of its real size, holes written
+        as zeros, when ``bsdtar``, Python ``tarfile`` and the ``tar`` crate read its map
+        the same way; other maps, a PAX ``size`` record on a sparse entry and the PAX
+        sparse forms stay refused. The real size counts against ``max_file_size`` and
+        ``max_total_size`` and against nothing else, because a TAR entry has no
+        compressed size to take a ratio against, and the file takes its full size on
+        disk. Listing, verifying and skipping an entry read only its archived bytes.
+        Raises ``ValueError`` for any other string.
+        """
+        ...
+
     def with_max_kdf_work(self, rounds: int) -> SecurityConfig:
         """
         Sets the most SHA-256 rounds of key derivation one operation may perform
         (default: 2**27).
 
-        Charged for the keys an archive needs before any encrypted block is decoded,
-        and again when another 7z operation of the process replaced the cached key with
-        a different one in between (the operation then fails with ``"kdf_cost_exceeded"``
-        once the total passes the budget), so encrypted 7z operations with different
-        keys that run at the same time can make each other fail. 7z operations of one
-        process take turns only during the key set-up of each encrypted block and while
-        an encrypted header is parsed from bytes already read.
-
-        A pipeline that extracts an encrypted 7z from inside an encrypted 7z derives
-        the outer key again after every inner operation, so with the default budget
-        and 7-Zip's power 19 it is refused after 256 outer blocks; raise
-        ``max_kdf_work`` for such pipelines.
+        Each 7z operation derives its AES keys itself and keeps them only for that
+        operation, so concurrent operations neither share keys nor wait on each other.
+        Admission charges one derivation for every change of key parameters in archive
+        order, and the derivations an operation performs never exceed that charge (an
+        operation over the budget fails with ``"kdf_cost_exceeded"``). A block whose AES
+        coders declare different key parameters is refused as an unsupported coder, and
+        an encrypted header with more than one AES coder as unreadable.
 
         Blocks that combine several coders in a layout that is not a plain chain
         (such as BCJ2 with several AES coders) are charged for every AES coder, so
@@ -664,6 +677,13 @@ class SecurityConfig:
 
     @zip_consistency.setter
     def zip_consistency(self, value: _ZipConsistency) -> None: ...
+    @property
+    def tar_sparse(self) -> _TarSparse:
+        """How old GNU sparse TAR entries are handled (default: ``"refuse"``)."""
+        ...
+
+    @tar_sparse.setter
+    def tar_sparse(self, value: _TarSparse) -> None: ...
     @property
     def max_kdf_work(self) -> int:
         """Most SHA-256 rounds of key derivation one operation may perform (default: 2**27)."""

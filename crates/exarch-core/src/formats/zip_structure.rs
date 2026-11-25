@@ -98,7 +98,6 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::PoisonError;
 
 use zip::CompressionMethod;
 use zip::ZipArchive as ZipReader;
@@ -155,6 +154,7 @@ use crate::error::ZipStreamUndecided;
 use crate::error::ZipUncomparable;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::security::zipbomb::Uncompressed;
+use crate::sync::lock_unpoisoned;
 use resume::DESCRIPTOR_LOOKAHEAD;
 use resume::DescriptorExit;
 use resume::DescriptorWidth;
@@ -423,7 +423,7 @@ impl<R> Shared<R> {
     }
 
     fn lock(&self) -> MutexGuard<'_, Windowed<R>> {
-        self.reader.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_unpoisoned(&self.reader)
     }
 
     fn note(&self, error: std::io::Error) -> std::io::Error {

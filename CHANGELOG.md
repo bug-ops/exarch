@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TAR: opt-in `tar_sparse` / `--tar-sparse expand` extracts old GNU sparse entries, counting the real size against the size quotas, and refuses sparse maps that readers parse differently; PAX sparse records stay refused (#1349, #1372).
+
 ### Breaking
 
+- Core API: `TarAmbiguity::SparseMap`, `SparseMapDefect`, `TarSparsePolicy` and new `TarHeaderField` variants for the sparse policy; `SecurityConfig` gains a `tar_sparse` field (#1349, #1372).
+- 7z: archives whose AES coders in one block declare different key parameters, or whose encrypted header has several AES coders, are refused; 7-Zip does not write them (#1351, #1352, #1372).
 - Core API: `Violation::UnsupportedTarType` carries a `TarTypeflag` and reads `unsupported entry type: 'D' (0x44)` (#1306).
 - Core API: `Malformation::EntryNameUnreadable`, `ZipEntryUnreadable`, `ZipEntryOpenFailed` and `ZipEntryRereadFailed` carry `ZipEntryIndex` instead of `usize` (#1306).
 - Creation: a file whose name `--strip-prefix` empties fails `InvalidConfiguration` whether named or walked, also when over `--max-file-size` or special, and skips name the entry, not the source path (#1306).
@@ -21,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- 7z: one KDF charge walk serves admission and the runtime check, the key-slot fingerprint is owned by the AES turn, the encrypted header is read before the turn, and a block led by its only AES coder releases the turn before its decoder first reads the source (#1363).
+- 7z: one KDF charge walk serves admission and the runtime check, and the encrypted header is read before any key is derived (#1363).
+- 7z: each operation derives its own AES keys and hands them to the decoder in raw-key form, so the process-wide key slot and the AES turn are gone and operations no longer wait for or evict each other (#1351, #1352, #1372).
+- Core: one shared poisoned-lock recovery helper per crate replaces the duplicated `lock().unwrap_or_else(PoisonError::into_inner)` calls (#1362, #1372).
 - Core: one landing check for banned path components, typed owner and mode predicates for staging trust checks, and `FileWrite` drops its unused mode and marking (#1363).
 - CLI: tar ambiguity refusals get a hint that matches the refusal, in place of "may be corrupted" (#1363).
 - Dependencies: zstd 0.14.5 (libzstd 1.6.0) in both lockfiles, fixing CVE-2026-124851 (#1363).
@@ -48,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Staging: an atomic extract of an archive with subdirectories under an owner-restricting umask reports the umask and always removes the staging directory (#1339) (#1347).
 - Paths: banned path components match with Unicode normalization and case folding, ignoring characters HFS+ skips, a banned name made only of such characters is refused as empty, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink (#1348).
-- 7z: concurrent encrypted operations in one process are charged for the key derivations they cause against `max_kdf_work`, so a key replaced by another operation is charged again, and concurrent operations with different keys can fail with `KdfCostExceeded` partway through; a refusal stays in force for the rest of the operation, and blocks with several AES coders on a non-linear layout are charged per coder, a pipeline that extracts an encrypted 7z from inside another needs a higher `max_kdf_work` (#1348).
+- 7z: key derivations are charged against `max_kdf_work` per operation, a refusal stays in force for the rest of the operation, and blocks with several AES coders on a non-linear layout are charged per coder (#1348).
 - Staging: recover `0700` owner bits on freshly created staging directories under owner-restricting umasks (e.g. `0277`) and report the umask clearly when the directory cannot be opened (#1311), only classifying `unopenable_error` as a umask error when `0o077` group/other bits are clear (#1325).
 - Tests: made `test_create_tar_directory_mode_without_preserve_permissions` umask-independent (#1310), and gated `std::path::Path` under `#[cfg(feature = "encryption")]` in `sevenz_mode_and_ppmd_key` so integration tests compile with `--no-default-features` (#1326).
 

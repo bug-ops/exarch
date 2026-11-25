@@ -250,7 +250,7 @@ exarch create --threads 4 archive.zip ./data
 | `--follow-symlinks` | | Follow symbolic links |
 | `--include-hidden` | | Include hidden files |
 | `--exclude` | `-x` | Exclude pattern (repeatable) |
-| `--strip-prefix` | | Strip path prefix |
+| `--strip-prefix` | | Strip path prefix; a file whose name the prefix empties fails with `InvalidConfiguration` |
 | `--max-file-size` | — | Skip source files larger than this threshold (supports K/M/G/T suffixes) |
 | `--preserve-permissions` | true | Store Unix permissions in the archive; pass `--preserve-permissions=false` for a portable archive |
 | `--threads` | | Compress ZIP entries on up to N threads; the archive bytes do not change and other formats ignore it (default: one thread) |
@@ -320,7 +320,7 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 
 | Option | Description |
 |--------|-------------|
-| `--strict` | Exit with code 3 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
+| `--strict` | Exit with code 3 if the report contains warnings (e.g. setuid, setgid or sticky bits, world-writable files; ZIP and 7z modes are reported like TAR). Without this flag, warnings result in exit 0. |
 | `--check-integrity` | Decode the payload to its end to verify checksums and codec framing. Integrity is `INCOMPLETE` when part of it could not be verified (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker); exit code 0 does not mean integrity `OK`, use `--strict` to exit 3 |
 | `--decompression-budget` | Extra bytes `--check-integrity` may decode beyond listing (default 500M, independent of `--max-total-size`); requires `--check-integrity` |
 | `--max-files` | Maximum number of entries to scan |

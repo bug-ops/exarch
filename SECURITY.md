@@ -28,6 +28,7 @@ This library implements archive extraction with security as a primary design goa
 - **Symlink Escape Prevention**: Validates symlink targets to ensure they stay within bounds
 - **Hardlink Escape Prevention**: Validates hardlink targets (when enabled)
 - **Null Byte Injection Prevention**: Rejects paths containing null bytes
+- **Windows Short-Name Aliases**: On Windows, an existing entry named by an alternate 8.3 spelling (for example `PROGRA~1`) is refused in extraction paths and link targets, because it can name another file than the spelling suggests
 
 ### Resource Protection
 
@@ -47,10 +48,29 @@ This library implements archive extraction with security as a primary design goa
 
 When the destination of a TAR extraction does not exist yet (and its parent does), `exarch extract` extracts into a hidden staging directory and renames it into place only on success. A refusal anywhere in the archive leaves nothing on disk and is reported with `writes: "rolled_back"`. A process killed mid-extraction leaves its `.exarch-XXXXXX` staging directory next to the destination; delete it by hand.
 
+Under an owner-restricting umask (for example `0277`) the staging directory cannot be opened for an archive with subdirectories. The extraction fails with an error that names the umask and removes the staging directory.
+
+### File Permissions
+
+Extraction applies the permission policy in every format (TAR, ZIP and 7z):
+
+- **Default**: a file gets its archive mode minus the process umask; execute bits are kept
+- **`--preserve-permissions`** (`PermissionPolicy::Preserve`): a file gets its archive mode exactly, after sanitizing
+- **Always stripped**: setuid, setgid and sticky bits on regular files, and world-writable bits unless `--allow-world-writable` is set (the umask still applies unless `--preserve-permissions` is set)
+
+`list` reports the stored mode of ZIP and 7z files, including special bits. `verify` reports a regular file with a setuid, setgid or sticky bit as an `InvalidPermissions` finding, and `verify --strict` exits with status 3 on it.
+
+### Format-Specific Refusals
+
+- **TAR sparse entries**: old GNU sparse entries are refused by default. `--tar-sparse expand` (`tar_sparse` in the Python and Node options, `TarSparsePolicy` in Rust) extracts one as a regular file of its real size, holes written as zeros, and counts the real size against the size limits. A sparse map that TAR readers parse differently stays refused, and PAX sparse records (`GNU.sparse.*`, `SUN.holesdata`) are always refused
+- **Encrypted ZIP and 7z**: key derivations are charged against a work budget per operation, and a refusal stays in force for the rest of the operation. Each operation derives its own keys, so concurrent operations neither share nor evict keys
+- **7z AES coders**: a block whose AES coders declare different key parameters, and an encrypted header with several AES coders, are refused; 7-Zip does not write either
+
 ### Component Filtering
 
 - **Banned Components**: Default deny-list for sensitive directories (`.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env`)
-- **Case-Insensitive Matching**: Prevents bypass on case-insensitive filesystems
+- **Normalized Matching**: Names compare after Unicode canonical decomposition and case folding, and characters that HFS+ ignores when it compares names (U+200C to U+200F, U+202A to U+202E, U+206A to U+206F, U+FEFF) are dropped first, so a ban holds on case-insensitive and normalizing filesystems. A banned name made only of such characters is rejected as a configuration error
+- **Links**: Symlink and hardlink targets are checked for banned components too, and entry paths, symlink targets and hardlink targets are also checked on their resolved location when they pass through a symlink
 - **Extension Filtering**: Optional allowlist for file extensions
 
 ### Configuration
